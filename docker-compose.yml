@@ -1,0 +1,72 @@
+name: starfish-stack
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:14032}
+    container_name: starfish-frontend
+    ports:
+      - "${FRONTEND_HOST_PORT:-17327}:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: starfish-backend
+    ports:
+      - "14032:14032"
+    env_file:
+      - ./backend/.env
+    depends_on:
+      - postgres
+      - neo4j
+      - redis
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: starfish-postgres
+    environment:
+      POSTGRES_DB: starfish
+      POSTGRES_USER: starfish
+      POSTGRES_PASSWORD: starfish
+    ports:
+      - "${POSTGRES_HOST_PORT:-15432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  neo4j:
+    image: neo4j:5.26-community
+    container_name: starfish-neo4j
+    environment:
+      NEO4J_AUTH: neo4j/starfish
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 512m
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: starfish-redis
+    ports:
+      - "${REDIS_HOST_PORT:-16379}:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  neo4j_data:
+  redis_data:

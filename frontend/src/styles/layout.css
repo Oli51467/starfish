@@ -1,0 +1,115 @@
+.app {
+  min-height: 100vh;
+  background: var(--bg);
+}
+
+.header {
+  height: 70px;
+  border-bottom: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 16px;
+  padding: 0 20px;
+  background: var(--bg);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  min-width: 220px;
+}
+
+.brand-logo {
+  width: 196px;
+  height: 46px;
+  object-fit: contain;
+  display: block;
+}
+
+.workspace {
+  position: relative;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 20px;
+  display: grid;
+  gap: 14px;
+}
+
+.workspace::before {
+  content: '';
+  position: absolute;
+  inset: 20px;
+  background-image: radial-gradient(rgba(0, 0, 0, 0.065) 0.65px, transparent 0.65px);
+  background-size: 14px 14px;
+  opacity: 0.4;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.workspace > * {
+  position: relative;
+  z-index: 1;
+}
+
+.workspace.workspace-single {
+  min-height: calc(100vh - 70px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-soft);
+}
+
+.panel-head {
+  min-height: 48px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.panel-head h2 {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.panel-body {
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+@media (max-width: 768px) {
+  .header {
+    height: 58px;
+    padding: 0 14px;
+  }
+
+  .brand-logo {
+    width: 164px;
+    height: 38px;
+  }
+
+  .workspace {
+    padding: 14px;
+  }
+
+  .workspace.workspace-single {
+    min-height: calc(100vh - 58px);
+  }
+
+  .workspace::before {
+    inset: 14px;
+  }
+}

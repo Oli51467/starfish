@@ -1,0 +1,15 @@
+:root {
+  --bg: #ffffff;
+  --text: #000000;
+  --muted: #666666;
+  --line: #eaeaea;
+  --line-2: #e0e0e0;
+  --panel: #fafafa;
+  --accent: #ff5722;
+  --success: #4caf50;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --shadow-soft: 0 2px 8px rgba(0, 0, 0, 0.06);
+}

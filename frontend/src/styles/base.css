@@ -1,0 +1,89 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Space Grotesk', 'Noto Sans SC', sans-serif;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+p,
+h1,
+h2,
+h3,
+ul,
+ol {
+  margin: 0;
+}
+
+.mono {
+  font-family: 'JetBrains Mono', 'Noto Sans SC', monospace;
+  letter-spacing: 0.01em;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.btn {
+  border: 1px solid var(--line-2);
+  background: #fff;
+  color: var(--text);
+  border-radius: var(--radius-md);
+  height: 34px;
+  padding: 0 12px;
+  font-size: 12px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.btn:hover {
+  background: #f5f5f5;
+}
+
+.btn:disabled {
+  cursor: not-allowed;
+  color: #9b9b9b;
+  background: #fbfbfb;
+}
+
+.btn.btn-accent {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.field-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.text-input,
+.number-input {
+  width: 100%;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-sm);
+  background: #fff;
+  color: var(--text);
+  padding: 10px;
+}
+
+.text-input:focus,
+.number-input:focus {
+  outline: 0;
+  border-color: #c8c8c8;
+}

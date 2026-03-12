@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.DS_Store
+
+backend/.env
+frontend/.env
+PRD.md
