@@ -3,6 +3,10 @@ from __future__ import annotations
 from functools import lru_cache
 import os
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 class Settings:
     def __init__(self) -> None:
@@ -35,6 +39,10 @@ class Settings:
         self.neo4j_uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
         self.neo4j_username = os.getenv("NEO4J_USERNAME", "neo4j")
         self.neo4j_password = os.getenv("NEO4J_PASSWORD", "starfish")
+        self.neo4j_connect_retries = max(1, int(os.getenv("NEO4J_CONNECT_RETRIES", "3")))
+        self.neo4j_connect_retry_interval_seconds = max(
+            0.1, float(os.getenv("NEO4J_CONNECT_RETRY_INTERVAL_SECONDS", "0.8"))
+        )
         self.redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
         self.http_timeout_seconds = float(os.getenv("HTTP_TIMEOUT_SECONDS", "10"))

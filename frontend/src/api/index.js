@@ -30,6 +30,22 @@ export function getMap(mapId) {
   return request(`/api/map/${mapId}`);
 }
 
+export function buildKnowledgeGraph(payload) {
+  return request('/api/graphrag/build', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+}
+
+export function getKnowledgeGraph(graphId) {
+  return request(`/api/graphrag/${encodeURIComponent(graphId)}`);
+}
+
+export function getNeo4jStatus() {
+  return request('/api/graphrag/neo4j/status');
+}
+
 export function getReadingList(mapId, { focusArea = '', maxPapers = 20 } = {}) {
   const query = new URLSearchParams();
   if (focusArea) query.set('focus_area', focusArea);

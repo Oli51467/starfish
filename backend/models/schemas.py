@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 InputType = Literal["arxiv_id", "doi", "pdf", "github_url"]
+PaperInputType = Literal["arxiv_id", "doi", "paper_id"]
 TrendLabel = Literal["rising", "stable", "saturated", "emerging"]
 TaskStatus = Literal["pending", "processing", "completed", "failed"]
 CitationRelationType = Literal[
@@ -17,6 +18,8 @@ CitationRelationType = Literal[
 ]
 GapType = Literal["method_scene", "stagnant", "island", "contradiction"]
 GraphRole = Literal["hub", "bridge", "leaf"]
+KnowledgeNodeType = Literal["paper", "entity", "domain"]
+KnowledgeEdgeType = Literal["mentions", "belongs_to", "related", "covers"]
 
 
 class HealthResponse(BaseModel):
@@ -68,6 +71,71 @@ class MapResponse(BaseModel):
     edges: list[MapEdge] = Field(default_factory=list)
     trend_summary: str
     generated_at: datetime
+
+
+class KnowledgeGraphBuildRequest(BaseModel):
+    query: str = Field(..., min_length=2)
+    max_papers: int = Field(default=12, ge=3, le=30)
+    max_entities_per_paper: int = Field(default=6, ge=2, le=12)
+
+
+class KnowledgeGraphNode(BaseModel):
+    id: str
+    label: str
+    type: KnowledgeNodeType
+    size: float = Field(default=1.0, ge=1.0)
+    score: float = Field(default=0.0, ge=0.0, le=1.0)
+    paper_id: str | None = None
+    meta: dict[str, str] = Field(default_factory=dict)
+
+
+class KnowledgeGraphEdge(BaseModel):
+    source: str
+    target: str
+    relation: KnowledgeEdgeType
+    weight: float = Field(default=0.1, ge=0.0, le=1.0)
+    meta: dict[str, str] = Field(default_factory=dict)
+
+
+class KnowledgeGraphResponse(BaseModel):
+    graph_id: str
+    query: str
+    paper_count: int = Field(ge=0)
+    entity_count: int = Field(ge=0)
+    domain_count: int = Field(ge=0)
+    nodes: list[KnowledgeGraphNode] = Field(default_factory=list)
+    edges: list[KnowledgeGraphEdge] = Field(default_factory=list)
+    stored_in_neo4j: bool = False
+    summary: str
+    generated_at: datetime
+
+
+class Neo4jStatusResponse(BaseModel):
+    available: bool
+
+
+class PaperReference(BaseModel):
+    paper_id: str
+    title: str
+    year: int | None = None
+    citation_count: int = Field(default=0, ge=0)
+
+
+class PaperMetadataResponse(BaseModel):
+    source: str = "semantic_scholar"
+    input_type: PaperInputType
+    input_value: str
+    paper_id: str
+    title: str
+    year: int | None = None
+    authors: list[str] = Field(default_factory=list)
+    venue: str
+    citation_count: int = Field(ge=0)
+    reference_count: int = Field(ge=0)
+    abstract: str
+    url: str | None = None
+    external_ids: dict[str, str] = Field(default_factory=dict)
+    references: list[PaperReference] = Field(default_factory=list)
 
 
 class ReadingPaper(BaseModel):

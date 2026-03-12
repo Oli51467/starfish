@@ -24,9 +24,12 @@ services:
     env_file:
       - ./backend/.env
     depends_on:
-      - postgres
-      - neo4j
-      - redis
+      postgres:
+        condition: service_started
+      neo4j:
+        condition: service_healthy
+      redis:
+        condition: service_started
     restart: unless-stopped
 
   postgres:
@@ -53,6 +56,12 @@ services:
     ports:
       - "7474:7474"
       - "7687:7687"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -lc 'exec 3<>/dev/tcp/localhost/7687'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 8s
     volumes:
       - neo4j_data:/data
     restart: unless-stopped

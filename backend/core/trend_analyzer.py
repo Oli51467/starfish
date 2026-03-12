@@ -4,7 +4,7 @@ from models.schemas import TrendLabel
 
 
 class TrendAnalyzer:
-    """Skeleton trend scoring helper."""
+    """Trend scoring and label helper."""
 
     @staticmethod
     def classify_by_score(score: float, paper_count: int) -> TrendLabel:
@@ -15,3 +15,16 @@ class TrendAnalyzer:
         if score >= 0.45:
             return "stable"
         return "saturated"
+
+    @staticmethod
+    def classify_by_growth(paper_growth_percent: float, paper_count: int, score: float) -> TrendLabel:
+        # Rule priority follows PRD definitions.
+        if paper_count < 50 and paper_growth_percent > 100:
+            return "emerging"
+        if paper_growth_percent > 200:
+            return "rising"
+        if 50 <= paper_growth_percent <= 200:
+            return "stable"
+        if paper_growth_percent < 50 and paper_count > 500:
+            return "saturated"
+        return TrendAnalyzer.classify_by_score(score, paper_count)

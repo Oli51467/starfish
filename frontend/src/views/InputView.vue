@@ -2,7 +2,7 @@
   <section class="seed-workspace home-two-layer" :class="{ 'is-started': isInputVisible }">
     <WorkflowShowcase :steps="workflowSteps" :started="isInputVisible" @start="isInputVisible = true" />
 
-    <form v-if="isInputVisible" class="seed-input-shell panel" @submit.prevent="startMapGeneration">
+    <form v-if="isInputVisible" class="seed-input-shell panel" @submit.prevent="startAnalysis">
       <div class="seed-input-row">
         <CustomSelect
           id="input-type"
@@ -16,13 +16,11 @@
           v-model="mapInput.input_value"
           placeholder="输入论文标题、摘要、DOI、arXiv ID 或链接"
         />
-        <button class="btn btn-accent mono seed-submit-btn" type="submit" :disabled="loading || !mapInput.input_value.trim()">
-          {{ loading ? '处理中' : '开始分析' }}
+        <button class="btn btn-accent mono seed-submit-btn" type="submit" :disabled="!mapInput.input_value.trim()">
+          开始分析
         </button>
       </div>
     </form>
-
-    <ErrorBoundary :message="errorMessage" />
   </section>
 </template>
 
@@ -30,9 +28,10 @@
 import { ref } from 'vue';
 
 import CustomSelect from '../components/common/CustomSelect.vue';
-import ErrorBoundary from '../components/common/ErrorBoundary.vue';
 import WorkflowShowcase from '../components/home/WorkflowShowcase.vue';
 import { useMapStore } from '../stores/mapStore';
+
+const emit = defineEmits(['start-analysis']);
 
 const workflowSteps = [
   { key: 'retrieval', title: '知识检索', detail: '聚合论文、数据与背景资料，形成可用语料。' },
@@ -49,6 +48,15 @@ const inputTypeOptions = [
 ];
 
 const isInputVisible = ref(false);
+const { mapInput } = useMapStore();
 
-const { mapInput, loading, errorMessage, startMapGeneration } = useMapStore();
+function startAnalysis() {
+  const value = mapInput.value.input_value.trim();
+  if (!value) return;
+  emit('start-analysis', {
+    input_type: mapInput.value.input_type,
+    input_value: value,
+    depth: mapInput.value.depth || 2
+  });
+}
 </script>

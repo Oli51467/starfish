@@ -5,10 +5,10 @@
 
 .header {
   height: 70px;
-  border-bottom: none;
+  border-bottom: 1px solid var(--line);
   display: flex;
   align-items: center;
-  justify-content: flex-start;
+  justify-content: space-between;
   gap: 16px;
   padding: 0 20px;
   background: var(--bg);
@@ -20,7 +20,70 @@
 .header-left {
   display: flex;
   align-items: center;
+  gap: 2px;
   min-width: 220px;
+}
+
+.header-back-icon-btn {
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  background: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+}
+
+.header-back-icon-btn svg {
+  width: 16px;
+  height: 16px;
+  fill: #252525;
+}
+
+.header-step-inline {
+  margin: 0;
+  font-size: 13px;
+  color: #2a2a2a;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.header-step-strong {
+  font-weight: 700;
+}
+
+.header-actions {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 16px;
+  justify-content: flex-end;
+}
+
+.header-github-link {
+  height: 36px;
+  border-radius: var(--radius-sm);
+  background: #111;
+  border: 1px solid #111;
+  color: #fff;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 12px;
+  font-size: 12px;
+}
+
+.header-github-icon {
+  width: 14px;
+  height: 14px;
+  display: block;
+  fill: #fff;
 }
 
 .brand-logo {
@@ -60,6 +123,14 @@
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.workspace.workspace-workflow {
+  min-height: calc(100vh - 70px);
+  align-content: flex-start;
+  max-width: 100%;
+  padding-left: 16px;
+  padding-right: 16px;
 }
 
 .panel {
@@ -109,7 +180,33 @@
     min-height: calc(100vh - 58px);
   }
 
+  .workspace.workspace-workflow {
+    min-height: calc(100vh - 58px);
+  }
+
   .workspace::before {
     inset: 14px;
+  }
+
+  .header-left {
+    min-width: 146px;
+    gap: 2px;
+  }
+
+  .header-actions {
+    gap: 12px;
+  }
+
+  .header-back-icon-btn {
+    width: 34px;
+    height: 34px;
+  }
+
+  .header-github-link {
+    padding: 0 10px;
+  }
+
+  .header-step-inline {
+    font-size: 12px;
   }
 }

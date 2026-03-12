@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from external.arxiv_client import ArxivClient
 from external.github_client import GitHubClient
-from external.semantic_scholar import SemanticScholarClient
+from external.semantic_scholar import (
+    SemanticScholarClient,
+    SemanticScholarClientError,
+    SemanticScholarNotFoundError,
+)
 
 
 class PaperFetcher:
@@ -13,14 +17,46 @@ class PaperFetcher:
         self.arxiv = ArxivClient()
         self.github = GitHubClient()
 
-    def fetch_seed_document(self, input_type: str, input_value: str) -> dict:
+    def fetch_seed_document(
+        self,
+        input_type: str,
+        input_value: str,
+        reference_limit: int = 20,
+        citation_limit: int = 20,
+    ) -> dict:
         input_type = input_type.strip().lower()
         value = input_value.strip()
 
         if input_type == "arxiv_id":
-            paper = self.arxiv.fetch_by_id(value)
+            try:
+                paper = self.semantic.fetch_paper_by_arxiv_id(
+                    value,
+                    reference_limit=reference_limit,
+                    citation_limit=citation_limit,
+                )
+            except (SemanticScholarNotFoundError, SemanticScholarClientError):
+                # Fallback for index lag or unauthenticated rate limits.
+                paper = self.arxiv.fetch_by_id(value)
         elif input_type == "doi":
-            paper = self.semantic.fetch_paper(value)
+            try:
+                paper = self.semantic.fetch_paper_by_doi(
+                    value,
+                    reference_limit=reference_limit,
+                    citation_limit=citation_limit,
+                )
+            except SemanticScholarClientError:
+                paper = {
+                    "paper_id": f"doi:{value}",
+                    "title": f"DOI Paper {value}",
+                    "year": 2024,
+                    "authors": ["Unknown"],
+                    "venue": "DOI",
+                    "citation_count": 0,
+                    "reference_count": 0,
+                    "abstract": "Semantic Scholar unavailable, using DOI fallback metadata.",
+                    "references": [],
+                    "citations": [],
+                }
         elif input_type == "github_url":
             repo = self.github.fetch_repo(value)
             paper = {
@@ -43,7 +79,25 @@ class PaperFetcher:
                 "abstract": "PDF parsing is mocked in skeleton stage.",
             }
         else:
-            paper = self.semantic.fetch_paper(value)
+            try:
+                paper = self.semantic.fetch_paper(
+                    value,
+                    reference_limit=reference_limit,
+                    citation_limit=citation_limit,
+                )
+            except SemanticScholarClientError:
+                paper = {
+                    "paper_id": value,
+                    "title": f"Paper {value}",
+                    "year": 2024,
+                    "authors": ["Unknown"],
+                    "venue": "Unknown Venue",
+                    "citation_count": 0,
+                    "reference_count": 0,
+                    "abstract": "Semantic Scholar unavailable, using fallback metadata.",
+                    "references": [],
+                    "citations": [],
+                }
 
         return {
             "input_type": input_type,

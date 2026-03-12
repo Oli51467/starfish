@@ -4,7 +4,8 @@ import { generateMap, getMap, getTask } from '../api';
 
 const mapInput = ref({
   input_type: 'arxiv_id',
-  input_value: ''
+  input_value: '',
+  depth: 2
 });
 
 const task = ref(null);
@@ -35,7 +36,8 @@ async function startMapGeneration() {
   try {
     const created = await generateMap({
       input_type: mapInput.value.input_type,
-      input_value: mapInput.value.input_value.trim()
+      input_value: mapInput.value.input_value.trim(),
+      depth: Math.min(4, Math.max(1, Number(mapInput.value.depth) || 2))
     });
 
     task.value = { ...created, progress: 0 };

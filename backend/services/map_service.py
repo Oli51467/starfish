@@ -39,9 +39,12 @@ class MapService:
             )
             await asyncio.sleep(self.settings.task_progress_step_seconds)
 
+            breadth = min(200, 30 + request.depth * 35)
             seed_document = self.paper_fetcher.fetch_seed_document(
                 input_type=request.input_type,
                 input_value=request.input_value,
+                reference_limit=breadth,
+                citation_limit=breadth,
             )
 
             self.task_manager.update_task(
