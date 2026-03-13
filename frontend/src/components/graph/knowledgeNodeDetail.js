@@ -116,6 +116,28 @@ function resolveDomainKeywords(nodeName, relatedPapers) {
   return inferred.length ? inferred : ['Domain', 'Research', 'Topic'];
 }
 
+function toPercentText(value) {
+  const ratio = clamp(parseSafeFloat(value, 0), 0, 1);
+  return `${Math.round(ratio * 100)}%`;
+}
+
+function splitPipeText(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return [];
+  return raw
+    .split('|')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function statusText(value) {
+  const key = String(value || '').toLowerCase();
+  if (key === 'emerging') return '新兴';
+  if (key === 'growing') return '爆发';
+  if (key === 'saturated') return '饱和';
+  return '成熟';
+}
+
 function buildPaperDetail(node) {
   const name = resolveNodeName(node);
   const relevance = normalizeRate(node?.relevance ?? node?.meta?.relevance ?? 0);
@@ -161,6 +183,15 @@ function buildDomainDetail(node) {
   const relatedPapers = Array.isArray(node?.meta?.related_papers) ? node.meta.related_papers : [];
   const paperCount = parseSafeInt(node?.meta?.paper_count, relatedPapers.length);
   const keywords = resolveDomainKeywords(name, relatedPapers);
+  const methods = splitPipeText(node?.meta?.methods);
+  const recentRatio = clamp(parseSafeFloat(node?.meta?.recent_ratio, 0), 0, 1);
+  const avgCitations = parseSafeInt(node?.meta?.avg_citations, 0);
+  const provider = String(node?.meta?.provider_used || '').trim() || 'none';
+  const domainCorePapers = relatedPapers.slice(0, 3).map((paper) => ({
+    title: String(paper?.title || '').trim(),
+    year: parseSafeInt(paper?.year, 0),
+    citationCount: parseSafeInt(paper?.citation_count, 0)
+  })).filter((paper) => paper.title);
 
   return {
     id: node.id,
@@ -177,6 +208,12 @@ function buildDomainDetail(node) {
     authorVenueText: `领域覆盖 ${paperCount} 篇论文`,
     abstractSnippet: `该领域与输入论文的关联度为 ${formatPercent(relevance)}。`,
     keywords,
+    domainStatusText: statusText(node?.meta?.status),
+    domainRecentRatioText: toPercentText(recentRatio),
+    domainAvgCitationsText: avgCitations.toLocaleString(),
+    domainProviderText: provider,
+    domainMethods: methods,
+    domainCorePapers,
     domainPaperCountText: String(paperCount),
     domainTopPaperText: relatedPapers[0]?.title || '暂无代表论文',
     domainRelatedPapers: relatedPapers

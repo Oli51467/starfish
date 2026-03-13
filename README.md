@@ -2,9 +2,11 @@
   <img src="frontend/public/assets/brand/logo-light.png" alt="StarFish Logo" width="260" />
 </p>
 
-<h1 align="center">StarFish</h1>
+<h1 align="center">
+<p align="center">科研智能检索引擎</p>
+StarFish
+</h1>
 
-<p align="center">面向科研检索与双知识图谱构建的 GraphRAG 工程化系统（Vue + FastAPI + Neo4j）。</p>
 
 ## ⚡️项目概述
 
@@ -105,3 +107,104 @@ docker compose restart backend
 docker compose up -d --build backend neo4j
 ```
 
+## 🧾本次对话修改清单（文件级）
+
+以下为本轮对话落地到本地仓库的全部改动文件与内容摘要：
+
+### Backend
+
+- `backend/main.py`
+  - 注册领域研究路由 `landscape_router`，开放 `/api/landscape/*` 接口族。
+
+- `backend/models/schemas.py`
+  - 新增领域研究数据模型：`LandscapeGenerateRequest`、`LandscapeCorePaper`、`LandscapeSubDirection`、`LandscapeResponse`。
+  - 新增任务态模型：`LandscapeStepLog`、`LandscapeTaskDetailResponse` 与 `LandscapeStepKey`、状态字面量约束。
+
+- `backend/api/landscape.py`（新增）
+  - 新增领域研究 API：任务创建、任务轮询、任务结果获取、按 `landscape_id` 查询。
+
+- `backend/core/domain_explorer.py`（新增）
+  - 实现领域骨架生成（LLM + fallback）。
+  - 子方向扩展固定为 10 个，并行论文检索（OpenAlex 优先，Semantic Scholar 回退）。
+  - 增加关键词拓展补检索，尽可能保障每个方向具备 15+ 核心论文。
+  - 计算 `correlation_score`、`recent_ratio`、`avg_citations`，并按热度排序。
+  - 趋势总结生成（目标 1000+ 字，失败回退模板）。
+
+- `backend/repositories/landscape_repository.py`（新增）
+  - 新增领域研究结果仓储抽象与内存实现（save/get/has）。
+
+- `backend/services/landscape_graph_adapter.py`（新增）
+  - 将领域结果转换为统一图谱结构（seed/domain/paper 节点 + center/related 边）。
+  - 支持 `correlation_score` 驱动子方向相关度，并限制每方向论文节点数量（默认 15）。
+
+- `backend/services/landscape_service.py`（新增）
+  - 新增异步任务编排：`research -> retrieve -> summarize -> graph` 四阶段。
+  - 提供实时 `step_logs`、`preview_graph`、`preview_stats`，支持前端轮询实时渲染。
+  - 任务完成后持久化并支持按 task/result 查询。
+
+- `backend/repositories/neo4j_repository.py`
+  - 新增 `store_domain_landscape` 与 `_write_domain_landscape`，支持领域结果写入 Neo4j：
+    - `LandscapeRun` / `Domain` / `SubDomain` / `Method` / `Paper` 及关系写入。
+
+### Frontend
+
+- `frontend/src/views/InputView.vue`
+  - 输入类型新增“研究领域（domain）”。
+  - 按输入类型动态切换 placeholder 与 hint（论文 ID/DOI/PDF/领域）。
+
+- `frontend/src/App.vue`
+  - 工作流入口分流：论文工作流与领域工作流。
+  - header 步骤总数动态适配（论文 2 步、领域 4 步）。
+
+- `frontend/src/api/index.js`
+  - 新增领域任务 API：`startLandscapeGeneration`、`getLandscapeTask`、`getLandscapeResult`。
+  - 新增 `generateLandscape(query, onProgress)` 轮询封装。
+
+- `frontend/src/views/LandscapeView.vue`（新增）
+  - 新增领域工作流主视图与四阶段状态管理。
+  - 实时消费后端 `step_logs + preview_graph`，完成后自动收敛步骤状态。
+  - 修复步骤日志状态：运行中显示 `Doing`，完成后自动转 `Done`，避免常驻 `Doing`。
+
+- `frontend/src/components/landscape/LandscapeWorkflowPanel.vue`（新增）
+  - 新增领域工作流右侧流程卡片与日志列表。
+  - 步骤状态徽章支持 `Pending / Doing / Done / Error`。
+
+- `frontend/src/components/landscape/LandscapeWorkspace.vue`（新增）
+  - 新增领域左侧工作区：`知识图谱 / 趋势洞察` 双 Tab。
+  - 图谱刷新按钮与 Tab 控件固定在图谱右上角。
+  - 移除右上角“实时生成中已完成 x/x”标签（按需求删除）。
+
+- `frontend/src/components/landscape/landscapeGraphAdapter.js`（新增）
+  - 前端 fallback 图谱构建器。
+  - 每方向支持扩展到 15 篇论文子节点，支持 `correlation_score` 关联度。
+
+- `frontend/src/components/graph/KnowledgeGraphCanvas.vue`
+  - 图谱交互增强：
+    - 领域节点悬浮卡片补充状态、近2年占比、均引用、数据源、核心论文、代表方法。
+    - 缩放范围限制 `0.35 ~ 2.2`，防止过度缩放。
+    - 修复“放大后自动缩小”：更新/resize 时保存并恢复 viewport，不自动回缩。
+  - 视觉增强：
+    - 中心节点尺寸提升并加粗描边、加大标签，显著突出。
+    - 方向间配色区分度提升；同方向子节点继承方向色。
+    - 子方向热度越高，节点颜色越深。
+
+- `frontend/src/components/graph/knowledgeNodeDetail.js`
+  - 领域节点详情数据结构扩展（状态文案、比例、均引用、方法、核心论文列表）。
+
+- `frontend/src/styles/app.css`
+  - 输入区提示样式、流程卡头部与状态样式增强。
+  - 运行态步骤卡片改浅蓝风格（符合 Doing 语义）。
+
+- `frontend/src/styles/components.css`
+  - 新增领域节点卡片中“核心论文/代表方法”区块样式与移动端适配。
+
+- `frontend/index.html`
+  - 浏览器标签页 favicon 切换为 `/assets/brand/starfish-logo.png`。
+
+- `frontend/public/assets/brand/starfish-logo.png`（新增）
+  - 新增并启用浏览器标签页 logo 资源。
+
+### 文档
+
+- `README.md`
+  - 更新并追加本节“文件级修改清单”，用于回顾本轮对话全部改动内容。

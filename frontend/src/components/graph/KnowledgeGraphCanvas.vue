@@ -108,17 +108,66 @@
 
         <article class="paper-node-metric">
           <div class="paper-node-metric-head">
-            <p class="paper-node-metric-label">关联论文</p>
+            <p class="paper-node-metric-label">状态</p>
+          </div>
+          <p class="paper-node-metric-value">{{ pinnedNodeDetail.domainStatusText }}</p>
+        </article>
+
+        <article class="paper-node-metric">
+          <div class="paper-node-metric-head">
+            <p class="paper-node-metric-label">近2年占比</p>
+          </div>
+          <p class="paper-node-metric-value">{{ pinnedNodeDetail.domainRecentRatioText }}</p>
+        </article>
+
+        <article class="paper-node-metric">
+          <div class="paper-node-metric-head">
+            <p class="paper-node-metric-label">均引用</p>
+          </div>
+          <p class="paper-node-metric-value">{{ pinnedNodeDetail.domainAvgCitationsText }}</p>
+        </article>
+
+        <article class="paper-node-metric">
+          <div class="paper-node-metric-head">
+            <p class="paper-node-metric-label">论文数</p>
           </div>
           <p class="paper-node-metric-value">{{ pinnedNodeDetail.domainPaperCountText }}</p>
         </article>
 
         <article class="paper-node-metric paper-node-metric-wide">
           <div class="paper-node-metric-head">
-            <p class="paper-node-metric-label">代表论文</p>
+            <p class="paper-node-metric-label">数据来源</p>
           </div>
-          <p class="paper-node-metric-value">{{ pinnedNodeDetail.domainTopPaperText }}</p>
+          <p class="paper-node-metric-value">{{ pinnedNodeDetail.domainProviderText }}</p>
         </article>
+      </section>
+
+      <section v-if="pinnedNodeDetail.isDomain" class="paper-node-domain-block">
+        <div class="paper-node-domain-section">
+          <p class="paper-node-domain-title">核心论文</p>
+          <div v-if="pinnedNodeDetail.domainCorePapers.length" class="paper-node-domain-list">
+            <article
+              v-for="paper in pinnedNodeDetail.domainCorePapers"
+              :key="`${paper.title}-${paper.year}`"
+              class="paper-node-domain-row"
+            >
+              <span class="paper-node-domain-year mono">{{ paper.year || '--' }}</span>
+              <p class="paper-node-domain-name">{{ paper.title }}</p>
+              <span class="paper-node-domain-cite mono">{{ paper.citationCount }} 引</span>
+            </article>
+          </div>
+          <p v-else class="paper-node-domain-empty muted">暂无核心论文数据</p>
+        </div>
+
+        <div class="paper-node-domain-section">
+          <p class="paper-node-domain-title">代表方法</p>
+          <div v-if="pinnedNodeDetail.domainMethods.length" class="paper-node-domain-tags">
+            <span v-for="method in pinnedNodeDetail.domainMethods" :key="method" class="paper-node-domain-tag mono">
+              {{ method }}
+            </span>
+          </div>
+          <p v-else class="paper-node-domain-empty muted">暂无方法标签</p>
+        </div>
       </section>
 
       <section v-else class="paper-node-metrics-grid paper-node-metrics-grid-seed">
@@ -187,6 +236,19 @@ const NODE_STYLE = {
   }
 };
 
+const DIRECTION_BASE_COLORS = [
+  '#1f77b4',
+  '#ff7f0e',
+  '#2ca02c',
+  '#d62728',
+  '#17becf',
+  '#9467bd',
+  '#bcbd22',
+  '#8c564b',
+  '#e377c2',
+  '#7f7f7f'
+];
+
 const PAPER_PALETTE = [
   { fill: '#f9f4ea', stroke: '#9b835d' },
   { fill: '#f4f8ee', stroke: '#6e9157' },
@@ -197,6 +259,7 @@ const PAPER_PALETTE = [
   { fill: '#f7f5ef', stroke: '#8f805b' },
   { fill: '#f0f6f2', stroke: '#5f8d71' }
 ];
+const GRAPH_ZOOM_RANGE = [0.35, 2.2];
 
 function hashText(value) {
   const input = String(value || '');
@@ -208,9 +271,93 @@ function hashText(value) {
   return Math.abs(hash);
 }
 
-function resolveNodePalette(node) {
+function parseHexColor(hex) {
+  const value = String(hex || '').trim().replace('#', '');
+  if (!/^[0-9a-fA-F]{6}$/.test(value)) {
+    return null;
+  }
+  return {
+    r: Number.parseInt(value.slice(0, 2), 16),
+    g: Number.parseInt(value.slice(2, 4), 16),
+    b: Number.parseInt(value.slice(4, 6), 16)
+  };
+}
+
+function rgbToHex({ r, g, b }) {
+  const toHex = (value) => clamp(Math.round(value), 0, 255).toString(16).padStart(2, '0');
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+function mixColor(fromColor, toColor, ratio) {
+  const from = parseHexColor(fromColor);
+  const to = parseHexColor(toColor);
+  if (!from || !to) return fromColor;
+  const safeRatio = clamp(Number(ratio) || 0, 0, 1);
+  return rgbToHex({
+    r: from.r * (1 - safeRatio) + to.r * safeRatio,
+    g: from.g * (1 - safeRatio) + to.g * safeRatio,
+    b: from.b * (1 - safeRatio) + to.b * safeRatio
+  });
+}
+
+function parseDomainOrder(nodeId) {
+  const matched = String(nodeId || '').match(/^domain:(\d+):/);
+  if (!matched) return null;
+  const parsed = Number.parseInt(matched[1], 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function directionPalette(baseColor, heat) {
+  const normalizedHeat = normalizeRate(heat);
+  const fill = mixColor(baseColor, '#ffffff', 0.58 - normalizedHeat * 0.22);
+  const stroke = mixColor(baseColor, '#000000', 0.2 + normalizedHeat * 0.24);
+  return { fill, stroke };
+}
+
+function buildColorContext(nodesRaw, edgesRaw) {
+  const nodeKindById = new Map();
+  const domainNodes = [];
+
+  nodesRaw.forEach((node) => {
+    const kind = node?.kind || node?.type || '';
+    const id = String(node?.id || '');
+    if (!id) return;
+    nodeKindById.set(id, kind);
+    if (kind === 'domain') domainNodes.push(node);
+  });
+
+  const domainPaletteById = new Map();
+  domainNodes.forEach((node, index) => {
+    const order = parseDomainOrder(node?.id);
+    const paletteIndex = (Number.isFinite(order) ? order : index) % DIRECTION_BASE_COLORS.length;
+    const baseColor = DIRECTION_BASE_COLORS[paletteIndex];
+    const heat = normalizeRate(node?.relevance ?? node?.score);
+    domainPaletteById.set(String(node.id), directionPalette(baseColor, heat));
+  });
+
+  const paperDomainById = new Map();
+  edgesRaw.forEach((edge) => {
+    const source = String(edge?.source || '');
+    const target = String(edge?.target || '');
+    if (!source || !target) return;
+    if (nodeKindById.get(source) !== 'domain' || nodeKindById.get(target) !== 'paper') return;
+    paperDomainById.set(target, source);
+  });
+
+  return { domainPaletteById, paperDomainById };
+}
+
+function resolveNodePalette(node, colorContext) {
   const kind = node?.kind || node?.type || 'paper';
+  if (kind === 'domain') {
+    return colorContext.domainPaletteById.get(String(node?.id || '')) || NODE_STYLE.domain;
+  }
   if (kind === 'paper') {
+    const domainId = colorContext.paperDomainById.get(String(node?.id || ''));
+    if (domainId) {
+      const palette = colorContext.domainPaletteById.get(domainId);
+      if (palette) return palette;
+    }
     const paletteIndex = hashText(node?.id || node?.label || '') % PAPER_PALETTE.length;
     return PAPER_PALETTE[paletteIndex];
   }
@@ -243,12 +390,12 @@ function edgeDistance(relevance, kind) {
 function nodeSize(node, totalNodes) {
   const normalized = normalizeRate(node?.relevance ?? node?.score);
   if (node?.kind === 'seed') {
-    return clamp(30 + totalNodes * 0.1, 28, 38);
+    return clamp(33 + totalNodes * 0.01, 33, 35);
   }
   if (node?.kind === 'domain') {
-    return clamp(15 + normalized * 12, 14, 27);
+    return clamp(15 + normalized * 8.2, 15, 23);
   }
-  return clamp(14 + normalized * 11, 13, 25);
+  return clamp(13 + normalized * 8.2, 13, 21.5);
 }
 
 function getContainerSize() {
@@ -263,12 +410,13 @@ function toG6Data(graphPayload) {
   const edgesRaw = graphPayload?.edges || [];
   const totalNodes = Math.max(1, nodesRaw.length);
   const edgeLabelEnabled = edgesRaw.length <= 45;
+  const colorContext = buildColorContext(nodesRaw, edgesRaw);
 
   const nodes = nodesRaw.map((node) => {
     const kind = node.kind || node.type || 'paper';
-    const palette = resolveNodePalette(node);
+    const palette = resolveNodePalette(node, colorContext);
     const size = nodeSize(node, totalNodes);
-    const labelText = shortLabel(node.name || node.label, 22);
+    const labelText = shortLabel(node.name || node.label, kind === 'seed' ? 30 : 22);
     return {
       id: node.id,
       data: {
@@ -280,14 +428,15 @@ function toG6Data(graphPayload) {
         size,
         fill: palette.fill,
         stroke: palette.stroke,
-        lineWidth: kind === 'seed' ? 1.6 : 1.25,
-        shadowBlur: 4,
-        shadowColor: 'rgba(0, 0, 0, 0.04)',
+        lineWidth: kind === 'seed' ? 3.1 : (kind === 'domain' ? 1.45 : 1.2),
+        shadowBlur: kind === 'seed' ? 10 : 4,
+        shadowColor: kind === 'seed' ? 'rgba(31, 119, 180, 0.36)' : 'rgba(0, 0, 0, 0.04)',
         label: true,
         labelText,
         labelPlacement: 'bottom',
         labelOffsetY: 6,
-        labelFontSize: totalNodes > 26 ? 9 : 10,
+        labelFontSize: kind === 'seed' ? 12 : (totalNodes > 26 ? 9 : 10),
+        labelFontWeight: kind === 'seed' ? 700 : 500,
         labelFill: '#2f2f2f',
         labelBackground: false,
         cursor: 'pointer'
@@ -366,7 +515,7 @@ function graphOptions(width, height) {
   return {
     width,
     height,
-    autoFit: 'view',
+    zoomRange: GRAPH_ZOOM_RANGE,
     padding: 20,
     data,
     layout: buildLayout(width, height, data.nodes.length, data.edges.length),
@@ -383,6 +532,32 @@ function graphOptions(width, height) {
       { type: 'hover-activate' }
     ]
   };
+}
+
+function getViewportSnapshot() {
+  if (!graphInstance) return null;
+  try {
+    const zoom = Number(graphInstance.getZoom?.());
+    const position = normalizePoint(graphInstance.getPosition?.());
+    if (!Number.isFinite(zoom) || !position) return null;
+    return { zoom, position };
+  } catch {
+    return null;
+  }
+}
+
+async function restoreViewport(snapshot) {
+  if (!graphInstance || !snapshot) return;
+  try {
+    if (graphInstance.zoomTo) {
+      await graphInstance.zoomTo(snapshot.zoom, { duration: 0 });
+    }
+    if (graphInstance.translateTo) {
+      await graphInstance.translateTo(snapshot.position, { duration: 0 });
+    }
+  } catch {
+    // no-op
+  }
 }
 
 function resolveEventNodeId(event) {
@@ -490,8 +665,10 @@ async function updateGraphData() {
     return;
   }
   const { width, height } = getContainerSize();
+  const viewport = getViewportSnapshot();
   graphInstance.setOptions(graphOptions(width, height));
   await graphInstance.render();
+  await restoreViewport(viewport);
 }
 
 async function refreshGraphDisplay() {
@@ -514,9 +691,11 @@ function setupResizeObserver() {
       resizeRaf = 0;
       if (!graphInstance) return;
       const { width, height } = getContainerSize();
+      const viewport = getViewportSnapshot();
       graphInstance.resize(width, height);
       graphInstance.setOptions(graphOptions(width, height));
       await graphInstance.render();
+      await restoreViewport(viewport);
     });
   });
   resizeObserver.observe(graphContainerRef.value);

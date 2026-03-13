@@ -8,24 +8,25 @@
           id="input-type"
           v-model="mapInput.input_type"
           :options="inputTypeOptions"
-          aria-label="选择论文输入类型"
+          aria-label="选择输入类型"
         />
         <input
           id="input-value"
           class="seed-text-input mono"
           v-model="mapInput.input_value"
-          placeholder="输入论文标题、摘要、DOI、arXiv ID 或链接"
+          :placeholder="currentInputMeta.placeholder"
         />
         <button class="btn btn-accent mono seed-submit-btn" type="submit" :disabled="!mapInput.input_value.trim()">
           开始分析
         </button>
       </div>
+      <p class="seed-input-hint mono muted">{{ currentInputMeta.hint }}</p>
     </form>
   </section>
 </template>
 
 <script setup>
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 
 import CustomSelect from '../components/common/CustomSelect.vue';
 import WorkflowShowcase from '../components/home/WorkflowShowcase.vue';
@@ -44,11 +45,32 @@ const inputTypeOptions = [
   { label: 'arXiv ID', value: 'arxiv_id' },
   { label: 'DOI', value: 'doi' },
   { label: 'PDF 链接', value: 'pdf' },
-  { label: 'GitHub 链接', value: 'github_url' }
+  { label: '研究领域', value: 'domain' }
 ];
 
 const isInputVisible = ref(false);
 const { mapInput } = useMapStore();
+const inputTypeMeta = {
+  arxiv_id: {
+    placeholder: '例如：2301.07041',
+    hint: '输入 arXiv ID，构建以该论文为中心的知识图谱。'
+  },
+  doi: {
+    placeholder: '例如：10.1145/3442188.3445922',
+    hint: '输入 DOI，自动补全元数据并构建论文关系图。'
+  },
+  pdf: {
+    placeholder: '例如：https://arxiv.org/pdf/1706.03762.pdf',
+    hint: '输入 PDF 链接，系统将提取论文元信息并开始检索。'
+  },
+  domain: {
+    placeholder: '例如：transformer、深度强化学习、多模态大模型',
+    hint: '输入研究领域，生成子方向、核心论文与趋势洞察全景图。'
+  }
+};
+const currentInputMeta = computed(
+  () => inputTypeMeta[mapInput.value.input_type] || inputTypeMeta.arxiv_id
+);
 
 function startAnalysis() {
   const value = mapInput.value.input_value.trim();

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 InputType = Literal["arxiv_id", "doi", "pdf", "github_url"]
 PaperInputType = Literal["arxiv_id", "doi", "paper_id"]
 TrendLabel = Literal["rising", "stable", "saturated", "emerging"]
+LandscapeDirectionStatus = Literal["emerging", "growing", "stable", "saturated"]
+LandscapeStepKey = Literal["research", "retrieve", "summarize", "graph"]
 TaskStatus = Literal["pending", "processing", "completed", "failed"]
 CitationRelationType = Literal[
     "supporting",
@@ -158,6 +160,64 @@ class KnowledgeGraphResponse(BaseModel):
     stored_in_neo4j: bool = False
     summary: str
     generated_at: datetime
+
+
+class LandscapeGenerateRequest(BaseModel):
+    query: str = Field(..., min_length=2, max_length=120)
+
+
+class LandscapeCorePaper(BaseModel):
+    id: str
+    title: str
+    year: int | None = None
+    citation_count: int = Field(default=0, ge=0)
+    authors: list[str] = Field(default_factory=list)
+
+
+class LandscapeSubDirection(BaseModel):
+    name: str
+    name_en: str = ""
+    description: str = ""
+    status: LandscapeDirectionStatus = "stable"
+    methods: list[str] = Field(default_factory=list)
+    search_keywords: list[str] = Field(default_factory=list)
+    estimated_active_years: str = ""
+    provider_used: str = ""
+    paper_count: int = Field(default=0, ge=0)
+    recent_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
+    recent_paper_count: int = Field(default=0, ge=0)
+    avg_citations: int = Field(default=0, ge=0)
+    correlation_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    core_papers: list[LandscapeCorePaper] = Field(default_factory=list)
+
+
+class LandscapeResponse(BaseModel):
+    landscape_id: str
+    query: str
+    domain_name: str
+    domain_name_en: str = ""
+    description: str = ""
+    provider_priority: str = "openalex_then_semantic_scholar"
+    sub_directions: list[LandscapeSubDirection] = Field(default_factory=list)
+    trend_summary: str = ""
+    graph_data: dict[str, Any] = Field(default_factory=dict)
+    stored_in_neo4j: bool = False
+    generated_at: datetime
+
+
+class LandscapeStepLog(BaseModel):
+    timestamp: datetime
+    step_key: LandscapeStepKey
+    level: Literal["info", "done", "fallback", "error"] = "info"
+    message: str
+    meta: dict[str, str] = Field(default_factory=dict)
+
+
+class LandscapeTaskDetailResponse(TaskDetailResponse):
+    step_key: LandscapeStepKey = "research"
+    step_logs: list[LandscapeStepLog] = Field(default_factory=list)
+    preview_graph: dict[str, Any] = Field(default_factory=dict)
+    preview_stats: dict[str, Any] = Field(default_factory=dict)
 
 
 class Neo4jStatusResponse(BaseModel):

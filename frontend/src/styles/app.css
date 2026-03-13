@@ -71,6 +71,8 @@
   padding: 14px;
   background: #fff;
   animation: revealInput 0.42s ease both;
+  display: grid;
+  gap: 8px;
 }
 
 .seed-input-row {
@@ -98,6 +100,11 @@
 .seed-submit-btn {
   height: 46px;
   min-width: 108px;
+}
+
+.seed-input-hint {
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .workflow-page {
@@ -177,6 +184,13 @@
   font-weight: 600;
 }
 
+.workflow-step-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .workflow-step-desc {
   font-size: 12px;
   line-height: 1.55;
@@ -224,6 +238,12 @@
   line-height: 1.6;
 }
 
+.workflow-trace-badge.is-doing {
+  border-color: rgba(59, 130, 246, 0.38);
+  background: rgba(59, 130, 246, 0.1);
+  color: #2563eb;
+}
+
 .workflow-trace-badge.is-done {
   border-color: rgba(22, 163, 74, 0.35);
   background: rgba(22, 163, 74, 0.08);
@@ -234,6 +254,12 @@
   border-color: rgba(245, 158, 11, 0.35);
   background: rgba(245, 158, 11, 0.08);
   color: #f59e0b;
+}
+
+.workflow-trace-badge.is-pending {
+  border-color: #d7dfea;
+  background: #f7f9fb;
+  color: #8ea0b7;
 }
 
 .workflow-trace-detail {
@@ -267,6 +293,17 @@
   border-color: rgba(22, 163, 74, 0.45);
   background: rgba(22, 163, 74, 0.1);
   color: #16a34a;
+}
+
+.workflow-step-item.is-running {
+  border-color: rgba(59, 130, 246, 0.25);
+  background: #f7fbff;
+}
+
+.workflow-step-item.is-running .workflow-step-index {
+  border-color: rgba(59, 130, 246, 0.4);
+  background: rgba(59, 130, 246, 0.12);
+  color: #3b82f6;
 }
 
 .workflow-step-item.is-failed .workflow-step-index {

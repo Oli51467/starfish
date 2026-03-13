@@ -168,6 +168,32 @@ class Neo4jRepository:
             logger.exception("Unexpected Neo4j write error")
             return False
 
+    def store_domain_landscape(
+        self,
+        landscape_id: str,
+        query: str,
+        payload: dict[str, Any],
+    ) -> bool:
+        driver = self._driver_or_none()
+        if driver is None:
+            return False
+
+        try:
+            with driver.session() as session:
+                session.execute_write(
+                    self._write_domain_landscape,
+                    landscape_id,
+                    query,
+                    payload,
+                )
+            return True
+        except Neo4jError:
+            logger.exception("Failed writing domain landscape to Neo4j")
+            return False
+        except Exception:  # noqa: BLE001
+            logger.exception("Unexpected domain landscape write error")
+            return False
+
     def fetch_graph(self, graph_id: str) -> dict[str, Any] | None:
         driver = self._driver_or_none()
         if driver is None:
@@ -338,6 +364,149 @@ class Neo4jRepository:
                     domain=edge.get("meta", {}).get("domain"),
                     entity=edge.get("meta", {}).get("entity"),
                     weight=float(edge.get("weight") or 0.0),
+                )
+
+    @staticmethod
+    def _write_domain_landscape(
+        tx,
+        landscape_id: str,
+        query: str,
+        payload: dict[str, Any],
+    ) -> None:
+        domain_name = str(payload.get("domain_name") or query or "").strip()
+        domain_name_en = str(payload.get("domain_name_en") or "").strip()
+        description = str(payload.get("description") or "").strip()
+        sub_directions = list(payload.get("sub_directions") or [])
+
+        tx.run(
+            """
+            MERGE (run:LandscapeRun {landscape_id: $landscape_id})
+            SET run.query = $source_query,
+                run.domain_name = $domain_name,
+                run.updated_at = datetime(),
+                run.source = 'domain_landscape'
+            """,
+            landscape_id=landscape_id,
+            source_query=query,
+            domain_name=domain_name,
+        )
+        tx.run(
+            """
+            MATCH (s:SubDomain {landscape_id: $landscape_id})
+            DETACH DELETE s
+            """,
+            landscape_id=landscape_id,
+        )
+        tx.run(
+            """
+            MATCH (run:LandscapeRun {landscape_id: $landscape_id})-[r]->()
+            DELETE r
+            """,
+            landscape_id=landscape_id,
+        )
+        tx.run(
+            """
+            MERGE (d:Domain {name: $domain_name})
+            SET d.description = $description,
+                d.domain_name_en = $domain_name_en
+            WITH d
+            MATCH (run:LandscapeRun {landscape_id: $landscape_id})
+            MERGE (run)-[:ROOT_DOMAIN]->(d)
+            """,
+            landscape_id=landscape_id,
+            domain_name=domain_name,
+            description=description,
+            domain_name_en=domain_name_en,
+        )
+
+        for index, sub in enumerate(sub_directions):
+            sub_key = f"{landscape_id}:{index}"
+            sub_name = str(sub.get("name") or "").strip()
+            if not sub_name:
+                continue
+
+            tx.run(
+                """
+                MERGE (s:SubDomain {landscape_key: $sub_key})
+                SET s.landscape_id = $landscape_id,
+                    s.name = $name,
+                    s.name_en = $name_en,
+                    s.description = $description,
+                    s.status = $status,
+                    s.paper_count = $paper_count,
+                    s.recent_ratio = $recent_ratio,
+                    s.recent_paper_count = $recent_paper_count,
+                    s.avg_citations = $avg_citations,
+                    s.provider_used = $provider_used,
+                    s.updated_at = datetime()
+                WITH s
+                MATCH (run:LandscapeRun {landscape_id: $landscape_id})
+                MERGE (run)-[:HAS_SUBDOMAIN]->(s)
+                WITH s
+                MATCH (d:Domain {name: $domain_name})
+                MERGE (d)-[r:HAS_SUBDOMAIN {landscape_id: $landscape_id}]->(s)
+                SET r.weight = $recent_ratio
+                """,
+                sub_key=sub_key,
+                landscape_id=landscape_id,
+                domain_name=domain_name,
+                name=sub_name,
+                name_en=str(sub.get("name_en") or "").strip(),
+                description=str(sub.get("description") or "").strip(),
+                status=str(sub.get("status") or "stable").strip(),
+                paper_count=int(sub.get("paper_count") or 0),
+                recent_ratio=float(sub.get("recent_ratio") or 0.0),
+                recent_paper_count=int(sub.get("recent_paper_count") or 0),
+                avg_citations=int(sub.get("avg_citations") or 0),
+                provider_used=str(sub.get("provider_used") or "").strip(),
+            )
+
+            methods = sub.get("methods") or []
+            for method_name in methods:
+                method = str(method_name or "").strip()
+                if not method:
+                    continue
+                tx.run(
+                    """
+                    MATCH (s:SubDomain {landscape_key: $sub_key})
+                    MERGE (m:Method {name: $method})
+                    MERGE (s)-[r:HAS_METHOD {landscape_id: $landscape_id}]->(m)
+                    SET r.weight = 1.0
+                    """,
+                    sub_key=sub_key,
+                    method=method,
+                    landscape_id=landscape_id,
+                )
+
+            papers = sub.get("core_papers") or []
+            for paper in papers:
+                if not isinstance(paper, dict):
+                    continue
+                paper_id = str(paper.get("id") or "").strip()
+                title = str(paper.get("title") or "").strip()
+                if not paper_id and not title:
+                    continue
+                if not paper_id:
+                    paper_id = f"{landscape_id}:{sub_key}:{Neo4jRepository._slug(title)}"
+                tx.run(
+                    """
+                    MATCH (s:SubDomain {landscape_key: $sub_key})
+                    MERGE (p:Paper {paper_id: $paper_id})
+                    SET p.title = $title,
+                        p.year = $year,
+                        p.citation_count = $citation_count,
+                        p.authors = $authors
+                    MERGE (s)-[r:CORE_PAPER {landscape_id: $landscape_id}]->(p)
+                    SET r.weight = $weight
+                    """,
+                    sub_key=sub_key,
+                    landscape_id=landscape_id,
+                    paper_id=paper_id,
+                    title=title,
+                    year=paper.get("year"),
+                    citation_count=int(paper.get("citation_count") or 0),
+                    authors=", ".join(str(item).strip() for item in (paper.get("authors") or []) if str(item).strip()),
+                    weight=float(sub.get("recent_ratio") or 0.0),
                 )
 
     @staticmethod

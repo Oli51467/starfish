@@ -1,0 +1,349 @@
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from functools import lru_cache
+import logging
+from threading import Lock
+from typing import Any
+from uuid import uuid4
+
+from core.domain_explorer import DomainExplorer
+from core.task_manager import TaskManager, get_task_manager
+from models.schemas import (
+    LandscapeGenerateRequest,
+    LandscapeResponse,
+    LandscapeStepKey,
+    LandscapeStepLog,
+    LandscapeTaskDetailResponse,
+    TaskCreateResponse,
+)
+from repositories.landscape_repository import LandscapeRepository, get_landscape_repository
+from repositories.neo4j_repository import Neo4jRepository, get_neo4j_repository
+from services.landscape_graph_adapter import build_landscape_graph
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _LandscapeRuntime:
+    step_key: LandscapeStepKey = "research"
+    logs: list[LandscapeStepLog] = field(default_factory=list)
+    preview_graph: dict[str, Any] = field(default_factory=dict)
+    preview_stats: dict[str, Any] = field(default_factory=dict)
+
+
+class LandscapeService:
+    """Async service for domain landscape generation."""
+
+    def __init__(
+        self,
+        *,
+        task_manager: TaskManager | None = None,
+        landscape_repository: LandscapeRepository | None = None,
+        explorer: DomainExplorer | None = None,
+        neo4j_repository: Neo4jRepository | None = None,
+    ) -> None:
+        self.task_manager = task_manager or get_task_manager()
+        self.repository = landscape_repository or get_landscape_repository()
+        self.explorer = explorer or DomainExplorer()
+        self.neo4j_repository = neo4j_repository or get_neo4j_repository()
+        self._runtime: dict[str, _LandscapeRuntime] = {}
+        self._runtime_lock = Lock()
+
+    async def create_landscape_task(self, request: LandscapeGenerateRequest) -> TaskCreateResponse:
+        task = self.task_manager.create_task(message="任务已创建，等待执行")
+        self._ensure_runtime(task.task_id)
+        seed_preview = build_landscape_graph(
+            {"domain_name": request.query, "sub_directions": []},
+            max_papers_per_direction=0,
+        )
+        self._set_preview(
+            task.task_id,
+            seed_preview,
+            self._build_preview_stats({"sub_directions": []}, seed_preview),
+        )
+        self._append_log(
+            task.task_id,
+            step_key="research",
+            message="任务已创建，准备开始领域调研。",
+            level="info",
+        )
+        asyncio.create_task(self._run_task(task.task_id, request))
+        return TaskCreateResponse(
+            task_id=task.task_id,
+            status=task.status,
+            message="领域全景任务已提交",
+        )
+
+    def get_task(self, task_id: str) -> LandscapeTaskDetailResponse | None:
+        task = self.task_manager.get_task(task_id)
+        if task is None:
+            return None
+        base = task.to_schema()
+        runtime = self._snapshot_runtime(task_id)
+        return LandscapeTaskDetailResponse(
+            **base.model_dump(),
+            step_key=runtime.step_key,
+            step_logs=runtime.logs,
+            preview_graph=runtime.preview_graph,
+            preview_stats=runtime.preview_stats,
+        )
+
+    def get_landscape(self, landscape_id: str) -> LandscapeResponse | None:
+        payload = self.repository.get_landscape(landscape_id)
+        if payload is None:
+            return None
+        return LandscapeResponse.model_validate(payload)
+
+    def get_landscape_by_task(self, task_id: str) -> LandscapeResponse | None:
+        task = self.task_manager.get_task(task_id)
+        if task is None or task.status != "completed" or not task.result_id:
+            return None
+        return self.get_landscape(task.result_id)
+
+    async def _run_task(self, task_id: str, request: LandscapeGenerateRequest) -> None:
+        landscape_id = f"landscape-{uuid4().hex[:12]}"
+        self._ensure_runtime(task_id)
+
+        try:
+            self._set_step(task_id, "research")
+            self.task_manager.update_task(
+                task_id,
+                status="processing",
+                progress=5,
+                message="领域调研中：正在解析研究方向结构...",
+            )
+            self._append_log(task_id, step_key="research", message="开始调用 LLM 生成领域骨架。", level="info")
+
+            skeleton = await self.explorer.generate_domain_skeleton(request.query)
+            direction_count = len(skeleton.get("sub_directions") or [])
+            self._append_log(
+                task_id,
+                step_key="research",
+                message=f"领域调研完成，识别到 {direction_count} 个候选子方向。",
+                level="done",
+                meta={"sub_direction_count": str(direction_count)},
+            )
+            preview_graph = build_landscape_graph(skeleton, max_papers_per_direction=0)
+            self._set_preview(task_id, preview_graph, self._build_preview_stats(skeleton, preview_graph))
+
+            self.task_manager.update_task(
+                task_id,
+                status="processing",
+                progress=26,
+                message="论文检索中：正在并行抓取真实论文...",
+            )
+            self._set_step(task_id, "retrieve")
+            self._append_log(task_id, step_key="retrieve", message="开始论文检索（OpenAlex 优先）。", level="info")
+
+            partial_directions = list(skeleton.get("sub_directions") or [])
+            completed = 0
+
+            async def direction_callback(index: int, direction: dict[str, Any], total: int) -> None:
+                nonlocal completed
+                completed += 1
+                partial_directions[index] = direction
+                partial_landscape = {**skeleton, "sub_directions": list(partial_directions)}
+                partial_graph = build_landscape_graph(partial_landscape, max_papers_per_direction=15)
+                self._set_preview(task_id, partial_graph, self._build_preview_stats(partial_landscape, partial_graph))
+
+                progress = min(62, 26 + int((completed / max(total, 1)) * 34))
+                self.task_manager.update_task(
+                    task_id,
+                    status="processing",
+                    progress=progress,
+                    message=f"论文检索中：已完成 {completed}/{total} 个子方向。",
+                )
+                provider = str(direction.get("provider_used") or "none")
+                paper_count = int(direction.get("paper_count") or 0)
+                level = "done" if provider != "none" else "fallback"
+                self._append_log(
+                    task_id,
+                    step_key="retrieve",
+                    message=f"{direction.get('name', '未命名方向')} 检索完成：{paper_count} 篇（{provider}）。",
+                    level=level,
+                    meta={
+                        "provider": provider,
+                        "paper_count": str(paper_count),
+                        "recent_ratio": f"{float(direction.get('recent_ratio') or 0.0):.3f}",
+                    },
+                )
+
+            enriched = await self.explorer.enrich_with_papers(
+                skeleton,
+                direction_callback=direction_callback,
+            )
+            enriched = self.explorer.sort_sub_directions(enriched)
+            self._append_log(
+                task_id,
+                step_key="retrieve",
+                message="论文检索阶段完成，已完成子方向热度排序。",
+                level="done",
+            )
+
+            self._set_step(task_id, "summarize")
+            self.task_manager.update_task(
+                task_id,
+                status="processing",
+                progress=68,
+                message="深度总结中：正在生成趋势洞察...",
+            )
+            self._append_log(task_id, step_key="summarize", message="开始生成深度总结（目标 1000+ 字）。", level="info")
+            enriched["trend_summary"] = await self.explorer.generate_landscape_summary(enriched)
+            summary_length = len(str(enriched.get("trend_summary") or ""))
+            self._append_log(
+                task_id,
+                step_key="summarize",
+                message=f"深度总结完成，正文长度约 {summary_length} 字。",
+                level="done",
+                meta={"summary_length": str(summary_length)},
+            )
+
+            self._set_step(task_id, "graph")
+            self.task_manager.update_task(
+                task_id,
+                status="processing",
+                progress=86,
+                message="图谱生成中：正在构建并刷新知识图谱...",
+            )
+            final_graph = build_landscape_graph(enriched, max_papers_per_direction=15)
+            self._set_preview(task_id, final_graph, self._build_preview_stats(enriched, final_graph))
+            self._append_log(
+                task_id,
+                step_key="graph",
+                message=(
+                    f"图谱生成完成：节点 {len(final_graph.get('nodes') or [])}，"
+                    f"边 {len(final_graph.get('edges') or [])}。"
+                ),
+                level="done",
+            )
+
+            self.task_manager.update_task(
+                task_id,
+                status="processing",
+                progress=94,
+                message="图谱生成中：正在写入图数据库...",
+            )
+            stored = await asyncio.to_thread(
+                self.neo4j_repository.store_domain_landscape,
+                landscape_id,
+                request.query,
+                enriched,
+            )
+            self._append_log(
+                task_id,
+                step_key="graph",
+                message="图数据库写入完成。" if stored else "Neo4j 不可用，已降级为内存结果。",
+                level="done" if stored else "fallback",
+            )
+
+            response = LandscapeResponse(
+                landscape_id=landscape_id,
+                query=request.query,
+                domain_name=str(enriched.get("domain_name") or request.query),
+                domain_name_en=str(enriched.get("domain_name_en") or ""),
+                description=str(enriched.get("description") or ""),
+                provider_priority="openalex_then_semantic_scholar",
+                sub_directions=list(enriched.get("sub_directions") or []),
+                trend_summary=str(enriched.get("trend_summary") or ""),
+                graph_data=final_graph,
+                stored_in_neo4j=bool(stored),
+                generated_at=datetime.now(timezone.utc),
+            )
+            self.repository.save_landscape(landscape_id, response.model_dump())
+
+            self.task_manager.update_task(
+                task_id,
+                status="completed",
+                progress=100,
+                message="领域全景生成完成",
+                result_id=landscape_id,
+            )
+            self._append_log(task_id, step_key="graph", message="任务完成。", level="done")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Landscape generation task failed")
+            self.task_manager.update_task(
+                task_id,
+                status="failed",
+                progress=100,
+                message="领域全景生成失败",
+                error=str(exc),
+            )
+            runtime = self._snapshot_runtime(task_id)
+            self._append_log(
+                task_id,
+                step_key=runtime.step_key,
+                message=f"任务失败：{exc}",
+                level="error",
+            )
+
+    def _ensure_runtime(self, task_id: str) -> None:
+        with self._runtime_lock:
+            self._runtime.setdefault(task_id, _LandscapeRuntime())
+
+    def _snapshot_runtime(self, task_id: str) -> _LandscapeRuntime:
+        with self._runtime_lock:
+            current = self._runtime.get(task_id) or _LandscapeRuntime()
+            return _LandscapeRuntime(
+                step_key=current.step_key,
+                logs=[LandscapeStepLog.model_validate(item.model_dump()) for item in current.logs],
+                preview_graph=dict(current.preview_graph),
+                preview_stats=dict(current.preview_stats),
+            )
+
+    def _set_step(self, task_id: str, step_key: LandscapeStepKey) -> None:
+        with self._runtime_lock:
+            runtime = self._runtime.setdefault(task_id, _LandscapeRuntime())
+            runtime.step_key = step_key
+
+    def _append_log(
+        self,
+        task_id: str,
+        *,
+        step_key: LandscapeStepKey,
+        message: str,
+        level: str = "info",
+        meta: dict[str, Any] | None = None,
+    ) -> None:
+        normalized_meta = {
+            str(key): str(value)
+            for key, value in (meta or {}).items()
+            if str(key).strip() and str(value).strip()
+        }
+        entry = LandscapeStepLog(
+            timestamp=datetime.now(timezone.utc),
+            step_key=step_key,
+            level=level if level in {"info", "done", "fallback", "error"} else "info",
+            message=str(message).strip(),
+            meta=normalized_meta,
+        )
+        with self._runtime_lock:
+            runtime = self._runtime.setdefault(task_id, _LandscapeRuntime())
+            runtime.step_key = step_key
+            runtime.logs.append(entry)
+            if len(runtime.logs) > 240:
+                runtime.logs = runtime.logs[-240:]
+
+    def _set_preview(self, task_id: str, graph: dict[str, Any], stats: dict[str, Any]) -> None:
+        with self._runtime_lock:
+            runtime = self._runtime.setdefault(task_id, _LandscapeRuntime())
+            runtime.preview_graph = dict(graph)
+            runtime.preview_stats = dict(stats)
+
+    @staticmethod
+    def _build_preview_stats(landscape: dict[str, Any], graph: dict[str, Any]) -> dict[str, Any]:
+        directions = list(landscape.get("sub_directions") or [])
+        completed = sum(1 for item in directions if int(item.get("paper_count") or 0) > 0)
+        return {
+            "sub_direction_total": len(directions),
+            "sub_direction_completed": completed,
+            "node_count": len(graph.get("nodes") or []),
+            "edge_count": len(graph.get("edges") or []),
+        }
+
+
+@lru_cache
+def get_landscape_service() -> LandscapeService:
+    return LandscapeService()

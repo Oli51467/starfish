@@ -50,6 +50,57 @@ export function getKnowledgeGraph(graphId) {
   return request(`/api/graphrag/${encodeURIComponent(graphId)}`);
 }
 
+export function startLandscapeGeneration(payload) {
+  return request('/api/landscape/generate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+}
+
+export function getLandscapeTask(taskId) {
+  return request(`/api/landscape/task/${encodeURIComponent(taskId)}`);
+}
+
+export function getLandscapeResult(taskId) {
+  return request(`/api/landscape/result/${encodeURIComponent(taskId)}`);
+}
+
+export async function generateLandscape(query, onProgress) {
+  const safeQuery = String(query || '').trim();
+  if (!safeQuery) {
+    throw new Error('query is required');
+  }
+
+  const created = await startLandscapeGeneration({ query: safeQuery });
+  const taskId = created?.task_id;
+  if (!taskId) {
+    throw new Error('landscape task id missing');
+  }
+
+  while (true) {
+    const task = await getLandscapeTask(taskId);
+    if (typeof onProgress === 'function') {
+      onProgress(task);
+    }
+
+    if (task.status === 'completed') {
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        try {
+          return await getLandscapeResult(taskId);
+        } catch (error) {
+          if (attempt >= 3) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+      }
+    }
+    if (task.status === 'failed') {
+      throw new Error(task.error || task.message || '领域全景生成失败');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1800));
+  }
+}
+
 export function getNeo4jStatus() {
   return request('/api/graphrag/neo4j/status');
 }
