@@ -58,10 +58,17 @@ class Settings:
             "yes",
             "on",
         }
+        self.enable_landscape_summary = self._parse_bool(os.getenv("ENABLE_LANDSCAPE_SUMMARY"), default=False)
 
     @staticmethod
     def _parse_csv(raw_value: str) -> list[str]:
         return [item.strip() for item in raw_value.split(",") if item.strip()]
+
+    @staticmethod
+    def _parse_bool(raw_value: str | None, *, default: bool = False) -> bool:
+        if raw_value is None:
+            return default
+        return str(raw_value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 @lru_cache

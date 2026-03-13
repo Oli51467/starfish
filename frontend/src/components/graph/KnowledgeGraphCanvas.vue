@@ -1,21 +1,93 @@
 <template>
   <div class="knowledge-graph-body knowledge-graph-body-full">
-    <div ref="graphContainerRef" class="knowledge-graph-canvas" role="img" :aria-label="graphAriaLabel"></div>
+    <div
+      ref="graphContainerRef"
+      class="knowledge-graph-canvas"
+      :class="{ 'is-dragging': isGraphDragging }"
+      role="img"
+      :aria-label="graphAriaLabel"
+      @pointerdown="startGraphDragCursor"
+      @pointerup="endGraphDragCursor"
+      @pointerleave="endGraphDragCursor"
+      @pointercancel="endGraphDragCursor"
+    ></div>
 
-    <div class="knowledge-legend-overlay">
-      <div class="legend-row">
-        <span class="legend-dot node-seed"></span>中心论文（{{ counts.seed }}）
-      </div>
-      <div v-if="counts.paper" class="legend-row">
-        <span class="legend-dot node-paper"></span>论文（{{ counts.paper }}）
-      </div>
-      <div v-if="counts.domain" class="legend-row">
-        <span class="legend-dot node-domain"></span>领域（{{ counts.domain }}）
-      </div>
-      <div class="legend-row">
-        <span class="legend-line edge-generic"></span>关联边（{{ counts.edges }}）
+    <div v-if="directionLegendRows.length" class="knowledge-legend-overlay">
+      <div
+        v-for="(row, rowIndex) in directionLegendRows"
+        :key="`legend-row-${rowIndex}`"
+        class="legend-grid-row"
+        :class="`is-cols-${row.length}`"
+      >
+        <button
+          v-for="item in row"
+          :key="item.id"
+          class="legend-direction-item"
+          :class="{
+            'is-active': isDirectionHighlighted(item.id),
+            'is-list': isDirectionListMode(item.id)
+          }"
+          type="button"
+          :title="item.name"
+          @click="toggleDirectionFocus(item.id)"
+        >
+          <span class="legend-dot legend-dot-direction" :style="item.dotStyle"></span>
+          <span class="legend-direction-name">{{ item.name }}</span>
+        </button>
       </div>
     </div>
+
+    <aside v-if="directionPaperListItems.length" class="direction-paper-list-overlay">
+      <header class="direction-paper-list-head">
+        <div class="direction-paper-list-head-main">
+          <p class="direction-paper-list-title">{{ selectedDirectionName }}</p>
+          <span class="direction-paper-list-count mono">{{ directionPaperListItems.length }} 篇</span>
+        </div>
+        <button
+          class="direction-paper-list-close"
+          type="button"
+          aria-label="关闭论文列表"
+          title="关闭"
+          @click="closeDirectionPaperList"
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M4 4l8 8M12 4l-8 8" />
+          </svg>
+        </button>
+      </header>
+
+      <ul class="direction-paper-list">
+        <li v-for="paper in directionPaperListItems" :key="paper.id">
+          <button
+            class="direction-paper-list-item"
+            type="button"
+            :title="paper.name"
+            @click="focusPaperFromList(paper.id)"
+          >
+            <div class="direction-paper-list-item-top">
+              <p class="direction-paper-list-item-title">{{ paper.name }}</p>
+              <span class="direction-paper-list-item-relevance mono">{{ paper.relevancePercentText }}</span>
+            </div>
+
+            <p class="direction-paper-list-item-meta mono">
+              {{ paper.publishedAtText }} · {{ paper.impactFactorText }} · {{ paper.citationCountText }} 引
+            </p>
+
+            <div class="direction-paper-list-item-tags">
+              <span
+                v-for="keyword in paper.keywords"
+                :key="`${paper.id}-${keyword}`"
+                class="direction-paper-list-item-tag"
+              >
+                {{ keyword }}
+              </span>
+            </div>
+
+            <p class="direction-paper-list-item-abstract">{{ paper.abstractSnippet }}</p>
+          </button>
+        </li>
+      </ul>
+    </aside>
 
     <article
       v-if="pinnedNodeDetail"
@@ -25,7 +97,9 @@
     >
       <header class="paper-node-card-top">
         <div class="paper-node-title-wrap">
-          <p class="paper-node-title">{{ pinnedNodeDetail.name }}</p>
+          <div class="paper-node-title-line">
+            <p class="paper-node-title">{{ pinnedNodeDetail.name }}</p>
+          </div>
           <p class="paper-node-subtitle">{{ pinnedNodeDetail.authorVenueText }}</p>
         </div>
         <div class="paper-node-top-right">
@@ -220,10 +294,19 @@ const pinnedCardPoint = ref(null);
 const cardOverlayRef = ref(null);
 const pinnedCardSize = ref({ width: 460, height: 300 });
 const bookmarkedNodeIds = ref([]);
+const selectedDirectionId = ref('');
+const selectedDirectionMode = ref('none');
+const isGraphDragging = ref(false);
 let graphInstance = null;
 let resizeObserver = null;
 let resizeRaf = 0;
 let nodeClickHandler = null;
+
+const DIRECTION_MODE = Object.freeze({
+  NONE: 'none',
+  HIGHLIGHT: 'highlight',
+  LIST: 'list'
+});
 
 const NODE_STYLE = {
   seed: {
@@ -237,16 +320,16 @@ const NODE_STYLE = {
 };
 
 const DIRECTION_BASE_COLORS = [
-  '#1f77b4',
-  '#ff7f0e',
-  '#2ca02c',
-  '#d62728',
-  '#17becf',
-  '#9467bd',
-  '#bcbd22',
-  '#8c564b',
-  '#e377c2',
-  '#7f7f7f'
+  '#2f80ed',
+  '#ff9f1c',
+  '#2ec27e',
+  '#ff5d73',
+  '#00b8d9',
+  '#8e7dff',
+  '#f6c945',
+  '#43aa8b',
+  '#f28482',
+  '#7bd389'
 ];
 
 const PAPER_PALETTE = [
@@ -309,8 +392,8 @@ function parseDomainOrder(nodeId) {
 
 function directionPalette(baseColor, heat) {
   const normalizedHeat = normalizeRate(heat);
-  const fill = mixColor(baseColor, '#ffffff', 0.58 - normalizedHeat * 0.22);
-  const stroke = mixColor(baseColor, '#000000', 0.2 + normalizedHeat * 0.24);
+  const fill = mixColor(baseColor, '#ffffff', 0.54 - normalizedHeat * 0.18);
+  const stroke = mixColor(baseColor, '#1f2937', 0.08 + normalizedHeat * 0.1);
   return { fill, stroke };
 }
 
@@ -345,6 +428,16 @@ function buildColorContext(nodesRaw, edgesRaw) {
   });
 
   return { domainPaletteById, paperDomainById };
+}
+
+function selectedPaperNodeIdsByDirection(colorContext, directionId) {
+  const targetDirectionId = String(directionId || '').trim();
+  if (!targetDirectionId) return new Set();
+  return new Set(
+    [...colorContext.paperDomainById.entries()]
+      .filter(([, domainId]) => domainId === targetDirectionId)
+      .map(([paperId]) => paperId)
+  );
 }
 
 function resolveNodePalette(node, colorContext) {
@@ -382,20 +475,47 @@ function edgeWidth(relevance, kind) {
 function edgeDistance(relevance, kind) {
   const normalized = normalizeRate(relevance);
   if (kind === 'center') {
-    return clamp(306 - normalized * 198, 98, 306);
+    return clamp(360 - normalized * 210, 135, 360);
   }
-  return clamp(338 - normalized * 116, 178, 338);
+  return clamp(430 - normalized * 150, 250, 430);
 }
 
 function nodeSize(node, totalNodes) {
   const normalized = normalizeRate(node?.relevance ?? node?.score);
   if (node?.kind === 'seed') {
-    return clamp(33 + totalNodes * 0.01, 33, 35);
+    return clamp(46 + totalNodes * 0.015, 46, 54);
   }
   if (node?.kind === 'domain') {
     return clamp(15 + normalized * 8.2, 15, 23);
   }
   return clamp(13 + normalized * 8.2, 13, 21.5);
+}
+
+function shouldRenderNodeLabel(nodeKind) {
+  return nodeKind === 'seed' || nodeKind === 'domain' || nodeKind === 'paper';
+}
+
+function nodeLabelLimit(nodeKind, totalNodes) {
+  if (nodeKind === 'seed') return 26;
+  if (nodeKind === 'domain') return 18;
+  if (nodeKind === 'paper') {
+    if (totalNodes > 170) return 24;
+    if (totalNodes > 120) return 28;
+    return 34;
+  }
+  return 0;
+}
+
+function sortedDomainNodes(nodesRaw) {
+  const domainNodes = nodesRaw.filter((node) => (node?.kind || node?.type) === 'domain');
+  return domainNodes.sort((left, right) => {
+    const a = parseDomainOrder(left?.id);
+    const b = parseDomainOrder(right?.id);
+    if (Number.isFinite(a) && Number.isFinite(b)) return a - b;
+    if (Number.isFinite(a)) return -1;
+    if (Number.isFinite(b)) return 1;
+    return String(left?.name || left?.label || '').localeCompare(String(right?.name || right?.label || ''));
+  });
 }
 
 function getContainerSize() {
@@ -409,37 +529,56 @@ function toG6Data(graphPayload) {
   const nodesRaw = graphPayload?.nodes || [];
   const edgesRaw = graphPayload?.edges || [];
   const totalNodes = Math.max(1, nodesRaw.length);
-  const edgeLabelEnabled = edgesRaw.length <= 45;
+  const edgeLabelEnabled = false;
   const colorContext = buildColorContext(nodesRaw, edgesRaw);
+  const selectedDomainId = String(selectedDirectionId.value || '').trim();
+  const hasSelection = Boolean(selectedDomainId) && selectedDirectionMode.value !== DIRECTION_MODE.NONE;
+  const selectedPaperNodeIds = hasSelection
+    ? selectedPaperNodeIdsByDirection(colorContext, selectedDomainId)
+    : new Set();
 
   const nodes = nodesRaw.map((node) => {
     const kind = node.kind || node.type || 'paper';
     const palette = resolveNodePalette(node, colorContext);
     const size = nodeSize(node, totalNodes);
-    const labelText = shortLabel(node.name || node.label, kind === 'seed' ? 30 : 22);
+    const nodeId = String(node.id || '');
+    const isSelectedNode = (
+      (kind === 'domain' && nodeId === selectedDomainId)
+      || (kind === 'paper' && selectedPaperNodeIds.has(nodeId))
+    );
+    const isDimmedNode = hasSelection && kind !== 'seed' && !isSelectedNode;
+    const nodeOpacity = kind === 'seed' ? (hasSelection ? 0.6 : 1) : (isDimmedNode ? 0.16 : 1);
+    const showLabel = shouldRenderNodeLabel(kind);
+    const labelText = showLabel
+      ? shortLabel(node.name || node.label, nodeLabelLimit(kind, totalNodes))
+      : '';
     return {
       id: node.id,
       data: {
         ...node,
         nodeKind: kind,
-        resolvedSize: size
+        resolvedSize: size,
+        isSelectedNode
       },
       style: {
         size,
         fill: palette.fill,
         stroke: palette.stroke,
-        lineWidth: kind === 'seed' ? 3.1 : (kind === 'domain' ? 1.45 : 1.2),
-        shadowBlur: kind === 'seed' ? 10 : 4,
+        lineWidth: isSelectedNode
+          ? (kind === 'domain' ? 2.6 : 2.1)
+          : (kind === 'seed' ? 3.1 : (kind === 'domain' ? 1.45 : 1.2)),
+        shadowBlur: isSelectedNode ? 9 : (kind === 'seed' ? 10 : 4),
         shadowColor: kind === 'seed' ? 'rgba(31, 119, 180, 0.36)' : 'rgba(0, 0, 0, 0.04)',
-        label: true,
+        label: showLabel,
         labelText,
         labelPlacement: 'bottom',
-        labelOffsetY: 6,
-        labelFontSize: kind === 'seed' ? 12 : (totalNodes > 26 ? 9 : 10),
+        labelOffsetY: kind === 'paper' ? 4 : 6,
+        labelFontSize: kind === 'seed' ? 12 : (kind === 'domain' ? 10 : 9),
         labelFontWeight: kind === 'seed' ? 700 : 500,
         labelFill: '#2f2f2f',
         labelBackground: false,
-        cursor: 'pointer'
+        cursor: 'pointer',
+        opacity: nodeOpacity
       }
     };
   });
@@ -447,30 +586,33 @@ function toG6Data(graphPayload) {
   const edges = edgesRaw.map((edge, index) => {
     const kind = edge?.kind || 'center';
     const relevance = normalizeRate(edge?.relevance ?? edge?.weight);
+    const sourceId = String(edge?.source || '');
+    const targetId = String(edge?.target || '');
+    const isSelectedEdge = hasSelection && (
+      sourceId === selectedDomainId
+      || targetId === selectedDomainId
+      || (sourceId === selectedDomainId && selectedPaperNodeIds.has(targetId))
+    );
+    const isDimmedEdge = hasSelection && !isSelectedEdge;
     return {
       id: edge.id || `edge-${index}`,
-      source: String(edge?.source || ''),
-      target: String(edge?.target || ''),
+      source: sourceId,
+      target: targetId,
       data: {
         ...edge,
         kind,
-        relevance
+        relevance,
+        isSelectedEdge
       },
       style: {
         stroke: edgeStroke(relevance, kind),
-        lineWidth: edgeWidth(relevance, kind),
-        strokeOpacity: 1,
+        lineWidth: isSelectedEdge
+          ? edgeWidth(relevance, kind) * 1.35
+          : edgeWidth(relevance, kind),
+        strokeOpacity: isDimmedEdge ? 0.12 : 1,
         endArrow: false,
         lineDash: relevance < 0.35 ? [5, 4] : undefined,
-        label: edgeLabelEnabled && kind === 'center',
-        labelText: `${Math.round(relevance * 100)}%`,
-        labelPlacement: 'center',
-        labelFill: '#4e7d52',
-        labelFontSize: 9,
-        labelBackground: true,
-        labelBackgroundFill: 'rgba(255, 255, 255, 0.92)',
-        labelBackgroundRadius: 3,
-        labelBackgroundPadding: [2, 4]
+        label: !isDimmedEdge && edgeLabelEnabled && kind === 'center'
       }
     };
   });
@@ -485,12 +627,12 @@ function buildLayout(width, height, totalNodes, edgeCount) {
     animation: true,
     preventOverlap: true,
     center: [width / 2, height / 2],
-    alphaDecay: 0.08,
-    velocityDecay: 0.4,
-    iterations: 240,
+    alphaDecay: 0.07,
+    velocityDecay: 0.44,
+    iterations: 280,
     manyBody: {
-      strength: -520 - crowdFactor * 52,
-      distanceMax: 1050
+      strength: -700 - crowdFactor * 65,
+      distanceMax: 1300
     },
     link: {
       distance: (edge) => edgeDistance(edge?.data?.relevance, edge?.data?.kind),
@@ -503,9 +645,9 @@ function buildLayout(width, height, totalNodes, edgeCount) {
       }
     },
     collide: {
-      strength: 0.88,
-      iterations: 5,
-      radius: (node) => Number(node?.data?.resolvedSize || 11) / 2 + 16
+      strength: 0.92,
+      iterations: 6,
+      radius: (node) => Number(node?.data?.resolvedSize || 11) / 2 + 22
     }
   };
 }
@@ -622,6 +764,10 @@ function bindNodeClick() {
     if (!nodeId) return;
     const node = (props.graph?.nodes || []).find((item) => item.id === nodeId);
     if (!node) return;
+    if ((node?.kind || node?.type) === 'seed') {
+      closePinnedCard();
+      return;
+    }
 
     pinnedNode.value = node;
     let point = resolveEventPoint(event);
@@ -671,16 +817,29 @@ async function updateGraphData() {
   await restoreViewport(viewport);
 }
 
-async function refreshGraphDisplay() {
-  closePinnedCard();
-  await updateGraphData();
-  if (graphInstance?.fitView) {
+async function recreateGraph({ fitView = false } = {}) {
+  if (graphInstance) {
+    unbindNodeClick();
+    graphInstance.destroy();
+    graphInstance = null;
+  }
+  await initGraph();
+  if (fitView && graphInstance?.fitView) {
     try {
-      graphInstance.fitView();
+      await graphInstance.fitView();
     } catch {
       // no-op
     }
   }
+}
+
+async function refreshGraphDisplay() {
+  closePinnedCard();
+  if (selectedDirectionId.value || selectedDirectionMode.value !== DIRECTION_MODE.NONE) {
+    resetDirectionSelection();
+    await nextTick();
+  }
+  await recreateGraph({ fitView: true });
 }
 
 function setupResizeObserver() {
@@ -728,26 +887,151 @@ function toggleBookmark() {
   bookmarkedNodeIds.value = next;
 }
 
+function startGraphDragCursor() {
+  isGraphDragging.value = true;
+}
+
+function endGraphDragCursor() {
+  isGraphDragging.value = false;
+}
+
+function isDirectionHighlighted(directionId) {
+  const target = String(directionId || '').trim();
+  return (
+    target
+    && selectedDirectionMode.value !== DIRECTION_MODE.NONE
+    && selectedDirectionId.value === target
+  );
+}
+
+function isDirectionListMode(directionId) {
+  const target = String(directionId || '').trim();
+  return (
+    target
+    && selectedDirectionMode.value === DIRECTION_MODE.LIST
+    && selectedDirectionId.value === target
+  );
+}
+
+function resetDirectionSelection() {
+  selectedDirectionId.value = '';
+  selectedDirectionMode.value = DIRECTION_MODE.NONE;
+}
+
+function closeDirectionPaperList() {
+  if (selectedDirectionMode.value !== DIRECTION_MODE.LIST) return;
+  resetDirectionSelection();
+}
+
+function toggleDirectionFocus(directionId) {
+  const nextId = String(directionId || '').trim();
+  if (!nextId) return;
+  const isSameDirection = selectedDirectionId.value === nextId;
+
+  if (!isSameDirection) {
+    selectedDirectionId.value = nextId;
+    selectedDirectionMode.value = DIRECTION_MODE.HIGHLIGHT;
+    return;
+  }
+
+  if (selectedDirectionMode.value === DIRECTION_MODE.NONE) {
+    selectedDirectionMode.value = DIRECTION_MODE.HIGHLIGHT;
+    return;
+  }
+  if (selectedDirectionMode.value === DIRECTION_MODE.HIGHLIGHT) {
+    selectedDirectionMode.value = DIRECTION_MODE.LIST;
+    return;
+  }
+
+  resetDirectionSelection();
+}
+
+function focusPaperFromList(paperId) {
+  const targetPaperId = String(paperId || '').trim();
+  if (!targetPaperId) return;
+  const targetNode = (props.graph?.nodes || []).find((node) => (
+    String(node?.id || '') === targetPaperId && (node?.kind || node?.type) === 'paper'
+  ));
+  if (!targetNode) return;
+  pinnedNode.value = targetNode;
+  pinnedCardPoint.value = null;
+}
+
 const graphAriaLabel = computed(() => `${props.graph?.title || '知识图谱'}可视化`);
 
-const counts = computed(() => {
-  const fromGraph = props.graph?.counts;
-  if (fromGraph) {
+const directionLegendItems = computed(() => {
+  const sorted = sortedDomainNodes(props.graph?.nodes || []);
+
+  return sorted.map((node, index) => {
+    const order = parseDomainOrder(node?.id);
+    const paletteIndex = (Number.isFinite(order) ? order : index) % DIRECTION_BASE_COLORS.length;
+    const baseColor = DIRECTION_BASE_COLORS[paletteIndex];
+    const heat = normalizeRate(node?.relevance ?? node?.score);
+    const palette = directionPalette(baseColor, heat);
+    const name = String(node?.name || node?.label || `子方向 ${index + 1}`).trim();
     return {
-      seed: Number(fromGraph.seed || 1),
-      paper: Number(fromGraph.paper || 0),
-      domain: Number(fromGraph.domain || 0),
-      edges: Number(fromGraph.edges || 0)
+      id: String(node?.id || `legend-direction-${index}`),
+      name,
+      dotStyle: {
+        background: palette.fill,
+        borderColor: palette.stroke
+      }
     };
-  }
-  const nodes = props.graph?.nodes || [];
-  const edges = props.graph?.edges || [];
-  return {
-    seed: nodes.filter((node) => node.kind === 'seed').length,
-    paper: nodes.filter((node) => node.kind === 'paper').length,
-    domain: nodes.filter((node) => node.kind === 'domain').length,
-    edges: edges.length
-  };
+  });
+});
+
+const directionLegendRows = computed(() => {
+  const items = directionLegendItems.value;
+  const rows = [
+    items.slice(0, 3),
+    items.slice(3, 6),
+    items.slice(6, 10)
+  ];
+  return rows.filter((row) => row.length > 0);
+});
+
+const selectedDirectionName = computed(() => {
+  const selectedId = String(selectedDirectionId.value || '').trim();
+  if (!selectedId) return '子方向论文列表';
+  const matched = directionLegendItems.value.find((item) => item.id === selectedId);
+  return matched?.name || '子方向论文列表';
+});
+
+const directionPaperListItems = computed(() => {
+  if (selectedDirectionMode.value !== DIRECTION_MODE.LIST) return [];
+  const selectedId = String(selectedDirectionId.value || '').trim();
+  if (!selectedId) return [];
+
+  const nodesRaw = Array.isArray(props.graph?.nodes) ? props.graph.nodes : [];
+  const edgesRaw = Array.isArray(props.graph?.edges) ? props.graph.edges : [];
+  const colorContext = buildColorContext(nodesRaw, edgesRaw);
+  const selectedPaperIds = selectedPaperNodeIdsByDirection(colorContext, selectedId);
+  if (!selectedPaperIds.size) return [];
+
+  const paperNodes = nodesRaw
+    .filter((node) => selectedPaperIds.has(String(node?.id || '')))
+    .filter((node) => (node?.kind || node?.type) === 'paper')
+    .sort((left, right) => {
+      const relevanceDiff = normalizeRate(right?.relevance ?? right?.score) - normalizeRate(left?.relevance ?? left?.score);
+      if (Math.abs(relevanceDiff) > 1e-6) return relevanceDiff;
+      const citationDiff = Number(right?.meta?.citation_count || 0) - Number(left?.meta?.citation_count || 0);
+      if (citationDiff) return citationDiff;
+      return String(left?.name || left?.label || '').localeCompare(String(right?.name || right?.label || ''));
+    });
+
+  return paperNodes
+    .map((node) => buildKnowledgeNodeDetail(node))
+    .filter(Boolean)
+    .map((detail) => ({
+      id: detail.id,
+      name: detail.name,
+      relevancePercentText: detail.relevancePercentText,
+      publishedAtText: detail.publishedAtText,
+      impactFactorText: detail.impactFactorText,
+      citationCountText: detail.citationCountText,
+      keywords: detail.keywords?.slice(0, 4) || [],
+      abstractSnippet: detail.abstractSnippet
+    }));
 });
 
 const pinnedNodeDetail = computed(() => {
@@ -764,9 +1048,7 @@ const pinnedCardStyle = computed(() => {
   const width = graphContainerRef.value?.clientWidth || 920;
   const height = graphContainerRef.value?.clientHeight || 560;
   const measuredWidth = Number(cardOverlayRef.value?.offsetWidth || pinnedCardSize.value.width || 0);
-  const measuredHeight = Number(cardOverlayRef.value?.offsetHeight || pinnedCardSize.value.height || 0);
   const cardWidth = clamp(measuredWidth || 420, 320, Math.max(320, width - 24));
-  const cardHeight = clamp(measuredHeight || 300, 220, Math.max(220, height - 20));
   const horizontalGap = 18;
   const topInset = 10;
   const leftInset = 12;
@@ -775,7 +1057,8 @@ const pinnedCardStyle = computed(() => {
     return {
       left: `${leftInset}px`,
       top: `${topInset}px`,
-      width: `${Math.round(cardWidth)}px`
+      width: `${Math.round(cardWidth)}px`,
+      maxHeight: `${Math.round(Math.max(220, height - topInset * 2))}px`
     };
   }
 
@@ -784,12 +1067,12 @@ const pinnedCardStyle = computed(() => {
   const leftCandidate = canPlaceRight || !canPlaceLeft
     ? point.x + horizontalGap
     : point.x - cardWidth - horizontalGap;
-  const topCandidate = point.y - cardHeight * 0.35;
 
   return {
     left: `${clamp(leftCandidate, leftInset, Math.max(leftInset, width - cardWidth - leftInset))}px`,
-    top: `${clamp(topCandidate, topInset, Math.max(topInset, height - cardHeight - topInset))}px`,
-    width: `${Math.round(cardWidth)}px`
+    top: `${topInset}px`,
+    width: `${Math.round(cardWidth)}px`,
+    maxHeight: `${Math.round(Math.max(220, height - topInset * 2))}px`
   };
 });
 
@@ -800,6 +1083,15 @@ defineExpose({
 watch(
   () => props.graph,
   async () => {
+    if (selectedDirectionId.value) {
+      const hasSelectedDirection = (props.graph?.nodes || []).some((item) => (
+        item?.kind === 'domain' && String(item.id || '') === selectedDirectionId.value
+      ));
+      if (!hasSelectedDirection) {
+        selectedDirectionId.value = '';
+        selectedDirectionMode.value = DIRECTION_MODE.NONE;
+      }
+    }
     if (pinnedNode.value) {
       const latest = (props.graph?.nodes || []).find((item) => item.id === pinnedNode.value.id);
       pinnedNode.value = latest || null;
@@ -808,6 +1100,13 @@ watch(
     await updateGraphData();
   },
   { deep: true }
+);
+
+watch(
+  [selectedDirectionId, selectedDirectionMode],
+  async () => {
+    await updateGraphData();
+  }
 );
 
 watch(
@@ -827,6 +1126,8 @@ watch(
 onMounted(async () => {
   await initGraph();
   setupResizeObserver();
+  window.addEventListener('pointerup', endGraphDragCursor);
+  window.addEventListener('pointercancel', endGraphDragCursor);
 });
 
 onBeforeUnmount(() => {
@@ -843,7 +1144,10 @@ onBeforeUnmount(() => {
     graphInstance.destroy();
     graphInstance = null;
   }
+  window.removeEventListener('pointerup', endGraphDragCursor);
+  window.removeEventListener('pointercancel', endGraphDragCursor);
   pinnedNode.value = null;
   pinnedCardPoint.value = null;
+  isGraphDragging.value = false;
 });
 </script>

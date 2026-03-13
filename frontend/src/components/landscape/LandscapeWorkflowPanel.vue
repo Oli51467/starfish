@@ -7,16 +7,14 @@
         class="workflow-step-item"
         :class="`is-${step.status}`"
       >
-        <p class="workflow-step-index mono">{{ String(step.index).padStart(2, '0') }}</p>
         <div class="workflow-step-content">
           <div class="workflow-step-head">
+            <p class="workflow-step-index mono">{{ String(step.index).padStart(2, '0') }}</p>
             <p class="workflow-step-title">{{ step.title }}</p>
-            <span class="workflow-trace-badge" :class="`is-${stepBadgeStatus(step.status)}`">
+            <span class="workflow-trace-badge workflow-step-status-badge" :class="`is-${stepBadgeStatus(step.status)}`">
               {{ stepBadgeText(step.status) }}
             </span>
           </div>
-          <p class="workflow-step-desc muted">{{ step.description }}</p>
-          <p v-if="step.message" class="workflow-step-message mono">{{ step.message }}</p>
 
           <section v-if="step.logs && step.logs.length" class="workflow-retrieval-trace">
             <article
@@ -32,6 +30,21 @@
               <p v-if="log.metaText" class="workflow-trace-meta mono">{{ log.metaText }}</p>
             </article>
           </section>
+
+          <section v-if="isGraphStep(step)" class="workflow-step-stats-panel">
+            <article
+              v-for="item in graphStepStats"
+              :key="item.label"
+              class="workflow-step-stats-col"
+            >
+              <p class="workflow-step-stats-value mono">{{ item.value }}</p>
+              <p class="workflow-step-stats-label">{{ item.label }}</p>
+            </article>
+          </section>
+
+          <button v-if="step.status === 'running'" class="workflow-step-active-btn" type="button" disabled>
+            正在处理中
+          </button>
         </div>
       </article>
     </div>
@@ -39,10 +52,20 @@
 </template>
 
 <script setup>
-defineProps({
+import { computed } from 'vue';
+
+const props = defineProps({
   steps: {
     type: Array,
     default: () => []
+  },
+  graphStats: {
+    type: Object,
+    default: () => ({
+      nodeCount: 0,
+      edgeCount: 0,
+      directionCount: 0
+    })
   }
 });
 
@@ -61,4 +84,19 @@ function stepBadgeText(stepStatus) {
   if (normalized === 'failed') return 'Error';
   return 'Pending';
 }
+
+function isGraphStep(step) {
+  return String(step?.key || '').trim().toLowerCase() === 'graph';
+}
+
+const graphStepStats = computed(() => {
+  const nodeCount = Number(props.graphStats?.nodeCount || 0);
+  const edgeCount = Number(props.graphStats?.edgeCount || 0);
+  const directionCount = Number(props.graphStats?.directionCount || 0);
+  return [
+    { value: Number.isFinite(nodeCount) ? nodeCount : 0, label: '节点数量' },
+    { value: Number.isFinite(edgeCount) ? edgeCount : 0, label: '边数量' },
+    { value: Number.isFinite(directionCount) ? directionCount : 0, label: '子方向类型' }
+  ];
+});
 </script>

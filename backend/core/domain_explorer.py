@@ -27,6 +27,8 @@ class DomainExplorer:
     _MIN_DIRECTIONS = 10
     _MAX_DIRECTIONS = 10
     _ZH_TO_EN = {
+        "深度学习": "deep learning",
+        "机器学习": "machine learning",
         "深度强化学习": "deep reinforcement learning",
         "强化学习": "reinforcement learning",
         "多模态大模型": "multimodal large language model",
@@ -38,6 +40,11 @@ class DomainExplorer:
         "推荐系统": "recommender system",
         "计算机视觉": "computer vision",
         "自然语言处理": "natural language processing",
+    }
+    _ZH_QUERY_CORRECTIONS = {
+        "深蹲学习": "深度学习",
+        "深度學習": "深度学习",
+        "機器學習": "机器学习",
     }
 
     def __init__(
@@ -55,7 +62,8 @@ class DomainExplorer:
         *,
         progress_callback: ProgressCallback | None = None,
     ) -> dict[str, Any]:
-        safe_query = str(query or "").strip()
+        normalized_query = await self.normalize_user_query(query)
+        safe_query = str(normalized_query.get("canonical_query") or query or "").strip()
         if not safe_query:
             raise ValueError("query must not be empty")
 
@@ -71,6 +79,88 @@ class DomainExplorer:
         await self._emit_progress(progress_callback, 88, "正在生成趋势洞察...")
         enriched["trend_summary"] = await self.generate_landscape_summary(enriched)
         return enriched
+
+    async def normalize_user_query(self, query: str) -> dict[str, Any]:
+        safe_query = re.sub(r"\s+", " ", str(query or "").strip())
+        if not safe_query:
+            raise ValueError("query must not be empty")
+
+        if not self._contains_cjk(safe_query):
+            return {
+                "original_query": safe_query,
+                "corrected_query": safe_query,
+                "translated_query": safe_query,
+                "canonical_query": safe_query,
+                "used_llm": False,
+                "was_corrected": False,
+            }
+
+        corrected_query = self._heuristic_correct_zh_query(safe_query)
+        translated_query = self._normalize_query_for_search(corrected_query)
+        used_llm = False
+
+        if is_configured():
+            llm_normalized = await self._normalize_chinese_query_with_llm(corrected_query)
+            if llm_normalized:
+                used_llm = True
+                corrected_candidate = re.sub(
+                    r"\s+",
+                    " ",
+                    str(llm_normalized.get("corrected_zh") or "").strip(),
+                )
+                translated_candidate = self._sanitize_english_query(
+                    str(llm_normalized.get("english") or "").strip()
+                )
+                if corrected_candidate:
+                    corrected_query = corrected_candidate
+                if translated_candidate:
+                    translated_query = translated_candidate
+
+        if self._contains_cjk(corrected_query):
+            fallback_translated = self._normalize_query_for_search(corrected_query)
+            if fallback_translated and not self._contains_cjk(fallback_translated):
+                translated_query = fallback_translated
+
+        canonical_query = translated_query if translated_query else corrected_query
+        was_corrected = (
+            corrected_query != safe_query
+            or canonical_query != safe_query
+        )
+        return {
+            "original_query": safe_query,
+            "corrected_query": corrected_query,
+            "translated_query": translated_query,
+            "canonical_query": canonical_query,
+            "used_llm": used_llm,
+            "was_corrected": was_corrected,
+        }
+
+    async def _normalize_chinese_query_with_llm(self, query: str) -> dict[str, Any]:
+        prompt = (
+            "你是科研检索查询标准化助手。请将输入的中文研究方向先纠错，再翻译为标准英文学术检索词。"
+            "只输出 JSON，不要其他内容。\n\n"
+            f"输入：{query}\n\n"
+            "输出格式：\n"
+            "{\n"
+            '  "corrected_zh": "纠错后的中文短语",\n'
+            '  "english": "对应的英文检索短语（小写）"\n'
+            "}"
+        )
+        try:
+            response = await asyncio.to_thread(
+                chat,
+                [{"role": "user", "content": prompt}],
+                max_tokens=220,
+                timeout=20,
+            )
+            raw_content = str(response.choices[0].message.content or "").strip()
+            payload = self._extract_json_payload(raw_content)
+            if not isinstance(payload, dict):
+                return {}
+            return payload
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed normalizing Chinese query with LLM, fallback to heuristic map.")
+            return {}
 
     async def generate_domain_skeleton(self, query: str) -> dict[str, Any]:
         if not is_configured():
@@ -741,8 +831,27 @@ class DomainExplorer:
             raise ValueError("skeleton payload must be JSON object")
         return data
 
+    def _heuristic_correct_zh_query(self, query: str) -> str:
+        corrected = str(query or "").strip()
+        if not corrected:
+            return corrected
+        for wrong, right in self._ZH_QUERY_CORRECTIONS.items():
+            if wrong in corrected:
+                corrected = corrected.replace(wrong, right)
+        return corrected
+
+    @staticmethod
+    def _sanitize_english_query(text: str) -> str:
+        normalized = re.sub(r"\s+", " ", str(text or "").strip().lower())
+        normalized = re.sub(r"[^a-z0-9\s\-_/+().]", "", normalized).strip()
+        return normalized
+
+    @staticmethod
+    def _contains_cjk(text: str) -> bool:
+        return bool(re.search(r"[\u4e00-\u9fff]", str(text or "")))
+
     def _normalize_query_for_search(self, query: str) -> str:
-        text = str(query or "").strip()
+        text = self._heuristic_correct_zh_query(str(query or "").strip())
         if not text:
             return "machine learning"
         lowered = text.lower()

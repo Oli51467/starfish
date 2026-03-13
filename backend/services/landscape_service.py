@@ -10,6 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from core.domain_explorer import DomainExplorer
+from core.settings import get_settings
 from core.task_manager import TaskManager, get_task_manager
 from models.schemas import (
     LandscapeGenerateRequest,
@@ -45,10 +46,12 @@ class LandscapeService:
         explorer: DomainExplorer | None = None,
         neo4j_repository: Neo4jRepository | None = None,
     ) -> None:
+        settings = get_settings()
         self.task_manager = task_manager or get_task_manager()
         self.repository = landscape_repository or get_landscape_repository()
         self.explorer = explorer or DomainExplorer()
         self.neo4j_repository = neo4j_repository or get_neo4j_repository()
+        self.summary_enabled = bool(settings.enable_landscape_summary)
         self._runtime: dict[str, _LandscapeRuntime] = {}
         self._runtime_lock = Lock()
 
@@ -86,6 +89,7 @@ class LandscapeService:
         return LandscapeTaskDetailResponse(
             **base.model_dump(),
             step_key=runtime.step_key,
+            summary_enabled=self.summary_enabled,
             step_logs=runtime.logs,
             preview_graph=runtime.preview_graph,
             preview_stats=runtime.preview_stats,
@@ -108,6 +112,11 @@ class LandscapeService:
         self._ensure_runtime(task_id)
 
         try:
+            normalized_query = await self.explorer.normalize_user_query(request.query)
+            effective_query = str(normalized_query.get("canonical_query") or request.query).strip()
+            if not effective_query:
+                effective_query = str(request.query).strip()
+
             self._set_step(task_id, "research")
             self.task_manager.update_task(
                 task_id,
@@ -115,9 +124,22 @@ class LandscapeService:
                 progress=5,
                 message="领域调研中：正在解析研究方向结构...",
             )
+            if bool(normalized_query.get("was_corrected")):
+                self._append_log(
+                    task_id,
+                    step_key="research",
+                    message=(
+                        "输入标准化："
+                        f"{normalized_query.get('original_query', request.query)} -> "
+                        f"{effective_query}"
+                    ),
+                    level="done" if normalized_query.get("used_llm") else "fallback",
+                )
             self._append_log(task_id, step_key="research", message="开始调用 LLM 生成领域骨架。", level="info")
 
-            skeleton = await self.explorer.generate_domain_skeleton(request.query)
+            skeleton = await self.explorer.generate_domain_skeleton(effective_query)
+            skeleton["domain_name"] = effective_query
+            skeleton["domain_name_en"] = effective_query
             direction_count = len(skeleton.get("sub_directions") or [])
             self._append_log(
                 task_id,
@@ -183,29 +205,53 @@ class LandscapeService:
                 level="done",
             )
 
-            self._set_step(task_id, "summarize")
-            self.task_manager.update_task(
-                task_id,
-                status="processing",
-                progress=68,
-                message="深度总结中：正在生成趋势洞察...",
-            )
-            self._append_log(task_id, step_key="summarize", message="开始生成深度总结（目标 1000+ 字）。", level="info")
-            enriched["trend_summary"] = await self.explorer.generate_landscape_summary(enriched)
-            summary_length = len(str(enriched.get("trend_summary") or ""))
-            self._append_log(
-                task_id,
-                step_key="summarize",
-                message=f"深度总结完成，正文长度约 {summary_length} 字。",
-                level="done",
-                meta={"summary_length": str(summary_length)},
-            )
+            graph_progress = 86
+            write_progress = 94
+            if self.summary_enabled:
+                self._set_step(task_id, "summarize")
+                self.task_manager.update_task(
+                    task_id,
+                    status="processing",
+                    progress=68,
+                    message="深度总结中：正在生成趋势洞察...",
+                )
+                self._append_log(
+                    task_id,
+                    step_key="summarize",
+                    message="开始生成深度总结（目标 1000+ 字）。",
+                    level="info",
+                )
+                enriched["trend_summary"] = await self.explorer.generate_landscape_summary(enriched)
+                summary_length = len(str(enriched.get("trend_summary") or ""))
+                self._append_log(
+                    task_id,
+                    step_key="summarize",
+                    message=f"深度总结完成，正文长度约 {summary_length} 字。",
+                    level="done",
+                    meta={"summary_length": str(summary_length)},
+                )
+            else:
+                enriched["trend_summary"] = "深度总结已关闭（ENABLE_LANDSCAPE_SUMMARY=false）。"
+                graph_progress = 78
+                write_progress = 90
+                self.task_manager.update_task(
+                    task_id,
+                    status="processing",
+                    progress=graph_progress - 2,
+                    message="深度总结已关闭：直接进入图谱生成...",
+                )
+                self._append_log(
+                    task_id,
+                    step_key="retrieve",
+                    message="深度总结步骤已关闭，跳过趋势洞察生成。",
+                    level="fallback",
+                )
 
             self._set_step(task_id, "graph")
             self.task_manager.update_task(
                 task_id,
                 status="processing",
-                progress=86,
+                progress=graph_progress,
                 message="图谱生成中：正在构建并刷新知识图谱...",
             )
             final_graph = build_landscape_graph(enriched, max_papers_per_direction=15)
@@ -223,7 +269,7 @@ class LandscapeService:
             self.task_manager.update_task(
                 task_id,
                 status="processing",
-                progress=94,
+                progress=write_progress,
                 message="图谱生成中：正在写入图数据库...",
             )
             stored = await asyncio.to_thread(
@@ -248,6 +294,7 @@ class LandscapeService:
                 provider_priority="openalex_then_semantic_scholar",
                 sub_directions=list(enriched.get("sub_directions") or []),
                 trend_summary=str(enriched.get("trend_summary") or ""),
+                summary_enabled=self.summary_enabled,
                 graph_data=final_graph,
                 stored_in_neo4j=bool(stored),
                 generated_at=datetime.now(timezone.utc),

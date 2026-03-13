@@ -200,6 +200,7 @@ class LandscapeResponse(BaseModel):
     provider_priority: str = "openalex_then_semantic_scholar"
     sub_directions: list[LandscapeSubDirection] = Field(default_factory=list)
     trend_summary: str = ""
+    summary_enabled: bool = False
     graph_data: dict[str, Any] = Field(default_factory=dict)
     stored_in_neo4j: bool = False
     generated_at: datetime
@@ -215,6 +216,7 @@ class LandscapeStepLog(BaseModel):
 
 class LandscapeTaskDetailResponse(TaskDetailResponse):
     step_key: LandscapeStepKey = "research"
+    summary_enabled: bool = False
     step_logs: list[LandscapeStepLog] = Field(default_factory=list)
     preview_graph: dict[str, Any] = Field(default_factory=dict)
     preview_stats: dict[str, Any] = Field(default_factory=dict)
