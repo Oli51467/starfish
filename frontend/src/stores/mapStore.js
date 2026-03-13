@@ -13,17 +13,63 @@ const mapData = ref(null);
 const loading = ref(false);
 const errorMessage = ref('');
 
-let pollingTimer = null;
+let pollingSession = 0;
 
 function stopPolling() {
-  if (pollingTimer) {
-    clearInterval(pollingTimer);
-    pollingTimer = null;
-  }
+  pollingSession += 1;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function fetchMapById(mapId) {
   mapData.value = await getMap(mapId);
+}
+
+async function pollTask(taskId) {
+  const sessionId = ++pollingSession;
+
+  while (sessionId === pollingSession) {
+    let latestTask;
+    try {
+      latestTask = await getTask(taskId);
+    } catch (error) {
+      if (sessionId !== pollingSession) return;
+      loading.value = false;
+      errorMessage.value = error.message || '任务轮询失败。';
+      return;
+    }
+
+    if (sessionId !== pollingSession) {
+      return;
+    }
+
+    task.value = latestTask;
+
+    if (latestTask.status === 'completed' && latestTask.result_id) {
+      try {
+        await fetchMapById(latestTask.result_id);
+      } catch (error) {
+        if (sessionId !== pollingSession) return;
+        loading.value = false;
+        errorMessage.value = error.message || '获取地图结果失败。';
+        return;
+      }
+      if (sessionId === pollingSession) {
+        loading.value = false;
+      }
+      return;
+    }
+
+    if (latestTask.status === 'failed') {
+      loading.value = false;
+      errorMessage.value = latestTask.error || '任务执行失败。';
+      return;
+    }
+
+    await sleep(800);
+  }
 }
 
 async function startMapGeneration() {
@@ -41,30 +87,7 @@ async function startMapGeneration() {
     });
 
     task.value = { ...created, progress: 0 };
-
-    pollingTimer = setInterval(async () => {
-      if (!task.value?.task_id) return;
-      try {
-        const latest = await getTask(task.value.task_id);
-        task.value = latest;
-
-        if (latest.status === 'completed' && latest.result_id) {
-          stopPolling();
-          await fetchMapById(latest.result_id);
-          loading.value = false;
-        }
-
-        if (latest.status === 'failed') {
-          stopPolling();
-          loading.value = false;
-          errorMessage.value = latest.error || '任务执行失败。';
-        }
-      } catch (error) {
-        stopPolling();
-        loading.value = false;
-        errorMessage.value = error.message || '任务轮询失败。';
-      }
-    }, 800);
+    void pollTask(created.task_id);
   } catch (error) {
     loading.value = false;
     errorMessage.value = error.message || '创建任务失败。';

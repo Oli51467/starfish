@@ -2,7 +2,7 @@
   <section class="panel">
     <div class="panel-head">
       <h2>研究空白探测器</h2>
-      <button class="btn mono" type="button" @click="load" :disabled="loading || !mapId">刷新</button>
+      <button class="btn mono" type="button" @click="load" :disabled="gapsLoading || !mapId">刷新</button>
     </div>
 
     <div class="panel-body" v-if="!mapId">
@@ -10,8 +10,8 @@
     </div>
 
     <div class="panel-body" v-else>
-      <LoadingState v-if="loading" message="正在检测研究空白..." />
-      <ErrorBoundary :message="errorMessage" />
+      <LoadingState v-if="gapsLoading" message="正在检测研究空白..." />
+      <ErrorBoundary :message="gapsErrorMessage" />
 
       <template v-if="gaps">
         <p class="muted gap-summary">{{ gaps.summary }}</p>
@@ -33,7 +33,7 @@ import { useMapStore } from '../stores/mapStore';
 import { usePaperStore } from '../stores/paperStore';
 
 const { mapId } = useMapStore();
-const { gaps, loading, errorMessage, loadGaps } = usePaperStore();
+const { gaps, gapsLoading, gapsErrorMessage, loadGaps } = usePaperStore();
 
 async function load() {
   if (!mapId.value) return;

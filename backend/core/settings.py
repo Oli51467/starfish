@@ -18,11 +18,14 @@ class Settings:
         )
 
         self.cors_origins = self._parse_csv(
-            os.getenv("CORS_ORIGINS", "http://localhost:17327,http://localhost:5173")
+            os.getenv(
+                "CORS_ORIGINS",
+                "http://localhost:17327,http://127.0.0.1:17327,http://localhost:5173,http://127.0.0.1:5173",
+            )
         )
 
         # LLM (OpenAI-compatible)
-        self.api_key = (os.getenv("API_KEY") or "").strip()
+        self.api_key = (os.getenv("API_KEY") or os.getenv("DASHSCOPE_API_KEY") or "").strip()
         self.openai_base_url = (os.getenv("OPENAI_BASE_URL") or "").strip()
         self.openai_model = (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip()
 

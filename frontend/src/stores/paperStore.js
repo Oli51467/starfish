@@ -5,46 +5,71 @@ import { getGaps, getLineage, getReadingList } from '../api';
 const readingList = ref(null);
 const gaps = ref(null);
 const lineage = ref(null);
-const loading = ref(false);
-const errorMessage = ref('');
+
+const readingListLoading = ref(false);
+const gapsLoading = ref(false);
+const lineageLoading = ref(false);
+
+const readingListErrorMessage = ref('');
+const gapsErrorMessage = ref('');
+const lineageErrorMessage = ref('');
+
+async function runRequest({
+  requestFn,
+  loadingRef,
+  errorRef,
+  fallbackMessage,
+  onSuccess
+}) {
+  loadingRef.value = true;
+  errorRef.value = '';
+  try {
+    const payload = await requestFn();
+    onSuccess(payload);
+  } catch (error) {
+    errorRef.value = error.message || fallbackMessage;
+  } finally {
+    loadingRef.value = false;
+  }
+}
 
 async function loadReadingList(mapId, options = {}) {
   if (!mapId) return;
-  loading.value = true;
-  errorMessage.value = '';
-  try {
-    readingList.value = await getReadingList(mapId, options);
-  } catch (error) {
-    errorMessage.value = error.message || '获取必读清单失败。';
-  } finally {
-    loading.value = false;
-  }
+  await runRequest({
+    requestFn: () => getReadingList(mapId, options),
+    loadingRef: readingListLoading,
+    errorRef: readingListErrorMessage,
+    fallbackMessage: '获取必读清单失败。',
+    onSuccess: (payload) => {
+      readingList.value = payload;
+    }
+  });
 }
 
 async function loadGaps(mapId, options = {}) {
   if (!mapId) return;
-  loading.value = true;
-  errorMessage.value = '';
-  try {
-    gaps.value = await getGaps(mapId, options);
-  } catch (error) {
-    errorMessage.value = error.message || '获取研究空白失败。';
-  } finally {
-    loading.value = false;
-  }
+  await runRequest({
+    requestFn: () => getGaps(mapId, options),
+    loadingRef: gapsLoading,
+    errorRef: gapsErrorMessage,
+    fallbackMessage: '获取研究空白失败。',
+    onSuccess: (payload) => {
+      gaps.value = payload;
+    }
+  });
 }
 
 async function loadLineage(paperId, options = {}) {
   if (!paperId) return;
-  loading.value = true;
-  errorMessage.value = '';
-  try {
-    lineage.value = await getLineage(paperId, options);
-  } catch (error) {
-    errorMessage.value = error.message || '获取论文血缘树失败。';
-  } finally {
-    loading.value = false;
-  }
+  await runRequest({
+    requestFn: () => getLineage(paperId, options),
+    loadingRef: lineageLoading,
+    errorRef: lineageErrorMessage,
+    fallbackMessage: '获取论文血缘树失败。',
+    onSuccess: (payload) => {
+      lineage.value = payload;
+    }
+  });
 }
 
 export function usePaperStore() {
@@ -52,8 +77,12 @@ export function usePaperStore() {
     readingList,
     gaps,
     lineage,
-    loading,
-    errorMessage,
+    readingListLoading,
+    gapsLoading,
+    lineageLoading,
+    readingListErrorMessage,
+    gapsErrorMessage,
+    lineageErrorMessage,
     loadReadingList,
     loadGaps,
     loadLineage

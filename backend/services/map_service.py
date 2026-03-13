@@ -8,16 +8,24 @@ from core.graph_builder import GraphBuilder
 from core.paper_fetcher import PaperFetcher
 from core.settings import get_settings
 from core.task_manager import TaskManager, get_task_manager
-from models.schemas import MapGenerateRequest, MapResponse, TaskCreateResponse, TaskDetailResponse
+from models.schemas import MapGenerateRequest, MapResponse, TaskCreateResponse
+from repositories.map_repository import MapRepository, get_map_repository
 
 logger = logging.getLogger(__name__)
 
 
 class MapService:
-    def __init__(self, task_manager: TaskManager | None = None) -> None:
+    def __init__(
+        self,
+        task_manager: TaskManager | None = None,
+        map_repository: MapRepository | None = None,
+        paper_fetcher: PaperFetcher | None = None,
+        graph_builder: GraphBuilder | None = None,
+    ) -> None:
         self.task_manager = task_manager or get_task_manager()
-        self.paper_fetcher = PaperFetcher()
-        self.graph_builder = GraphBuilder()
+        self.map_repository = map_repository or get_map_repository()
+        self.paper_fetcher = paper_fetcher or PaperFetcher()
+        self.graph_builder = graph_builder or GraphBuilder()
         self.settings = get_settings()
 
     async def create_map_task(self, request: MapGenerateRequest) -> TaskCreateResponse:
@@ -60,7 +68,7 @@ class MapService:
                 depth=request.depth,
             )
 
-            self.task_manager.store_map(map_payload.map_id, map_payload.model_dump())
+            self.map_repository.save_map(map_payload.map_id, map_payload.model_dump())
             self.task_manager.update_task(
                 task_id,
                 status="processing",
@@ -87,12 +95,8 @@ class MapService:
                 error=str(exc),
             )
 
-    def get_task(self, task_id: str) -> TaskDetailResponse | None:
-        task = self.task_manager.get_task(task_id)
-        return task.to_schema() if task else None
-
     def get_map(self, map_id: str) -> MapResponse | None:
-        payload = self.task_manager.get_map(map_id)
+        payload = self.map_repository.get_map(map_id)
         return MapResponse(**payload) if payload else None
 
 

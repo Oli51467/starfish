@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
 
+from core.exceptions import MapNotFoundError
 from models.schemas import ReadingListResponse
 from services.reading_list_service import get_reading_list_service
 
@@ -21,5 +22,5 @@ def get_reading_list(
             focus_area=focus_area,
             max_papers=max_papers,
         )
-    except KeyError:
+    except MapNotFoundError:
         raise HTTPException(status_code=404, detail="map_not_found") from None

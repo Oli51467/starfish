@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
 from threading import Lock
-from typing import Any
 from uuid import uuid4
 
 from models.schemas import TaskDetailResponse
@@ -39,7 +38,6 @@ class TaskState:
 class TaskManager:
     def __init__(self) -> None:
         self._tasks: dict[str, TaskState] = {}
-        self._maps: dict[str, dict[str, Any]] = {}
         self._lock = Lock()
 
     def create_task(self, message: str = "Task created") -> TaskState:
@@ -79,14 +77,6 @@ class TaskManager:
                 task.error = error
             task.updated_at = _utcnow()
             return task
-
-    def store_map(self, map_id: str, payload: dict[str, Any]) -> None:
-        with self._lock:
-            self._maps[map_id] = payload
-
-    def get_map(self, map_id: str) -> dict[str, Any] | None:
-        with self._lock:
-            return self._maps.get(map_id)
 
 
 @lru_cache

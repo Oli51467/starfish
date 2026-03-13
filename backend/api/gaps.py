@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
 
+from core.exceptions import MapNotFoundError
 from models.schemas import GapsResponse
 from services.gap_service import get_gap_service
 
@@ -17,5 +18,5 @@ def get_gaps(
 ) -> GapsResponse:
     try:
         return gap_service.get_gaps(map_id=map_id, gap_types=gap_types, min_score=min_score)
-    except KeyError:
+    except MapNotFoundError:
         raise HTTPException(status_code=404, detail="map_not_found") from None

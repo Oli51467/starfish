@@ -23,11 +23,11 @@ export function generateMap(payload) {
 }
 
 export function getTask(taskId) {
-  return request(`/api/tasks/${taskId}`);
+  return request(`/api/tasks/${encodeURIComponent(taskId)}`);
 }
 
 export function getMap(mapId) {
-  return request(`/api/map/${mapId}`);
+  return request(`/api/map/${encodeURIComponent(mapId)}`);
 }
 
 export function buildKnowledgeGraph(payload) {
@@ -50,7 +50,7 @@ export function getReadingList(mapId, { focusArea = '', maxPapers = 20 } = {}) {
   const query = new URLSearchParams();
   if (focusArea) query.set('focus_area', focusArea);
   query.set('max_papers', String(maxPapers));
-  return request(`/api/reading-list/${mapId}?${query.toString()}`);
+  return request(`/api/reading-list/${encodeURIComponent(mapId)}?${query.toString()}`);
 }
 
 export function getGaps(mapId, { gapTypes = [], minScore = 60 } = {}) {
@@ -59,7 +59,7 @@ export function getGaps(mapId, { gapTypes = [], minScore = 60 } = {}) {
     query.append('gap_types', type);
   }
   query.set('min_score', String(minScore));
-  return request(`/api/gaps/${mapId}?${query.toString()}`);
+  return request(`/api/gaps/${encodeURIComponent(mapId)}?${query.toString()}`);
 }
 
 export function getLineage(paperId, { ancestorDepth = 2, descendantDepth = 2, citationTypes = [] } = {}) {
@@ -69,5 +69,5 @@ export function getLineage(paperId, { ancestorDepth = 2, descendantDepth = 2, ci
   for (const type of citationTypes) {
     query.append('citation_types', type);
   }
-  return request(`/api/lineage/${paperId}?${query.toString()}`);
+  return request(`/api/lineage/${encodeURIComponent(paperId)}?${query.toString()}`);
 }

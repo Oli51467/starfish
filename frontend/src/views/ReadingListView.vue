@@ -2,7 +2,7 @@
   <section class="panel">
     <div class="panel-head">
       <h2>必读清单智能排序</h2>
-      <button class="btn mono" type="button" @click="load" :disabled="loading || !mapId">刷新</button>
+      <button class="btn mono" type="button" @click="load" :disabled="readingListLoading || !mapId">刷新</button>
     </div>
 
     <div class="panel-body" v-if="!mapId">
@@ -10,8 +10,8 @@
     </div>
 
     <div class="panel-body" v-else>
-      <LoadingState v-if="loading" message="正在加载必读清单..." />
-      <ErrorBoundary :message="errorMessage" />
+      <LoadingState v-if="readingListLoading" message="正在加载必读清单..." />
+      <ErrorBoundary :message="readingListErrorMessage" />
 
       <template v-if="readingList">
         <div class="card-grid">
@@ -41,7 +41,12 @@ import { useMapStore } from '../stores/mapStore';
 import { usePaperStore } from '../stores/paperStore';
 
 const { mapId } = useMapStore();
-const { readingList, loading, errorMessage, loadReadingList } = usePaperStore();
+const {
+  readingList,
+  readingListLoading,
+  readingListErrorMessage,
+  loadReadingList
+} = usePaperStore();
 
 const flatPapers = computed(() => {
   const layers = readingList.value?.layers || [];
