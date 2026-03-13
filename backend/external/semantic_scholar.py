@@ -17,6 +17,10 @@ class SemanticScholarNotFoundError(SemanticScholarClientError):
     """Raised when a paper identifier does not exist in Semantic Scholar."""
 
 
+class SemanticScholarRateLimitError(SemanticScholarClientError):
+    """Raised when Semantic Scholar API rate limit is reached."""
+
+
 class SemanticScholarClient:
     """Semantic Scholar Graph API wrapper."""
 
@@ -36,6 +40,7 @@ class SemanticScholarClient:
             "publicationVenue",
             "citationCount",
             "referenceCount",
+            "publicationDate",
             "abstract",
             "url",
             "externalIds",
@@ -47,6 +52,7 @@ class SemanticScholarClient:
             "title",
             "abstract",
             "year",
+            "publicationDate",
             "citationCount",
             "venue",
             "journal",
@@ -207,6 +213,8 @@ class SemanticScholarClient:
             "paper_id": str(payload.get("paperId") or ""),
             "title": payload.get("title") or "",
             "year": payload.get("year"),
+            "month": SemanticScholarClient._extract_month(payload.get("publicationDate")),
+            "publication_date": str(payload.get("publicationDate") or ""),
             "authors": authors,
             "venue": venue,
             "citation_count": int(payload.get("citationCount") or 0),
@@ -265,6 +273,8 @@ class SemanticScholarClient:
             "title": payload.get("title") or "",
             "abstract": payload.get("abstract") or "",
             "year": payload.get("year"),
+            "month": SemanticScholarClient._extract_month(payload.get("publicationDate")),
+            "publication_date": str(payload.get("publicationDate") or ""),
             "citation_count": int(payload.get("citationCount") or 0),
             "venue": venue,
             "fields_of_study": dedup_fields,
@@ -283,9 +293,12 @@ class SemanticScholarClient:
                 response.raise_for_status()
                 return response.json()
         except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
             details = self._extract_error_message(exc.response)
-            if exc.response.status_code == 404:
+            if status_code == 404:
                 raise SemanticScholarNotFoundError(details) from exc
+            if status_code == 429 or (status_code == 403 and self._is_rate_limit_message(details)):
+                raise SemanticScholarRateLimitError(details) from exc
             raise SemanticScholarClientError(details) from exc
         except httpx.RequestError as exc:
             raise SemanticScholarClientError(str(exc)) from exc
@@ -302,3 +315,22 @@ class SemanticScholarClient:
                 if payload.get(key):
                     return str(payload[key])
         return str(payload)
+
+    @staticmethod
+    def _extract_month(publication_date: Any) -> int:
+        text = str(publication_date or "").strip()
+        if not text:
+            return 0
+        parts = text.split("-")
+        if len(parts) < 2:
+            return 0
+        try:
+            month = int(parts[1])
+        except (TypeError, ValueError):
+            return 0
+        return month if 1 <= month <= 12 else 0
+
+    @staticmethod
+    def _is_rate_limit_message(message: str) -> bool:
+        lowered = (message or "").lower()
+        return "rate limit" in lowered or "too many requests" in lowered

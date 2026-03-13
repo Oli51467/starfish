@@ -38,6 +38,14 @@ export function buildKnowledgeGraph(payload) {
   });
 }
 
+export function retrieveKnowledgePapers(payload) {
+  return request('/api/graphrag/retrieve', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+}
+
 export function getKnowledgeGraph(graphId) {
   return request(`/api/graphrag/${encodeURIComponent(graphId)}`);
 }

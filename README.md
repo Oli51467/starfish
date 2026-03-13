@@ -4,152 +4,104 @@
 
 <h1 align="center">StarFish</h1>
 
-<p align="center">面向科研检索与 GraphRAG 构建的前后端项目（Vue + FastAPI + Neo4j）。</p>
+<p align="center">面向科研检索与双知识图谱构建的 GraphRAG 工程化系统（Vue + FastAPI + Neo4j）。</p>
 
-## 项目简介
+## ⚡️项目概述
 
-StarFish 当前聚焦以下主线：
+StarFish 在本轮迭代中重点增强了“可解释、可观察、可交互”的知识图谱能力：
 
-- 论文检索与元数据抓取（Semantic Scholar）
-- 实体关系抽取与知识图谱构建
-- Neo4j 落库与回读
-- 前端工作流可视化（G6 + d3-force）
+- 双图谱创新：同一查询下同时构建并展示
+  - 论文关联图谱（以输入论文为中心）
+  - 领域关联图谱（以种子论文所在领域为中心）
+- 关联度可解释计算：采用三维加权融合（0~1）
+  - 引用关系得分 `0.5`
+  - 语义相似度得分 `0.3`
+  - 共同概念得分 `0.2`
+- 可视编码统一：关联越高，距离越近、边色越深；低关联使用浅色/虚线，无关联可不连线。
+- 交互增强：
+  - 点击论文节点显示论文详情卡片
+  - 点击领域节点显示领域详情卡片
+  - 刷新图谱与切换 Tab 的工具栏化操作
+- 视口自适应：图谱画布高度按屏幕可视区固定，避免超出滚动区后影响整体阅读。
+- 后端可观测性：第 2 步新增 `build_steps`，直接输出关键执行路径（用于前端步骤日志渲染）。
 
-## 技术栈
+技术栈：
 
 - 前端：`Vue 3` + `Vite` + `@antv/g6`
-- 后端：`FastAPI` + `Uvicorn`（Python 3.11+）
-- 基础设施：`PostgreSQL` + `Neo4j` + `Redis`（Docker Compose）
+- 后端：`FastAPI` + `Uvicorn`
+- 数据层：`Neo4j`（图谱落库与回读）
+- 检索源：`Semantic Scholar` + `OpenAlex`（失败自动回退）
 
-## 目录结构
+## 🔁工作流程
 
-```text
-.
-├── frontend/                 # 前端工程
-│   ├── public/assets/brand/  # 品牌资源（logo）
-│   └── src/
-├── backend/                  # FastAPI 后端
-├── docker-compose.yml
-├── start-dev.sh              # 一键启动前后端（本地开发模式）
-├── PRD.md
-└── STYLE.md
-```
+当前工作流保留 2 步（第 1 步不变，第 2 步合并建图与抽取）：
 
-## 快速开始
+1. 论文检索
+- 执行网页检索规划、候选抓取、筛选排序。
+- 前端展示检索 trace（来源、数量、耗时、链接）。
 
-### 1) 安装依赖
+2. 建图&实体关系抽取
+- 后端完成：节点/边构建、实体关系抽取、可选 Neo4j 落库。
+- 返回 `build_steps`（仅 2 条关键执行路径）：
+  - `build_extract`：建图与实体关系抽取结果
+  - `store_graph`：落库状态与回读准备（成功/降级）
+- 前端直接消费后端 `build_steps`，在第 2 步日志卡片中展示关键路径。
 
-```bash
-# 前端
-npm --prefix frontend install
+关键接口：
 
-# 后端
-python3 -m pip install -r backend/requirements.txt
-```
+- `POST /api/graphrag/retrieve`：论文检索与筛选（含 trace）
+- `POST /api/graphrag/build`：建图与实体关系抽取（含 `build_steps`）
+- `GET /api/graphrag/{graph_id}`：图谱回读
+- `GET /api/graphrag/neo4j/status`：Neo4j 可用性
 
-### 2) 环境变量
+## 🚀快速开始
+
+### 1) 环境准备
 
 ```bash
 cp backend/.env.example backend/.env
 ```
 
-可按需填写：
+可按需配置：
 
-- `API_KEY`（OpenAI-compatible）
-- `OPENAI_BASE_URL`（可选）
-- `OPENAI_MODEL`（可选）
-- `SEMANTIC_SCHOLAR_API_KEY`（可选但推荐）
+- `SEMANTIC_SCHOLAR_API_KEY`
+- `OPENALEX_MAILTO`
+- `NEO4J_URI` / `NEO4J_USER` / `NEO4J_PASSWORD`
+- （可选）`DASHSCOPE_API_KEY`（用于语义 embedding）
 
-### 3) 启动方式
-
-#### A. 本地开发模式（前后端本机运行）
+### 2) 启动后端（Docker）
 
 ```bash
-npm run dev:all
+docker compose up -d --build backend neo4j
 ```
 
-服务地址：
+后端与图数据库：
+
+- Backend: `http://localhost:14032`
+- FastAPI Docs: `http://localhost:14032/docs`
+- Neo4j Browser: `http://localhost:7474`
+
+### 3) 启动前端（npm）
+
+```bash
+npm --prefix frontend install
+npm --prefix frontend run dev
+```
+
+前端地址：
 
 - Frontend: `http://localhost:17327`
-- Backend: `http://localhost:14032`
-- Health: `http://localhost:14032/health`
-- Docs: `http://localhost:14032/docs`
 
-注意：`dev:all` 不会自动启动 Neo4j / Postgres / Redis 容器。若要使用 GraphRAG 落库，请先启动 Neo4j：
+### 4) 常用命令
 
 ```bash
-docker compose up -d neo4j
-```
-
-#### B. Docker 一体化模式（推荐）
-
-```bash
-docker compose up -d --build
-```
-
-端口映射：
-
-- Frontend: `17327`
-- Backend: `14032`
-- Postgres: `15432`
-- Neo4j HTTP: `7474`
-- Neo4j Bolt: `7687`
-- Redis: `16379`
-
-停止服务：
-
-```bash
-docker compose down
-```
-
-## Neo4j 检查与排障
-
-若工作流提示 `Neo4j 不可用，已跳过落库`：
-
-```bash
-# 1) 启动 neo4j
-docker compose up -d neo4j
-
-# 2) 检查后端状态
+# 查看 Neo4j 可用性
 curl http://localhost:14032/api/graphrag/neo4j/status
+
+# 重启后端容器
+docker compose restart backend
+
+# 重建后端 + Neo4j
+docker compose up -d --build backend neo4j
 ```
 
-期望返回：
-
-```json
-{"available": true}
-```
-
-Neo4j Browser：`http://localhost:7474`（默认：`neo4j / starfish`）
-
-## 当前核心接口
-
-- `GET /api/papers/metadata`：论文元数据抓取（Semantic Scholar）
-- `POST /api/graphrag/build`：检索 + 抽取 + 图构建 + Neo4j 落库
-- `GET /api/graphrag/{graph_id}`：图谱回读
-- `GET /api/graphrag/neo4j/status`：Neo4j 可用性
-- `POST /api/map/generate`
-- `GET /api/tasks/{task_id}`
-- `GET /api/map/{map_id}`
-- `GET /api/reading-list/{map_id}`
-- `GET /api/gaps/{map_id}`
-- `GET /api/lineage/{paper_id}`
-
-## 常用命令
-
-```bash
-# 本地模式重启
-# Ctrl + C 后重新执行
-npm run dev:all
-
-# Docker 重启前后端
-docker compose restart frontend backend
-
-# Docker 重建并启动
-docker compose up -d --build
-```
-
-## 品牌与样式
-
-- Logo：`frontend/public/assets/brand/logo-light.png`
-- 视觉规范：`STYLE.md`

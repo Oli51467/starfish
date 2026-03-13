@@ -219,7 +219,16 @@ class Neo4jRepository:
                         p.score = $score,
                         p.year = $year,
                         p.venue = $venue,
-                        p.url = $url
+                        p.url = $url,
+                        p.authors = $authors,
+                        p.abstract = $abstract,
+                        p.keywords = $keywords,
+                        p.published_month = $published_month,
+                        p.impact_factor = $impact_factor,
+                        p.quartile = $quartile,
+                        p.citation_count = $citation_count,
+                        p.relevance = $relevance,
+                        p.influence = $influence
                     WITH p
                     MATCH (g:GraphRun {graph_id: $graph_id})
                     MERGE (g)-[:CONTAINS]->(p)
@@ -232,6 +241,15 @@ class Neo4jRepository:
                     year=node.get("meta", {}).get("year"),
                     venue=node.get("meta", {}).get("venue"),
                     url=node.get("meta", {}).get("url"),
+                    authors=node.get("meta", {}).get("authors", ""),
+                    abstract=node.get("meta", {}).get("abstract", ""),
+                    keywords=node.get("meta", {}).get("keywords", ""),
+                    published_month=int(node.get("meta", {}).get("published_month") or 0),
+                    impact_factor=float(node.get("meta", {}).get("impact_factor") or 0.0),
+                    quartile=node.get("meta", {}).get("quartile", ""),
+                    citation_count=int(node.get("meta", {}).get("citation_count") or 0),
+                    relevance=float(node.get("meta", {}).get("relevance") or 0.0),
+                    influence=float(node.get("meta", {}).get("influence") or 0.0),
                 )
             elif node_type == "entity":
                 tx.run(
@@ -400,9 +418,19 @@ class Neo4jRepository:
                 "size": Neo4jRepository._safe_float(props.get("size"), 6.0),
                 "score": Neo4jRepository._safe_float(props.get("score"), 0.0),
                 "meta": {
+                    "title": str(props.get("title") or "Unknown Paper"),
                     "year": str(props.get("year") or ""),
                     "venue": str(props.get("venue") or "Unknown Venue"),
                     "url": str(props.get("url") or ""),
+                    "authors": str(props.get("authors") or ""),
+                    "abstract": str(props.get("abstract") or ""),
+                    "keywords": str(props.get("keywords") or ""),
+                    "published_month": str(props.get("published_month") or ""),
+                    "impact_factor": str(props.get("impact_factor") or ""),
+                    "quartile": str(props.get("quartile") or ""),
+                    "citation_count": str(props.get("citation_count") or 0),
+                    "relevance": str(props.get("relevance") or 0),
+                    "influence": str(props.get("influence") or 0),
                 },
             }
 

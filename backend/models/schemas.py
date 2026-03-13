@@ -77,6 +77,55 @@ class KnowledgeGraphBuildRequest(BaseModel):
     query: str = Field(..., min_length=2)
     max_papers: int = Field(default=12, ge=3, le=30)
     max_entities_per_paper: int = Field(default=6, ge=2, le=12)
+    prefetched_papers: list["RetrievedPaper"] = Field(default_factory=list)
+
+
+class KnowledgeGraphRetrieveRequest(BaseModel):
+    query: str = Field(..., min_length=2)
+    max_papers: int = Field(default=12, ge=3, le=30)
+
+
+class RetrievalTraceStep(BaseModel):
+    phase: Literal["search_web", "retrieve", "filter"]
+    title: str
+    detail: str
+    status: Literal["done", "fallback"] = "done"
+    provider: str = ""
+    count: int = Field(default=0, ge=0)
+    links: list[str] = Field(default_factory=list)
+    elapsed_ms: int = Field(default=0, ge=0)
+
+
+class BuildTraceStep(BaseModel):
+    phase: Literal["build_extract", "store_graph"]
+    title: str
+    detail: str
+    status: Literal["done", "fallback"] = "done"
+    elapsed_ms: int = Field(default=0, ge=0)
+
+
+class RetrievedPaper(BaseModel):
+    paper_id: str
+    title: str
+    abstract: str = ""
+    year: int | None = None
+    month: int | None = None
+    publication_date: str = ""
+    citation_count: int = Field(default=0, ge=0)
+    venue: str = "Unknown Venue"
+    fields_of_study: list[str] = Field(default_factory=list)
+    authors: list[str] = Field(default_factory=list)
+    url: str | None = None
+
+
+class KnowledgeGraphRetrievalResponse(BaseModel):
+    query: str
+    provider: Literal["semantic_scholar", "openalex", "mock"]
+    candidate_count: int = Field(default=0, ge=0)
+    selected_count: int = Field(default=0, ge=0)
+    papers: list[RetrievedPaper] = Field(default_factory=list)
+    steps: list[RetrievalTraceStep] = Field(default_factory=list)
+    generated_at: datetime
 
 
 class KnowledgeGraphNode(BaseModel):
@@ -105,6 +154,7 @@ class KnowledgeGraphResponse(BaseModel):
     domain_count: int = Field(ge=0)
     nodes: list[KnowledgeGraphNode] = Field(default_factory=list)
     edges: list[KnowledgeGraphEdge] = Field(default_factory=list)
+    build_steps: list[BuildTraceStep] = Field(default_factory=list)
     stored_in_neo4j: bool = False
     summary: str
     generated_at: datetime

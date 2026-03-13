@@ -28,9 +28,11 @@ class Settings:
         self.api_key = (os.getenv("API_KEY") or os.getenv("DASHSCOPE_API_KEY") or "").strip()
         self.openai_base_url = (os.getenv("OPENAI_BASE_URL") or "").strip()
         self.openai_model = (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip()
+        self.embedding_model = (os.getenv("EMBEDDING_MODEL") or "text-embedding-v3").strip()
 
         # External APIs
         self.semantic_scholar_api_key = (os.getenv("SEMANTIC_SCHOLAR_API_KEY") or "").strip()
+        self.openalex_mailto = (os.getenv("OPENALEX_MAILTO") or "").strip()
         self.scite_api_key = (os.getenv("SCITE_API_KEY") or "").strip()
         self.github_token = (os.getenv("GITHUB_TOKEN") or "").strip()
 
@@ -50,6 +52,12 @@ class Settings:
 
         self.http_timeout_seconds = float(os.getenv("HTTP_TIMEOUT_SECONDS", "10"))
         self.task_progress_step_seconds = float(os.getenv("TASK_PROGRESS_STEP_SECONDS", "0.2"))
+        self.graphrag_force_mock = (os.getenv("GRAPHRAG_FORCE_MOCK") or "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
     @staticmethod
     def _parse_csv(raw_value: str) -> list[str]:
