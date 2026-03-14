@@ -3,7 +3,7 @@
 </p>
 
 <h1 align="center">Starfish</h1>
-<p align="center">Science Research Engine · 面向科研探索的知识图谱工作台</p>
+<p align="center">Science Research Engine · 从一个研究领域向多触角延展，集检索、建图、自主探索的科研工作引擎。</p>
 
 ## ⚡ 项目简介
 
