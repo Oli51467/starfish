@@ -36,6 +36,10 @@ const props = defineProps({
   paperRangeYears: {
     type: Number,
     default: null
+  },
+  quickMode: {
+    type: Boolean,
+    default: false
   }
 });
 
@@ -356,6 +360,7 @@ async function runWorkflow() {
       },
       {
         paperRangeYears: parsePaperRangeYears(props.paperRangeYears),
+        quickMode: Boolean(props.quickMode),
       }
     );
     finalizeResult(result);

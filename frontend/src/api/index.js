@@ -75,9 +75,11 @@ export async function generateLandscape(query, onProgress, options = {}) {
 
   const rawRange = Number(options?.paperRangeYears);
   const paperRangeYears = Number.isFinite(rawRange) && rawRange > 0 ? Math.min(30, Math.round(rawRange)) : null;
+  const quickMode = Boolean(options?.quickMode);
   const created = await startLandscapeGeneration({
     query: safeQuery,
-    ...(paperRangeYears ? { paper_range_years: paperRangeYears } : {})
+    ...(paperRangeYears ? { paper_range_years: paperRangeYears } : {}),
+    quick_mode: quickMode
   });
   const taskId = created?.task_id;
   if (!taskId) {

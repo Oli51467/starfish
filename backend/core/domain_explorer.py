@@ -301,8 +301,12 @@ class DomainExplorer:
         *,
         direction_callback: DirectionProgressCallback | None = None,
         paper_range_years: int | None = None,
+        quick_mode: bool = False,
     ) -> dict[str, Any]:
-        semaphore = asyncio.Semaphore(3)
+        # SDK mode is more sensitive to burst traffic; reduce concurrency to
+        # avoid saturating network/runtime when multiple directions run together.
+        max_parallel = 2 if self.semantic.prefers_sdk else 3
+        semaphore = asyncio.Semaphore(max_parallel)
         directions = list(skeleton.get("sub_directions") or [])
         normalized_range = self._normalize_paper_range_years(paper_range_years)
 
@@ -341,6 +345,7 @@ class DomainExplorer:
                         keyword,
                         limit=50,
                         paper_range_years=normalized_range,
+                        quick_mode=quick_mode,
                     )
                     if papers:
                         merged_papers = self._merge_papers_by_identity(merged_papers, papers, max_size=120)
@@ -380,6 +385,7 @@ class DomainExplorer:
                             normalized,
                             limit=40,
                             paper_range_years=normalized_range,
+                            quick_mode=quick_mode,
                         )
                         if papers:
                             merged_papers = self._merge_papers_by_identity(merged_papers, papers, max_size=140)
@@ -418,6 +424,7 @@ class DomainExplorer:
         *,
         limit: int = 20,
         paper_range_years: int | None = None,
+        quick_mode: bool = False,
     ) -> tuple[list[dict[str, Any]], str]:
         safe_keyword = str(keyword or "").strip()
         if not safe_keyword:
@@ -425,36 +432,57 @@ class DomainExplorer:
 
         safe_limit = max(1, min(int(limit), 50))
         normalized_range = self._normalize_paper_range_years(paper_range_years)
+        semantic_error: Exception | None = None
         openalex_error: Exception | None = None
-        try:
-            openalex_payload = await asyncio.to_thread(self.openalex.search_papers, safe_keyword, safe_limit, 0)
-            openalex_papers = self._apply_paper_year_range(
-                list(openalex_payload.get("papers") or []),
-                paper_range_years=normalized_range,
-            )
-            if openalex_papers:
-                return openalex_papers, "openalex"
-        except OpenAlexClientError as exc:
-            openalex_error = exc
 
-        try:
-            semantic_payload = await asyncio.to_thread(self.semantic.search_papers, safe_keyword, safe_limit, 0)
-            semantic_papers = self._apply_paper_year_range(
-                list(semantic_payload.get("papers") or []),
-                paper_range_years=normalized_range,
-            )
-            if semantic_papers:
-                return semantic_papers, "semantic_scholar"
-        except SemanticScholarClientError as exc:
-            if openalex_error is not None:
-                logger.warning(
-                    "OpenAlex and Semantic Scholar both unavailable for keyword '%s': openalex=%s, semantic=%s",
+        provider_order = ["openalex", "semantic"] if bool(quick_mode) else ["semantic", "openalex"]
+
+        for provider in provider_order:
+            if provider == "semantic":
+                try:
+                    semantic_payload = await asyncio.to_thread(
+                        self.semantic.search_papers,
+                        safe_keyword,
+                        safe_limit,
+                        0,
+                    )
+                    semantic_papers = self._apply_paper_year_range(
+                        list(semantic_payload.get("papers") or []),
+                        paper_range_years=normalized_range,
+                    )
+                    if semantic_papers:
+                        return semantic_papers, "semantic_scholar"
+                except SemanticScholarClientError as exc:
+                    semantic_error = exc
+                continue
+
+            try:
+                openalex_payload = await asyncio.to_thread(
+                    self.openalex.search_papers,
                     safe_keyword,
-                    openalex_error,
-                    exc,
+                    safe_limit,
+                    0,
                 )
-            else:
-                logger.warning("Semantic Scholar unavailable for keyword '%s': %s", safe_keyword, exc)
+                openalex_papers = self._apply_paper_year_range(
+                    list(openalex_payload.get("papers") or []),
+                    paper_range_years=normalized_range,
+                )
+                if openalex_papers:
+                    return openalex_papers, "openalex"
+            except OpenAlexClientError as exc:
+                openalex_error = exc
+
+        if semantic_error is not None and openalex_error is not None:
+            logger.warning(
+                "Semantic Scholar and OpenAlex both unavailable for keyword '%s': semantic=%s, openalex=%s",
+                safe_keyword,
+                semantic_error,
+                openalex_error,
+            )
+        elif semantic_error is not None:
+            logger.warning("Semantic Scholar unavailable for keyword '%s': %s", safe_keyword, semantic_error)
+        elif openalex_error is not None:
+            logger.warning("OpenAlex unavailable for keyword '%s': %s", safe_keyword, openalex_error)
 
         return [], ""
 

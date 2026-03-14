@@ -49,6 +49,7 @@ class LandscapeCacheService:
         query: str,
         paper_range_years: int | None,
         summary_enabled: bool,
+        quick_mode: bool,
     ) -> str:
         normalized_query = re.sub(r"\s+", " ", str(query or "").strip()).lower()
         safe_range = self._normalize_year_range(paper_range_years)
@@ -56,6 +57,7 @@ class LandscapeCacheService:
             "query": normalized_query,
             "paper_range_years": safe_range,
             "summary_enabled": bool(summary_enabled),
+            "quick_mode": bool(quick_mode),
         }
         digest = hashlib.sha256(
             json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")

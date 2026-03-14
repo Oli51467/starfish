@@ -57,7 +57,8 @@ def build_landscape_graph(
     *,
     max_papers_per_direction: int = 15,
 ) -> dict[str, Any]:
-    domain_name = str(landscape.get("domain_name") or landscape.get("query") or "领域").strip()
+    raw_query = str(landscape.get("query") or "").strip()
+    domain_name = str(raw_query or landscape.get("domain_name") or "领域").strip()
     seed_id = f"seed:{_slug(domain_name)}"
 
     nodes: dict[str, dict[str, Any]] = {
@@ -69,7 +70,7 @@ def build_landscape_graph(
             "relevance": 1.0,
             "score": 1.0,
             "meta": {
-                "query": domain_name,
+                "query": raw_query or domain_name,
                 "abstract": f"{domain_name} 领域知识图谱（实时生成）",
             },
         }

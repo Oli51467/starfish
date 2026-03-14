@@ -65,6 +65,7 @@ class LandscapeService:
             query=request.query,
             paper_range_years=request.paper_range_years,
             summary_enabled=self.summary_enabled,
+            quick_mode=request.quick_mode,
         )
         async with self._task_create_lock:
             cached_payload = await self.cache_service.get(cache_key)
@@ -250,6 +251,7 @@ class LandscapeService:
             self._append_log(task_id, step_key="research", message="开始调用 LLM 生成领域骨架。", level="info")
 
             skeleton = await self.explorer.generate_domain_skeleton(effective_query)
+            skeleton["query"] = str(request.query).strip() or effective_query
             skeleton["domain_name"] = effective_query
             skeleton["domain_name_en"] = effective_query
             sub_directions = list(skeleton.get("sub_directions") or [])
@@ -320,10 +322,11 @@ class LandscapeService:
             range_hint = ""
             if request.paper_range_years:
                 range_hint = f"，时间范围近 {int(request.paper_range_years)} 年"
+            mode_hint = "（快速模式：OpenAlex 优先）" if bool(request.quick_mode) else "（标准模式：Semantic 优先）"
             self._append_log(
                 task_id,
                 step_key="retrieve",
-                message=f"开始论文检索并并行抓取候选论文{range_hint}。",
+                message=f"开始论文检索并并行抓取候选论文{range_hint}{mode_hint}。",
                 level="info",
             )
 
@@ -364,6 +367,7 @@ class LandscapeService:
                 skeleton,
                 direction_callback=direction_callback,
                 paper_range_years=request.paper_range_years,
+                quick_mode=request.quick_mode,
             )
             enriched = self.explorer.sort_sub_directions(enriched)
             self._append_log(
@@ -453,7 +457,11 @@ class LandscapeService:
                 domain_name=str(enriched.get("domain_name") or request.query),
                 domain_name_en=str(enriched.get("domain_name_en") or ""),
                 description=str(enriched.get("description") or ""),
-                provider_priority="openalex_then_semantic_scholar",
+                provider_priority=(
+                    "openalex_then_semantic_scholar"
+                    if bool(request.quick_mode)
+                    else "semantic_scholar_then_openalex"
+                ),
                 sub_directions=list(enriched.get("sub_directions") or []),
                 trend_summary=str(enriched.get("trend_summary") or ""),
                 summary_enabled=self.summary_enabled,

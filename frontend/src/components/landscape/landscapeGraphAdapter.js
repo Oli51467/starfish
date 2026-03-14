@@ -34,7 +34,7 @@ function paperRelevance(paper) {
 }
 
 export function buildLandscapeGraphFallback(landscape) {
-  const domainName = String(landscape?.domain_name || landscape?.query || '领域').trim();
+  const domainName = String(landscape?.query || landscape?.domain_name || '领域').trim();
   const seedId = `seed:${slug(domainName)}`;
 
   const nodes = [

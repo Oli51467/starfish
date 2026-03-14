@@ -168,6 +168,7 @@ class KnowledgeGraphResponse(BaseModel):
 class LandscapeGenerateRequest(BaseModel):
     query: str = Field(..., min_length=2, max_length=120)
     paper_range_years: int | None = Field(default=None, ge=1, le=30)
+    quick_mode: bool = False
 
 
 class LandscapeCorePaper(BaseModel):

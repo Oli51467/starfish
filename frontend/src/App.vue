@@ -15,6 +15,7 @@
         v-else-if="isDomainWorkflow"
         :query="workflowSeed.input_value"
         :paper-range-years="workflowSeed.paper_range_years"
+        :quick-mode="workflowSeed.quick_mode"
         @step-change="updateHeaderStep"
       />
       <WorkflowView v-else :seed="workflowSeed" @step-change="updateHeaderStep" @back="exitWorkflow" />
@@ -35,6 +36,7 @@ const workflowSeed = ref({
   input_type: '',
   input_value: '',
   paper_range_years: null,
+  quick_mode: false,
   depth: 2
 });
 const headerStep = ref({

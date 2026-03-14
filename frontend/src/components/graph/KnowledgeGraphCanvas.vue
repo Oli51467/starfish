@@ -334,6 +334,7 @@ let graphInstance = null;
 let resizeObserver = null;
 let resizeRaf = 0;
 let nodeClickHandler = null;
+let lastGraphSignature = '';
 
 const DIRECTION_MODE = Object.freeze({
   NONE: 'none',
@@ -513,6 +514,32 @@ function edgeDistance(relevance, kind) {
   return clamp(430 - normalized * 150, 250, 430);
 }
 
+function graphPayloadSignature(graphPayload) {
+  const nodes = Array.isArray(graphPayload?.nodes) ? graphPayload.nodes : [];
+  const edges = Array.isArray(graphPayload?.edges) ? graphPayload.edges : [];
+  const headNode = nodes[0] || {};
+  const tailNode = nodes.at(-1) || {};
+  const tailEdge = edges.at(-1) || {};
+  return [
+    nodes.length,
+    edges.length,
+    String(headNode.id || ''),
+    String(tailNode.id || ''),
+    String(headNode.name || headNode.label || ''),
+    String(tailNode.name || tailNode.label || ''),
+    String(tailEdge.id || ''),
+    String(tailEdge.source || ''),
+    String(tailEdge.target || '')
+  ].join(':');
+}
+
+function isSingleSeedGraph(graphPayload) {
+  const nodes = Array.isArray(graphPayload?.nodes) ? graphPayload.nodes : [];
+  if (nodes.length !== 1) return false;
+  const only = nodes[0] || {};
+  return String(only.kind || only.type || '').toLowerCase() === 'seed';
+}
+
 function nodeSize(node, totalNodes) {
   const normalized = normalizeRate(node?.relevance ?? node?.score);
   if (node?.kind === 'seed') {
@@ -656,6 +683,30 @@ function toG6Data(graphPayload) {
 }
 
 function buildLayout(width, height, totalNodes, edgeCount) {
+  if (totalNodes <= 1) {
+    return {
+      type: 'd3-force',
+      animation: false,
+      preventOverlap: false,
+      center: [width / 2, height / 2],
+      alphaDecay: 1,
+      velocityDecay: 1,
+      iterations: 1,
+      manyBody: {
+        strength: 0,
+        distanceMax: 1
+      },
+      link: {
+        distance: 160,
+        strength: 0
+      },
+      collide: {
+        strength: 0,
+        iterations: 1,
+        radius: () => 0
+      }
+    };
+  }
   const crowdFactor = clamp(edgeCount / Math.max(1, totalNodes), 1.2, 6.2);
   return {
     type: 'd3-force',
@@ -837,6 +888,10 @@ async function initGraph() {
   });
 
   await graphInstance.render();
+  if (isSingleSeedGraph(props.graph) && graphInstance?.zoomTo) {
+    await graphInstance.zoomTo(1, { duration: 0 });
+  }
+  lastGraphSignature = graphPayloadSignature(props.graph);
   bindNodeClick();
 }
 
@@ -846,10 +901,16 @@ async function updateGraphData() {
     return;
   }
   const { width, height } = getContainerSize();
-  const viewport = getViewportSnapshot();
+  const singleSeed = isSingleSeedGraph(props.graph);
+  const viewport = singleSeed ? null : getViewportSnapshot();
   graphInstance.setOptions(graphOptions(width, height));
   await graphInstance.render();
-  await restoreViewport(viewport);
+  if (singleSeed && graphInstance?.zoomTo) {
+    await graphInstance.zoomTo(1, { duration: 0 });
+  } else {
+    await restoreViewport(viewport);
+  }
+  lastGraphSignature = graphPayloadSignature(props.graph);
 }
 
 async function recreateGraph({ fitView = false } = {}) {
@@ -866,6 +927,14 @@ async function recreateGraph({ fitView = false } = {}) {
       // no-op
     }
   }
+  if (isSingleSeedGraph(props.graph) && graphInstance?.zoomTo) {
+    try {
+      await graphInstance.zoomTo(1, { duration: 0 });
+    } catch {
+      // no-op
+    }
+  }
+  lastGraphSignature = graphPayloadSignature(props.graph);
 }
 
 async function refreshGraphDisplay() {
@@ -1150,6 +1219,10 @@ defineExpose({
 watch(
   () => props.graph,
   async () => {
+    const signature = graphPayloadSignature(props.graph);
+    if (signature === lastGraphSignature) {
+      return;
+    }
     if (selectedDirectionId.value) {
       const hasSelectedDirection = (props.graph?.nodes || []).some((item) => (
         item?.kind === 'domain' && String(item.id || '') === selectedDirectionId.value
