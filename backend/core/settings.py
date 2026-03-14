@@ -49,6 +49,22 @@ class Settings:
             0.1, float(os.getenv("NEO4J_CONNECT_RETRY_INTERVAL_SECONDS", "0.8"))
         )
         self.redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        self.enable_landscape_cache = self._parse_bool(
+            os.getenv("ENABLE_LANDSCAPE_CACHE"),
+            default=True,
+        )
+        self.landscape_cache_ttl_seconds = max(
+            60,
+            int(os.getenv("LANDSCAPE_CACHE_TTL_SECONDS", "604800")),
+        )
+        self.enable_landscape_inflight_dedup = self._parse_bool(
+            os.getenv("ENABLE_LANDSCAPE_INFLIGHT_DEDUP"),
+            default=True,
+        )
+        self.landscape_inflight_ttl_seconds = max(
+            60,
+            int(os.getenv("LANDSCAPE_INFLIGHT_TTL_SECONDS", "1800")),
+        )
 
         self.http_timeout_seconds = float(os.getenv("HTTP_TIMEOUT_SECONDS", "10"))
         self.task_progress_step_seconds = float(os.getenv("TASK_PROGRESS_STEP_SECONDS", "0.2"))

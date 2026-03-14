@@ -524,8 +524,10 @@ function nodeSize(node, totalNodes) {
   return clamp(13 + normalized * 8.2, 13, 21.5);
 }
 
-function shouldRenderNodeLabel(nodeKind) {
-  return nodeKind === 'seed' || nodeKind === 'domain' || nodeKind === 'paper';
+function shouldRenderNodeLabel(nodeKind, totalNodes, isSelectedNode) {
+  if (nodeKind === 'seed' || nodeKind === 'domain') return true;
+  if (nodeKind !== 'paper') return false;
+  return true;
 }
 
 function nodeLabelLimit(nodeKind, totalNodes) {
@@ -581,7 +583,7 @@ function toG6Data(graphPayload) {
     );
     const isDimmedNode = hasSelection && kind !== 'seed' && !isSelectedNode;
     const nodeOpacity = kind === 'seed' ? (hasSelection ? 0.6 : 1) : (isDimmedNode ? 0.16 : 1);
-    const showLabel = shouldRenderNodeLabel(kind);
+    const showLabel = shouldRenderNodeLabel(kind, totalNodes, isSelectedNode);
     const labelText = showLabel
       ? shortLabel(node.name || node.label, nodeLabelLimit(kind, totalNodes))
       : '';
@@ -875,6 +877,27 @@ async function refreshGraphDisplay() {
   await recreateGraph({ fitView: true });
 }
 
+async function zoomToMinOverview() {
+  if (!graphInstance) return;
+  const minZoom = Number(GRAPH_ZOOM_RANGE?.[0]);
+  if (!Number.isFinite(minZoom)) return;
+  try {
+    if (graphInstance.fitView) {
+      await graphInstance.fitView();
+    }
+    if (graphInstance.zoomTo) {
+      await graphInstance.zoomTo(minZoom, { duration: 240 });
+    }
+  } catch {
+    // no-op
+  }
+}
+
+async function refreshGraphToMinOverview() {
+  await refreshGraphDisplay();
+  await zoomToMinOverview();
+}
+
 function updateFullscreenState() {
   const layout = graphBodyRef.value?.closest?.('.workflow-layout');
   if (!layout) {
@@ -1120,7 +1143,8 @@ const pinnedCardStyle = computed(() => {
 });
 
 defineExpose({
-  refreshGraphDisplay
+  refreshGraphDisplay,
+  refreshGraphToMinOverview
 });
 
 watch(

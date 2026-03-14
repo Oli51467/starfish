@@ -1,4 +1,5 @@
 const DEFAULT_API_BASE_URL = 'http://localhost:14032';
+const LANDSCAPE_TASK_POLL_INTERVAL_MS = 700;
 
 function getApiBaseUrl() {
   return (import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL).replace(/\/$/, '');
@@ -102,7 +103,7 @@ export async function generateLandscape(query, onProgress, options = {}) {
     if (task.status === 'failed') {
       throw new Error(task.error || task.message || '领域全景生成失败');
     }
-    await new Promise((resolve) => setTimeout(resolve, 1800));
+    await new Promise((resolve) => setTimeout(resolve, LANDSCAPE_TASK_POLL_INTERVAL_MS));
   }
 }
 

@@ -23,6 +23,7 @@ from models.schemas import (
 )
 from repositories.landscape_repository import LandscapeRepository, get_landscape_repository
 from repositories.neo4j_repository import Neo4jRepository, get_neo4j_repository
+from services.landscape_cache_service import LandscapeCacheService, get_landscape_cache_service
 from services.landscape_graph_adapter import build_landscape_graph
 
 logger = logging.getLogger(__name__)
@@ -46,40 +47,130 @@ class LandscapeService:
         landscape_repository: LandscapeRepository | None = None,
         explorer: DomainExplorer | None = None,
         neo4j_repository: Neo4jRepository | None = None,
+        cache_service: LandscapeCacheService | None = None,
     ) -> None:
         settings = get_settings()
         self.task_manager = task_manager or get_task_manager()
         self.repository = landscape_repository or get_landscape_repository()
         self.explorer = explorer or DomainExplorer()
         self.neo4j_repository = neo4j_repository or get_neo4j_repository()
+        self.cache_service = cache_service or get_landscape_cache_service()
         self.summary_enabled = bool(settings.enable_landscape_summary)
         self._runtime: dict[str, _LandscapeRuntime] = {}
         self._runtime_lock = Lock()
+        self._task_create_lock = asyncio.Lock()
 
     async def create_landscape_task(self, request: LandscapeGenerateRequest) -> TaskCreateResponse:
-        task = self.task_manager.create_task(message="任务已创建，等待执行")
-        self._ensure_runtime(task.task_id)
-        seed_preview = build_landscape_graph(
-            {"domain_name": request.query, "sub_directions": []},
-            max_papers_per_direction=0,
+        cache_key = self.cache_service.build_cache_key(
+            query=request.query,
+            paper_range_years=request.paper_range_years,
+            summary_enabled=self.summary_enabled,
         )
-        self._set_preview(
-            task.task_id,
-            seed_preview,
-            self._build_preview_stats({"sub_directions": []}, seed_preview),
-        )
-        self._append_log(
-            task.task_id,
-            step_key="research",
-            message="任务已创建，准备开始领域调研。",
-            level="info",
-        )
-        asyncio.create_task(self._run_task(task.task_id, request))
-        return TaskCreateResponse(
-            task_id=task.task_id,
-            status=task.status,
-            message="领域全景任务已提交",
-        )
+        async with self._task_create_lock:
+            cached_payload = await self.cache_service.get(cache_key)
+            if cached_payload is not None:
+                try:
+                    cached_response = LandscapeResponse.model_validate(cached_payload)
+                except Exception:  # noqa: BLE001
+                    logger.warning("Invalid landscape cache payload, fallback to regeneration.")
+                else:
+                    self.repository.save_landscape(cached_response.landscape_id, cached_response.model_dump())
+                    task = self.task_manager.create_task(message="命中公共缓存，准备快速复用结果")
+                    self._ensure_runtime(task.task_id)
+                    seed_preview = build_landscape_graph(
+                        {"domain_name": request.query, "sub_directions": []},
+                        max_papers_per_direction=0,
+                    )
+                    self._set_preview(
+                        task.task_id,
+                        seed_preview,
+                        self._build_preview_stats({"sub_directions": []}, seed_preview),
+                    )
+                    self._append_log(
+                        task.task_id,
+                        step_key="research",
+                        message="命中公共缓存：准备加载历史结果并回放工作流步骤。",
+                        level="info",
+                    )
+                    asyncio.create_task(self._run_cached_task(task.task_id, request, cached_response))
+                    return TaskCreateResponse(
+                        task_id=task.task_id,
+                        status=task.status,
+                        message="命中公共缓存，已进入快速回放流程",
+                    )
+
+            inflight_task_id = await self.cache_service.get_inflight_task(cache_key)
+            if inflight_task_id:
+                inflight_task = self.task_manager.get_task(inflight_task_id)
+                if inflight_task is not None and inflight_task.status in {"pending", "processing", "completed"}:
+                    message = "命中并发去重，复用已存在任务。"
+                    if inflight_task.status == "completed":
+                        message = "命中并发去重，复用已完成任务。"
+                    return TaskCreateResponse(
+                        task_id=inflight_task.task_id,
+                        status=inflight_task.status,
+                        message=message,
+                    )
+                await self.cache_service.release_inflight(cache_key, expected_task_id=inflight_task_id)
+
+            task = self.task_manager.create_task(message="任务已创建，等待执行")
+            acquired, existing_task_id = await self.cache_service.acquire_inflight(cache_key, task.task_id)
+            if not acquired and existing_task_id:
+                existing_task = self.task_manager.get_task(existing_task_id)
+                if existing_task is not None and existing_task.status in {"pending", "processing", "completed"}:
+                    self.task_manager.update_task(
+                        task.task_id,
+                        status="failed",
+                        progress=100,
+                        message="并发去重：当前任务未执行。",
+                        error="deduplicated_by_inflight",
+                    )
+                    message = "命中并发去重，复用已存在任务。"
+                    if existing_task.status == "completed":
+                        message = "命中并发去重，复用已完成任务。"
+                    return TaskCreateResponse(
+                        task_id=existing_task.task_id,
+                        status=existing_task.status,
+                        message=message,
+                    )
+                await self.cache_service.release_inflight(cache_key, expected_task_id=existing_task_id)
+                acquired, _ = await self.cache_service.acquire_inflight(cache_key, task.task_id)
+                if not acquired:
+                    self.task_manager.update_task(
+                        task.task_id,
+                        status="failed",
+                        progress=100,
+                        message="任务创建失败，请重试。",
+                        error="inflight_acquire_failed",
+                    )
+                    return TaskCreateResponse(
+                        task_id=task.task_id,
+                        status="failed",
+                        message="任务创建失败，请重试",
+                    )
+
+            self._ensure_runtime(task.task_id)
+            seed_preview = build_landscape_graph(
+                {"domain_name": request.query, "sub_directions": []},
+                max_papers_per_direction=0,
+            )
+            self._set_preview(
+                task.task_id,
+                seed_preview,
+                self._build_preview_stats({"sub_directions": []}, seed_preview),
+            )
+            self._append_log(
+                task.task_id,
+                step_key="research",
+                message="任务已创建，准备开始领域调研。",
+                level="info",
+            )
+            asyncio.create_task(self._run_task(task.task_id, request, cache_key=cache_key))
+            return TaskCreateResponse(
+                task_id=task.task_id,
+                status=task.status,
+                message="领域全景任务已提交",
+            )
 
     def get_task(self, task_id: str) -> LandscapeTaskDetailResponse | None:
         task = self.task_manager.get_task(task_id)
@@ -108,7 +199,13 @@ class LandscapeService:
             return None
         return self.get_landscape(task.result_id)
 
-    async def _run_task(self, task_id: str, request: LandscapeGenerateRequest) -> None:
+    async def _run_task(
+        self,
+        task_id: str,
+        request: LandscapeGenerateRequest,
+        *,
+        cache_key: str | None = None,
+    ) -> None:
         landscape_id = f"landscape-{uuid4().hex[:12]}"
         self._ensure_runtime(task_id)
 
@@ -365,6 +462,17 @@ class LandscapeService:
                 generated_at=datetime.now(timezone.utc),
             )
             self.repository.save_landscape(landscape_id, response.model_dump())
+            if cache_key:
+                try:
+                    await self.cache_service.set(cache_key, response.model_dump(mode="json"))
+                    self._append_log(
+                        task_id,
+                        step_key="graph",
+                        message="公共结果缓存已更新。",
+                        level="done",
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("Failed persisting landscape public cache.")
 
             self.task_manager.update_task(
                 task_id,
@@ -376,6 +484,179 @@ class LandscapeService:
             self._append_log(task_id, step_key="graph", message="任务完成。", level="done")
         except Exception as exc:  # noqa: BLE001
             logger.exception("Landscape generation task failed")
+            self.task_manager.update_task(
+                task_id,
+                status="failed",
+                progress=100,
+                message="领域全景生成失败",
+                error=str(exc),
+            )
+            runtime = self._snapshot_runtime(task_id)
+            self._append_log(
+                task_id,
+                step_key=runtime.step_key,
+                message=f"任务失败：{exc}",
+                level="error",
+            )
+        finally:
+            if cache_key:
+                await self.cache_service.release_inflight(cache_key, expected_task_id=task_id)
+
+    async def _run_cached_task(
+        self,
+        task_id: str,
+        request: LandscapeGenerateRequest,
+        cached_response: LandscapeResponse,
+    ) -> None:
+        self._ensure_runtime(task_id)
+        cached_landscape = cached_response.model_dump()
+        cached_graph = dict(cached_response.graph_data or {})
+
+        try:
+            self._set_step(task_id, "research")
+            self.task_manager.update_task(
+                task_id,
+                status="processing",
+                progress=8,
+                message="领域调研中：正在解析研究方向结构...",
+            )
+            await asyncio.sleep(1.18)
+            self.task_manager.update_task(
+                task_id,
+                status="processing",
+                progress=16,
+                message="领域调研中：正在校验缓存骨架一致性...",
+            )
+            await asyncio.sleep(0.96)
+            skeleton_preview = build_landscape_graph(cached_landscape, max_papers_per_direction=0)
+            self._set_preview(
+                task_id,
+                skeleton_preview,
+                self._build_preview_stats(cached_landscape, skeleton_preview),
+            )
+            self._append_log(
+                task_id,
+                step_key="research",
+                message="命中公共缓存：已复用历史领域骨架。",
+                level="done",
+            )
+            await asyncio.sleep(0.72)
+
+            self._set_step(task_id, "retrieve")
+            self.task_manager.update_task(
+                task_id,
+                status="processing",
+                progress=30,
+                message="论文检索中：正在并行抓取真实论文...",
+            )
+            await asyncio.sleep(1.24)
+            self.task_manager.update_task(
+                task_id,
+                status="processing",
+                progress=44,
+                message="论文检索中：正在回放子方向检索结果...",
+            )
+            await asyncio.sleep(0.98)
+            partial_graph = build_landscape_graph(cached_landscape, max_papers_per_direction=6)
+            self._set_preview(
+                task_id,
+                partial_graph,
+                self._build_preview_stats(cached_landscape, partial_graph),
+            )
+            self._append_log(
+                task_id,
+                step_key="retrieve",
+                message="命中公共缓存：已快速复用论文检索结果。",
+                level="done",
+            )
+            await asyncio.sleep(0.78)
+
+            graph_progress = 86
+            write_progress = 94
+            if self.summary_enabled:
+                self._set_step(task_id, "summarize")
+                self.task_manager.update_task(
+                    task_id,
+                    status="processing",
+                    progress=62,
+                    message="深度总结中：正在生成趋势洞察...",
+                )
+                await asyncio.sleep(1.08)
+                self.task_manager.update_task(
+                    task_id,
+                    status="processing",
+                    progress=72,
+                    message="深度总结中：正在回放趋势洞察内容...",
+                )
+                await asyncio.sleep(0.82)
+                self._append_log(
+                    task_id,
+                    step_key="summarize",
+                    message=(
+                        "命中公共缓存：已复用趋势总结，正文长度约 "
+                        f"{len(str(cached_response.trend_summary or ''))} 字。"
+                    ),
+                    level="done",
+                )
+            else:
+                graph_progress = 78
+                write_progress = 90
+
+            self._set_step(task_id, "graph")
+            self.task_manager.update_task(
+                task_id,
+                status="processing",
+                progress=graph_progress - 6,
+                message="图谱生成中：正在构建并刷新知识图谱...",
+            )
+            await asyncio.sleep(1.06)
+            self._set_preview(
+                task_id,
+                cached_graph,
+                self._build_preview_stats(cached_landscape, cached_graph),
+            )
+            self.task_manager.update_task(
+                task_id,
+                status="processing",
+                progress=graph_progress,
+                message="图谱生成中：正在校验图谱结构...",
+            )
+            self._append_log(
+                task_id,
+                step_key="graph",
+                message=(
+                    f"图谱生成完成：节点 {len(cached_graph.get('nodes') or [])}，"
+                    f"边 {len(cached_graph.get('edges') or [])}。"
+                ),
+                level="done",
+            )
+            await asyncio.sleep(0.78)
+
+            self.task_manager.update_task(
+                task_id,
+                status="processing",
+                progress=write_progress,
+                message="图谱生成中：正在写入图数据库...",
+            )
+            await asyncio.sleep(0.72)
+            self._append_log(
+                task_id,
+                step_key="graph",
+                message="命中公共缓存：已跳过图数据库重复写入。",
+                level="done",
+            )
+            await asyncio.sleep(0.54)
+
+            self.task_manager.update_task(
+                task_id,
+                status="completed",
+                progress=100,
+                message="领域全景生成完成（缓存命中）",
+                result_id=cached_response.landscape_id,
+            )
+            self._append_log(task_id, step_key="graph", message="任务完成。", level="done")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Cached landscape replay task failed")
             self.task_manager.update_task(
                 task_id,
                 status="failed",

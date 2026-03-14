@@ -71,7 +71,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 
 import ErrorBoundary from '../common/ErrorBoundary.vue';
 import LoadingState from '../common/LoadingState.vue';
@@ -117,9 +117,34 @@ const tabs = computed(() => ([
 const activeTab = ref('graph');
 const graphCanvasRef = ref(null);
 const hasGraph = computed(() => Array.isArray(props.graphData?.nodes) && props.graphData.nodes.length > 0);
+let autoRefreshTimer = 0;
 
 async function refreshGraph() {
   await graphCanvasRef.value?.refreshGraphDisplay?.();
+}
+
+function graphSignature(graphData) {
+  const nodes = Array.isArray(graphData?.nodes) ? graphData.nodes : [];
+  const edges = Array.isArray(graphData?.edges) ? graphData.edges : [];
+  const tailNodeId = String(nodes.at(-1)?.id || '');
+  const tailEdgeId = String(edges.at(-1)?.id || '');
+  return `${nodes.length}:${edges.length}:${tailNodeId}:${tailEdgeId}`;
+}
+
+function clearAutoRefreshTimer() {
+  if (!autoRefreshTimer) return;
+  clearTimeout(autoRefreshTimer);
+  autoRefreshTimer = 0;
+}
+
+function scheduleAutoRefresh() {
+  if (activeTab.value !== 'graph' || !hasGraph.value) return;
+  clearAutoRefreshTimer();
+  autoRefreshTimer = window.setTimeout(async () => {
+    autoRefreshTimer = 0;
+    await nextTick();
+    await refreshGraph();
+  }, 120);
 }
 
 async function refreshGraphAfterTaskCompleted() {
@@ -127,6 +152,10 @@ async function refreshGraphAfterTaskCompleted() {
   if (activeTab.value !== 'graph') {
     activeTab.value = 'graph';
     await nextTick();
+  }
+  if (graphCanvasRef.value?.refreshGraphToMinOverview) {
+    await graphCanvasRef.value.refreshGraphToMinOverview();
+    return;
   }
   await refreshGraph();
 }
@@ -149,6 +178,21 @@ watch(
   },
   { immediate: true }
 );
+
+watch(
+  () => [props.loading, graphSignature(props.graphData)],
+  ([loading, signature], [prevLoading, prevSignature]) => {
+    if (!loading) return;
+    if (!signature) return;
+    if (!prevLoading || signature !== prevSignature) {
+      scheduleAutoRefresh();
+    }
+  }
+);
+
+onBeforeUnmount(() => {
+  clearAutoRefreshTimer();
+});
 
 defineExpose({
   refreshGraph,
