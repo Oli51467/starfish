@@ -5,7 +5,7 @@
       <div class="workflow-brand">
         <img class="workflow-logo" src="/assets/brand/logo-light.png" alt="StarFish logo" />
       </div>
-      <p class="muted">从一个问题向多触角延展，自动联动检索、建图、探索与研究建议。</p>
+      <p class="muted">从一个研究领域向多触角延展，集检索、建图、自主探索的科研工作引擎。</p>
     </div>
 
     <ol class="workflow-sequence" :class="{ 'is-active': started }">

@@ -12,6 +12,7 @@
             <p class="workflow-step-index mono">{{ String(step.index).padStart(2, '0') }}</p>
             <p class="workflow-step-title">{{ step.title }}</p>
             <span class="workflow-trace-badge workflow-step-status-badge" :class="`is-${stepBadgeStatus(step.status)}`">
+              <span v-if="isDoingStatus(stepBadgeStatus(step.status))" class="workflow-badge-spinner" aria-hidden="true"></span>
               {{ stepBadgeText(step.status) }}
             </span>
           </div>
@@ -24,7 +25,10 @@
             >
               <div class="workflow-trace-head">
                 <p class="workflow-trace-title mono">{{ String(logIndex + 1).padStart(2, '0') }} {{ log.title }}</p>
-                <span class="workflow-trace-badge" :class="`is-${log.status}`">{{ log.statusText }}</span>
+                <span class="workflow-trace-badge" :class="`is-${traceBadgeStatus(log.status)}`">
+                  <span v-if="isDoingStatus(traceBadgeStatus(log.status))" class="workflow-badge-spinner" aria-hidden="true"></span>
+                  {{ traceBadgeText(log.status) }}
+                </span>
               </div>
               <p class="workflow-trace-detail">{{ log.detail }}</p>
               <p v-if="log.metaText" class="workflow-trace-meta mono">{{ log.metaText }}</p>
@@ -43,6 +47,7 @@
           </section>
 
           <button v-if="step.status === 'running'" class="workflow-step-active-btn" type="button" disabled>
+            <span class="workflow-badge-spinner" aria-hidden="true"></span>
             正在处理中
           </button>
         </div>
@@ -69,20 +74,40 @@ const props = defineProps({
   }
 });
 
-function stepBadgeStatus(stepStatus) {
-  const normalized = String(stepStatus || '').toLowerCase();
-  if (normalized === 'running') return 'doing';
-  if (normalized === 'done') return 'done';
-  if (normalized === 'failed') return 'fallback';
+function normalizeStatusKey(rawStatus) {
+  const normalized = String(rawStatus || '').toLowerCase();
+  if (['running', 'doing', 'info'].includes(normalized)) return 'doing';
+  if (['done', 'completed'].includes(normalized)) return 'done';
+  if (['failed', 'error', 'fallback'].includes(normalized)) return 'fallback';
   return 'pending';
 }
 
+function stepBadgeStatus(stepStatus) {
+  return normalizeStatusKey(stepStatus);
+}
+
 function stepBadgeText(stepStatus) {
-  const normalized = String(stepStatus || '').toLowerCase();
-  if (normalized === 'running') return 'Doing';
-  if (normalized === 'done') return 'Done';
-  if (normalized === 'failed') return 'Error';
-  return 'Pending';
+  const status = stepBadgeStatus(stepStatus);
+  if (status === 'doing') return '进行中';
+  if (status === 'done') return '已完成';
+  if (status === 'fallback') return '失败';
+  return '准备中';
+}
+
+function traceBadgeStatus(logStatus) {
+  return normalizeStatusKey(logStatus);
+}
+
+function traceBadgeText(logStatus) {
+  const status = traceBadgeStatus(logStatus);
+  if (status === 'doing') return '进行中';
+  if (status === 'done') return '已完成';
+  if (status === 'fallback') return '失败';
+  return '准备中';
+}
+
+function isDoingStatus(status) {
+  return String(status || '').toLowerCase() === 'doing';
 }
 
 function isGraphStep(step) {

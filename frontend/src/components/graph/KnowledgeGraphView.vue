@@ -1,13 +1,12 @@
 <template>
-  <section class="knowledge-graph-panel">
-    <div class="knowledge-graph-toolbar">
-      <button class="btn graph-refresh-btn" type="button" aria-label="刷新图谱" title="刷新图谱" @click="refreshActiveGraph">
-        <svg viewBox="0 0 16 16" aria-hidden="true">
-          <path d="M13.5 8a5.5 5.5 0 1 1-1.16-3.4" />
-          <path d="M13.5 3.5v3.1h-3.1" />
-        </svg>
-      </button>
-      <div class="knowledge-graph-switcher" role="tablist" aria-label="知识图谱类型切换">
+  <section class="knowledge-graph-panel" :class="{ 'is-single-view': graphTabs.length <= 1 }">
+    <div
+      v-if="graphTabs.length > 1"
+      class="knowledge-graph-toolbar"
+      role="tablist"
+      aria-label="知识图谱类型切换"
+    >
+      <div class="knowledge-graph-switcher">
         <button
           v-for="tab in graphTabs"
           :key="tab.key"
@@ -23,7 +22,7 @@
       </div>
     </div>
 
-    <KnowledgeGraphCanvas ref="graphCanvasRef" :graph="activeGraph" />
+    <KnowledgeGraphCanvas :graph="activeGraph" />
   </section>
 </template>
 
@@ -37,16 +36,32 @@ const props = defineProps({
   graphData: {
     type: Object,
     required: true
+  },
+  mode: {
+    type: String,
+    default: 'multi'
   }
 });
 
-const activeGraphKey = ref('paper');
-const graphCanvasRef = ref(null);
+const activeGraphKey = ref('full');
 
 const graphSets = computed(() => buildKnowledgeGraphSets(props.graphData));
+const isPanoramaOnlyMode = computed(() => props.mode === 'panorama_only');
 
 const graphTabs = computed(() => {
+  if (isPanoramaOnlyMode.value) {
+    return [
+      {
+        key: 'panorama',
+        label: '全景图谱'
+      }
+    ];
+  }
   return [
+    {
+      key: 'full',
+      label: '全量图谱'
+    },
     {
       key: 'paper',
       label: '论文图谱'
@@ -59,11 +74,10 @@ const graphTabs = computed(() => {
 });
 
 const activeGraph = computed(() => {
+  if (isPanoramaOnlyMode.value) return graphSets.value.panorama;
+  if (activeGraphKey.value === 'panorama') return graphSets.value.panorama;
+  if (activeGraphKey.value === 'full') return graphSets.value.full;
   if (activeGraphKey.value === 'domain') return graphSets.value.domain;
   return graphSets.value.paper;
 });
-
-async function refreshActiveGraph() {
-  await graphCanvasRef.value?.refreshGraphDisplay?.();
-}
 </script>

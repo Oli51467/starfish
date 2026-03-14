@@ -50,7 +50,7 @@
 }
 
 .seed-workspace {
-  width: 100%;
+  width: min(900px, 100%);
   position: relative;
   display: grid;
   gap: 16px;
@@ -77,8 +77,8 @@
 
 .seed-input-row {
   display: grid;
-  grid-template-columns: 176px 1fr auto;
-  gap: 10px;
+  grid-template-columns: 148px minmax(0, 1fr) 156px auto;
+  gap: 8px;
   align-items: center;
 }
 
@@ -97,14 +97,20 @@
   border-color: #c8c8c8;
 }
 
-.seed-submit-btn {
-  height: 46px;
-  min-width: 108px;
+.seed-text-input:disabled {
+  background: var(--panel);
+  color: var(--muted);
+  border-color: var(--line);
+  cursor: not-allowed;
 }
 
-.seed-input-hint {
-  font-size: 11px;
-  line-height: 1.5;
+.seed-submit-btn {
+  height: 46px;
+  min-width: 96px;
+}
+
+.seed-range-select {
+  min-width: 156px;
 }
 
 .workflow-page {
@@ -131,6 +137,22 @@
   width: 1px;
   background: var(--line-2);
   pointer-events: none;
+}
+
+.workflow-layout.is-graph-fullscreen {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.workflow-layout.is-graph-fullscreen::after {
+  display: none;
+}
+
+.workflow-layout.is-graph-fullscreen .workflow-left {
+  padding-right: 0;
+}
+
+.workflow-layout.is-graph-fullscreen .workflow-right {
+  display: none;
 }
 
 .workflow-left {
@@ -195,9 +217,10 @@
 }
 
 .workflow-step-status-badge {
-  padding: 0 10px;
-  font-size: 11px;
-  line-height: 2.05;
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 2.1;
 }
 
 .workflow-step-stats-panel {
@@ -277,9 +300,32 @@
   border: 1px solid #d7dfea;
   background: #f7f9fb;
   color: #8ea0b7;
-  padding: 0 6px;
-  font-size: 9px;
-  line-height: 1.6;
+  padding: 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.9;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.workflow-badge-spinner {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  animation: workflow-spin 0.9s linear infinite;
+}
+
+@keyframes workflow-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .workflow-trace-badge.is-doing {
@@ -327,6 +373,15 @@
   font-size: 12px;
   letter-spacing: 0.08em;
   margin-top: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.workflow-step-active-btn .workflow-badge-spinner {
+  width: 12px;
+  height: 12px;
 }
 
 .workflow-trace-links {
@@ -429,6 +484,11 @@
 
   .seed-input-row {
     grid-template-columns: 1fr;
+  }
+
+  .seed-range-select {
+    min-width: 0;
+    width: 100%;
   }
 
   .seed-submit-btn {

@@ -32,6 +32,10 @@ const props = defineProps({
   query: {
     type: String,
     required: true
+  },
+  paperRangeYears: {
+    type: Number,
+    default: null
   }
 });
 
@@ -46,7 +50,7 @@ const STEP_DEFINITION = {
   retrieve: {
     key: 'retrieve',
     title: '论文检索',
-    description: 'OpenAlex 优先检索并校验真实论文数据。'
+    description: '并行检索并校验真实论文数据。'
   },
   summarize: {
     key: 'summarize',
@@ -160,11 +164,11 @@ function toLogStatus(level) {
 
 function toLogStatusText(level) {
   const normalized = String(level || '').toLowerCase();
-  if (normalized === 'done') return 'Done';
-  if (normalized === 'info') return 'Doing';
-  if (normalized === 'fallback') return 'Fallback';
-  if (normalized === 'error') return 'Error';
-  return 'Doing';
+  if (normalized === 'done') return '已完成';
+  if (normalized === 'info') return '进行中';
+  if (normalized === 'fallback') return '失败';
+  if (normalized === 'error') return '失败';
+  return '进行中';
 }
 
 function formatBeijingTime(rawTimestamp) {
@@ -190,8 +194,10 @@ function normalizeStepLogs(taskLogs) {
   for (const item of taskLogs) {
     const key = String(item?.step_key || '').trim();
     if (!Object.prototype.hasOwnProperty.call(grouped, key)) continue;
+    if (key === 'graph') continue;
     const meta = item?.meta && typeof item.meta === 'object' ? item.meta : {};
     const metaText = Object.entries(meta)
+      .filter(([k]) => !['provider', 'provider_used'].includes(String(k).toLowerCase()))
       .map(([k, v]) => `${k}: ${v}`)
       .slice(0, 4)
       .join(' · ');
@@ -213,16 +219,37 @@ function normalizeCompletedLogs(logs) {
       return {
         ...log,
         status: 'done',
-        statusText: 'Done'
+        statusText: '已完成'
       };
     }
     return log;
   });
 }
 
+function normalizeRunningLogs(logs) {
+  if (!Array.isArray(logs)) return [];
+  let latestDoingIndex = -1;
+  for (let index = logs.length - 1; index >= 0; index -= 1) {
+    if (String(logs[index]?.status || '').toLowerCase() === 'doing') {
+      latestDoingIndex = index;
+      break;
+    }
+  }
+  if (latestDoingIndex < 0) return logs;
+  return logs.map((log, index) => {
+    if (String(log?.status || '').toLowerCase() !== 'doing') return log;
+    if (index === latestDoingIndex) return log;
+    return {
+      ...log,
+      status: 'done',
+      statusText: '已完成'
+    };
+  });
+}
+
 function normalizeLogsByStepStatus(logs, stepStatus) {
   const status = String(stepStatus || '').toLowerCase();
-  if (status === 'running') return logs;
+  if (status === 'running') return normalizeRunningLogs(logs);
   return normalizeCompletedLogs(logs);
 }
 
@@ -305,6 +332,12 @@ function toggleGraphFullscreen() {
   isGraphFullscreen.value = !isGraphFullscreen.value;
 }
 
+function parsePaperRangeYears(rawValue) {
+  const parsed = Number(rawValue);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return Math.min(30, Math.round(parsed));
+}
+
 async function runWorkflow() {
   if (loading.value) return;
   rebuildSteps(summaryEnabled.value);
@@ -316,9 +349,15 @@ async function runWorkflow() {
   loadingMessage.value = '正在创建领域全景任务...';
 
   try {
-    const result = await generateLandscape(props.query, (task) => {
-      applyTaskState(task);
-    });
+    const result = await generateLandscape(
+      props.query,
+      (task) => {
+        applyTaskState(task);
+      },
+      {
+        paperRangeYears: parsePaperRangeYears(props.paperRangeYears),
+      }
+    );
     finalizeResult(result);
     for (const step of steps.value) {
       step.status = 'done';

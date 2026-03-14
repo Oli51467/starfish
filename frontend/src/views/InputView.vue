@@ -8,6 +8,7 @@
           id="input-type"
           v-model="mapInput.input_type"
           :options="inputTypeOptions"
+          placeholder="选择研究方向"
           aria-label="选择输入类型"
         />
         <input
@@ -15,12 +16,23 @@
           class="seed-text-input mono"
           v-model="mapInput.input_value"
           :placeholder="currentInputMeta.placeholder"
+          :disabled="!hasInputType"
         />
-        <button class="btn btn-accent mono seed-submit-btn" type="submit" :disabled="!mapInput.input_value.trim()">
+        <CustomSelect
+          id="paper-range"
+          class="seed-range-select"
+          v-model="mapInput.paper_range_years"
+          :options="paperRangeOptions"
+          aria-label="选择论文范围"
+        />
+        <button
+          class="btn btn-accent mono seed-submit-btn"
+          type="submit"
+          :disabled="!String(mapInput.input_type || '').trim() || !mapInput.input_value.trim()"
+        >
           开始分析
         </button>
       </div>
-      <p class="seed-input-hint mono muted">{{ currentInputMeta.hint }}</p>
     </form>
   </section>
 </template>
@@ -44,8 +56,14 @@ const workflowSteps = [
 const inputTypeOptions = [
   { label: 'arXiv ID', value: 'arxiv_id' },
   { label: 'DOI', value: 'doi' },
-  { label: 'PDF 链接', value: 'pdf' },
-  { label: '研究领域', value: 'domain' }
+  { label: '领域研究', value: 'domain' }
+];
+const paperRangeOptions = [
+  { label: '所有时间', value: '' },
+  { label: '近 1 年', value: '1' },
+  { label: '近 3 年', value: '3' },
+  { label: '近 5 年', value: '5' },
+  { label: '近 10 年', value: '10' }
 ];
 
 const isInputVisible = ref(false);
@@ -59,25 +77,30 @@ const inputTypeMeta = {
     placeholder: '例如：10.1145/3442188.3445922',
     hint: '输入 DOI，自动补全元数据并构建论文关系图。'
   },
-  pdf: {
-    placeholder: '例如：https://arxiv.org/pdf/1706.03762.pdf',
-    hint: '输入 PDF 链接，系统将提取论文元信息并开始检索。'
-  },
   domain: {
     placeholder: '例如：transformer、深度强化学习、多模态大模型',
     hint: '输入研究领域，生成子方向、核心论文与趋势洞察全景图。'
   }
 };
 const currentInputMeta = computed(
-  () => inputTypeMeta[mapInput.value.input_type] || inputTypeMeta.arxiv_id
+  () => inputTypeMeta[mapInput.value.input_type] || { placeholder: '请先选择研究方向', hint: '' }
 );
+const hasInputType = computed(() => Boolean(String(mapInput.value.input_type || '').trim()));
+
+function parsePaperRangeYears(rawValue) {
+  const parsed = Number.parseInt(String(rawValue || '').trim(), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return Math.min(30, parsed);
+}
 
 function startAnalysis() {
+  const inputType = String(mapInput.value.input_type || '').trim();
   const value = mapInput.value.input_value.trim();
-  if (!value) return;
+  if (!inputType || !value) return;
   emit('start-analysis', {
-    input_type: mapInput.value.input_type,
+    input_type: inputType,
     input_value: value,
+    paper_range_years: parsePaperRangeYears(mapInput.value.paper_range_years),
     depth: mapInput.value.depth || 2
   });
 }

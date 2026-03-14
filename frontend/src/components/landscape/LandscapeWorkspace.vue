@@ -53,7 +53,7 @@
       <template v-if="activeTab === 'graph'">
         <LoadingState v-if="loading && !hasGraph" :message="loadingMessage || '正在生成领域图谱...'" />
         <ErrorBoundary v-else-if="errorMessage && !hasGraph" :message="errorMessage" />
-        <KnowledgeGraphCanvas v-else-if="hasGraph" ref="graphCanvasRef" :graph="graphData" />
+        <KnowledgeGraphCanvas v-else-if="hasGraph" ref="graphCanvasRef" :graph="graphData" :show-tools="false" />
         <section v-else class="panel workflow-empty">
           <p class="muted">等待图谱数据...</p>
         </section>

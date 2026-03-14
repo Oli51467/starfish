@@ -66,13 +66,18 @@ export function getLandscapeResult(taskId) {
   return request(`/api/landscape/result/${encodeURIComponent(taskId)}`);
 }
 
-export async function generateLandscape(query, onProgress) {
+export async function generateLandscape(query, onProgress, options = {}) {
   const safeQuery = String(query || '').trim();
   if (!safeQuery) {
     throw new Error('query is required');
   }
 
-  const created = await startLandscapeGeneration({ query: safeQuery });
+  const rawRange = Number(options?.paperRangeYears);
+  const paperRangeYears = Number.isFinite(rawRange) && rawRange > 0 ? Math.min(30, Math.round(rawRange)) : null;
+  const created = await startLandscapeGeneration({
+    query: safeQuery,
+    ...(paperRangeYears ? { paper_range_years: paperRangeYears } : {})
+  });
   const taskId = created?.task_id;
   if (!taskId) {
     throw new Error('landscape task id missing');

@@ -50,38 +50,60 @@ function compactTokens(text) {
     .match(/[a-z0-9]{2,}/g) || [];
 }
 
-function toKeywords(raw, title, abstract) {
+const KEYWORD_STOPWORDS = new Set([
+  'with',
+  'using',
+  'based',
+  'approach',
+  'method',
+  'methods',
+  'model',
+  'models',
+  'results',
+  'result',
+  'paper',
+  'study',
+  'analysis',
+  'task',
+  'tasks',
+  'via'
+]);
+
+function toKeywords(raw) {
   const normalizedFromRaw = [];
   if (Array.isArray(raw)) {
     for (const item of raw) {
-      const value = String(item || '').trim();
+      const value = String(item || '').replace(/\s+/g, ' ').trim();
       if (value) normalizedFromRaw.push(value);
     }
   } else {
     const source = String(raw || '').trim();
     if (source) {
-      const parts = source.split(/[|,]/g);
+      const parts = source.split(/[|,;\n]/g);
       for (const item of parts) {
-        const value = item.trim();
+        const value = item.replace(/\s+/g, ' ').trim();
         if (value) normalizedFromRaw.push(value);
       }
     }
   }
 
-  const dedupRaw = [...new Set(normalizedFromRaw)].slice(0, 5);
-  if (dedupRaw.length >= 3) return dedupRaw;
-
-  const inferred = [...new Set(compactTokens(`${title} ${abstract}`))]
-    .filter((token) => token.length >= 4)
-    .filter((token) => !['using', 'based', 'approach', 'method', 'results', 'paper'].includes(token))
-    .slice(0, 5)
-    .map((token) => token[0].toUpperCase() + token.slice(1));
-
-  const merged = [...dedupRaw, ...inferred].slice(0, 5);
-  while (merged.length < 3) {
-    merged.push(['Research', 'Model', 'Evidence', 'Analysis'][merged.length]);
+  const dedup = [];
+  const seen = new Set();
+  for (const item of normalizedFromRaw) {
+    const lowered = item.toLowerCase();
+    if (seen.has(lowered) || KEYWORD_STOPWORDS.has(lowered)) {
+      continue;
+    }
+    if (!/[a-zA-Z\u4e00-\u9fff]/.test(item)) {
+      continue;
+    }
+    seen.add(lowered);
+    dedup.push(item);
+    if (dedup.length >= 5) {
+      break;
+    }
   }
-  return merged;
+  return dedup;
 }
 
 function toAuthorVenue(authors, venue) {
@@ -148,7 +170,7 @@ function buildPaperDetail(node) {
   const publishedAt = formatYearMonth(publicationYear, publicationMonth);
   const recent = isRecentPaper(publicationYear, publicationMonth);
   const impactFactorInfo = toImpactFactorInfo(node?.meta, influence);
-  const keywords = toKeywords(node?.meta?.keywords, name, node?.meta?.abstract || '');
+  const keywords = toKeywords(node?.meta?.keywords);
   const isCitationHot = citationCount >= 1000;
 
   return {
@@ -237,7 +259,7 @@ function buildSeedDetail(node) {
     relevanceToneClass: 'is-high',
     authorVenueText: '中心论文',
     abstractSnippet: '该节点表示本次分析的中心论文，图中其他节点围绕它展示关联程度。',
-    keywords: toKeywords('', query, '')
+    keywords: []
   };
 }
 

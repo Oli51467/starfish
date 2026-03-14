@@ -4,6 +4,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from functools import lru_cache
 from itertools import combinations
+import json
 import logging
 import math
 import re
@@ -17,7 +18,8 @@ from external.semantic_scholar import (
     SemanticScholarClient,
     SemanticScholarClientError,
 )
-from core.llm_client import get_client, is_configured
+from core.llm_client import chat, get_client, is_configured
+from core.paper_fetcher import PaperFetcher
 from core.settings import get_settings
 from models.schemas import (
     BuildTraceStep,
@@ -72,6 +74,7 @@ class GraphRAGService:
     def __init__(self, neo4j_repo: Neo4jRepository | None = None) -> None:
         self.semantic = SemanticScholarClient()
         self.openalex = OpenAlexClient()
+        self.paper_fetcher = PaperFetcher()
         self.neo4j_repo = neo4j_repo or get_neo4j_repository()
         self.settings = get_settings()
         self._embedding_client = None
@@ -187,11 +190,17 @@ class GraphRAGService:
         return self.neo4j_repo.is_available()
 
     def retrieve_papers(self, request: KnowledgeGraphRetrieveRequest) -> KnowledgeGraphRetrievalResponse:
-        retrieval_payload = self._retrieve_papers_with_trace(request.query, request.max_papers)
+        retrieval_payload = self._retrieve_papers_with_trace(
+            query=request.query,
+            max_papers=request.max_papers,
+            input_type=request.input_type,
+            paper_range_years=request.paper_range_years,
+        )
         papers = [RetrievedPaper.model_validate(item) for item in retrieval_payload["selected_papers"]]
         steps = [RetrievalTraceStep.model_validate(item) for item in retrieval_payload["steps"]]
+        resolved_query = str(retrieval_payload.get("query") or request.query).strip() or request.query
         return KnowledgeGraphRetrievalResponse(
-            query=request.query,
+            query=resolved_query,
             provider=str(retrieval_payload["provider"]),
             candidate_count=int(retrieval_payload["candidate_count"]),
             selected_count=len(papers),
@@ -200,14 +209,223 @@ class GraphRAGService:
             generated_at=datetime.now(timezone.utc),
         )
 
-    def _retrieve_papers(self, query: str, max_papers: int) -> list[dict[str, Any]]:
-        payload = self._retrieve_papers_with_trace(query=query, max_papers=max_papers)
+    def _retrieve_papers(
+        self,
+        query: str,
+        max_papers: int,
+        input_type: str = "domain",
+        paper_range_years: int | None = None,
+    ) -> list[dict[str, Any]]:
+        payload = self._retrieve_papers_with_trace(
+            query=query,
+            max_papers=max_papers,
+            input_type=input_type,
+            paper_range_years=paper_range_years,
+        )
         return payload["selected_papers"]
 
-    def _retrieve_papers_with_trace(self, query: str, max_papers: int) -> dict[str, Any]:
+    def _retrieve_papers_with_trace(
+        self,
+        query: str,
+        max_papers: int,
+        input_type: str = "domain",
+        paper_range_years: int | None = None,
+    ) -> dict[str, Any]:
+        normalized_input_type = str(input_type or "domain").strip().lower()
+        if normalized_input_type in {"arxiv_id", "doi"}:
+            return self._retrieve_papers_from_seed_input_with_trace(
+                input_type=normalized_input_type,
+                input_value=query,
+                max_papers=max_papers,
+                paper_range_years=paper_range_years,
+            )
+        return self._retrieve_papers_from_query_with_trace(
+            query=query,
+            max_papers=max_papers,
+            paper_range_years=paper_range_years,
+        )
+
+    def _retrieve_papers_from_seed_input_with_trace(
+        self,
+        *,
+        input_type: str,
+        input_value: str,
+        max_papers: int,
+        paper_range_years: int | None = None,
+    ) -> dict[str, Any]:
+        safe_value = input_value.strip()
+        safe_max = max(1, max_papers)
+        candidate_limit = min(220, max(safe_max + 36, safe_max * 16))
+        normalized_range = self._normalize_paper_range_years(paper_range_years)
+        steps: list[dict[str, Any]] = []
+
+        search_detail, search_links = self._seed_search_trace(input_type=input_type, input_value=safe_value)
+        steps.append(
+            self._build_retrieval_step(
+                phase="search_web",
+                title="种子论文定位与请求构造",
+                detail=search_detail,
+                provider="semantic_scholar+openalex",
+                count=0,
+                links=search_links,
+                elapsed_seconds=0.0,
+            )
+        )
+
+        if self.settings.graphrag_force_mock:
+            candidates = self._fallback_papers(query=safe_value, max_papers=candidate_limit)
+            candidates, range_filter_stats = self._apply_paper_year_range(
+                candidates,
+                paper_range_years=normalized_range,
+            )
+            selected_papers, filter_stats = self._filter_and_rank_papers(
+                candidates,
+                safe_max,
+                safe_value,
+                ranking_profile="seed_lineage",
+            )
+            range_hint = self._build_year_range_hint(normalized_range, range_filter_stats)
+            steps.append(
+                self._build_retrieval_step(
+                    phase="retrieve",
+                    title="候选论文聚合",
+                    detail=f"已启用 mock 模式，生成 {len(candidates)} 条候选论文。{range_hint}",
+                    status="fallback",
+                    provider="mock",
+                    count=len(candidates),
+                    links=[],
+                    elapsed_seconds=0.0,
+                )
+            )
+            steps.append(
+                self._build_retrieval_step(
+                    phase="filter",
+                    title="候选筛选与排序",
+                    detail=(
+                        f"输入 {filter_stats['input']} 条，去重后 {filter_stats['deduped']} 条，"
+                        f"按相关度/引用数/新近性筛选保留 {filter_stats['selected']} 条。"
+                    ),
+                    provider="mock",
+                    count=len(selected_papers),
+                    links=[],
+                    elapsed_seconds=filter_stats["elapsed_seconds"],
+                )
+            )
+            return {
+                "query": safe_value,
+                "provider": "mock",
+                "candidate_count": len(candidates),
+                "selected_papers": selected_papers,
+                "steps": steps,
+            }
+
+        fetch_start = perf_counter()
+        try:
+            seed_document = self.paper_fetcher.fetch_seed_document(
+                input_type=input_type,
+                input_value=safe_value,
+                reference_limit=candidate_limit,
+                citation_limit=candidate_limit,
+            )
+            seed_paper = seed_document.get("seed_paper") or {}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("seed retrieval failed for input_type=%s, value=%s: %s", input_type, safe_value, exc)
+            fallback_payload = self._retrieve_papers_from_query_with_trace(
+                query=safe_value,
+                max_papers=safe_max,
+                paper_range_years=normalized_range,
+            )
+            fallback_payload_steps = fallback_payload.get("steps") or []
+            fallback_payload_steps.insert(
+                0,
+                self._build_retrieval_step(
+                    phase="search_web",
+                    title="种子论文定位与请求构造",
+                    detail="种子论文定位失败，已自动降级为关键词检索。",
+                    status="fallback",
+                    provider="semantic_scholar+openalex",
+                    count=0,
+                    links=search_links,
+                    elapsed_seconds=0.0,
+                ),
+            )
+            fallback_payload["steps"] = fallback_payload_steps
+            return fallback_payload
+
+        seed_title = str(seed_paper.get("title") or "").strip() or safe_value
+        seed_paper_id = str(seed_paper.get("paper_id") or "").strip()
+        provider_used = self._infer_seed_provider(seed_paper)
+
+        candidates = self._collect_seed_candidates(seed_paper, candidate_limit=candidate_limit)
+        related_references = len(seed_paper.get("references") or [])
+        related_citations = len(seed_paper.get("citations") or [])
+        if not candidates:
+            provider_used = "mock"
+            candidates = self._fallback_papers(query=seed_title, max_papers=candidate_limit)
+
+        candidates, range_filter_stats = self._apply_paper_year_range(
+            candidates,
+            paper_range_years=normalized_range,
+            preserve_paper_id=seed_paper_id,
+        )
+        range_hint = self._build_year_range_hint(normalized_range, range_filter_stats)
+
+        retrieve_status = "done" if "semantic_scholar" in provider_used else "fallback"
+        steps.append(
+            self._build_retrieval_step(
+                phase="retrieve",
+                title="候选论文聚合",
+                detail=(
+                    f"已定位种子论文《{seed_title}》，聚合参考文献 {related_references} 篇、"
+                    f"被引文献 {related_citations} 篇。{range_hint}"
+                ),
+                status=retrieve_status,
+                provider=provider_used,
+                count=len(candidates),
+                links=[],
+                elapsed_seconds=perf_counter() - fetch_start,
+            )
+        )
+
+        selected_papers, filter_stats = self._filter_and_rank_papers(
+            candidates,
+            safe_max,
+            seed_title or safe_value,
+            ranking_profile="seed_lineage",
+        )
+        selected_papers = self._ensure_seed_first(selected_papers, seed_paper_id)
+        steps.append(
+            self._build_retrieval_step(
+                phase="filter",
+                title="候选筛选与排序",
+                detail=(
+                    f"输入 {filter_stats['input']} 条，去重后 {filter_stats['deduped']} 条，"
+                    f"按相关度/引用数/新近性筛选保留 {filter_stats['selected']} 条。"
+                ),
+                provider=provider_used,
+                count=len(selected_papers),
+                links=[],
+                elapsed_seconds=filter_stats["elapsed_seconds"],
+            )
+        )
+        return {
+            "query": seed_title or safe_value,
+            "provider": provider_used,
+            "candidate_count": len(candidates),
+            "selected_papers": selected_papers,
+            "steps": steps,
+        }
+
+    def _retrieve_papers_from_query_with_trace(
+        self,
+        query: str,
+        max_papers: int,
+        paper_range_years: int | None = None,
+    ) -> dict[str, Any]:
         safe_query = query.strip()
         safe_max = max(1, max_papers)
-        candidate_limit = min(60, max(safe_max + 6, safe_max * 3))
+        candidate_limit = min(120, max(safe_max + 20, safe_max * 6))
+        normalized_range = self._normalize_paper_range_years(paper_range_years)
         steps: list[dict[str, Any]] = []
         web_links = [
             f"https://api.semanticscholar.org/graph/v1/paper/search?query={quote_plus(safe_query)}",
@@ -217,7 +435,7 @@ class GraphRAGService:
             self._build_retrieval_step(
                 phase="search_web",
                 title="LLM 检索规划与网页搜索",
-                detail="已构造学术检索查询，并向 Semantic Scholar/OpenAlex 搜索接口发起请求。",
+                detail="已构造学术检索查询，并向外部学术索引发起请求。",
                 provider="semantic_scholar+openalex",
                 count=0,
                 links=web_links,
@@ -227,11 +445,16 @@ class GraphRAGService:
 
         if self.settings.graphrag_force_mock:
             candidates = self._fallback_papers(query=safe_query, max_papers=candidate_limit)
+            candidates, range_filter_stats = self._apply_paper_year_range(
+                candidates,
+                paper_range_years=normalized_range,
+            )
+            range_hint = self._build_year_range_hint(normalized_range, range_filter_stats)
             steps.append(
                 self._build_retrieval_step(
                     phase="retrieve",
                     title="候选论文检索",
-                    detail=f"已启用 mock 模式，生成 {len(candidates)} 条候选论文。",
+                    detail=f"已启用 mock 模式，生成 {len(candidates)} 条候选论文。{range_hint}",
                     status="fallback",
                     provider="mock",
                     count=len(candidates),
@@ -255,79 +478,47 @@ class GraphRAGService:
                 )
             )
             return {
+                "query": safe_query,
                 "provider": "mock",
                 "candidate_count": len(candidates),
                 "selected_papers": selected_papers,
                 "steps": steps,
             }
 
-        semantic_error: Exception | None = None
-        provider_used = "semantic_scholar"
-        candidate_papers: list[dict[str, Any]] = []
+        search_result = self._search_candidates_for_query(
+            query=safe_query,
+            limit=candidate_limit,
+            allow_mock=True,
+        )
+        provider_used = str(search_result["provider"])
+        candidate_papers = search_result["papers"]
+        candidate_papers, range_filter_stats = self._apply_paper_year_range(
+            candidate_papers,
+            paper_range_years=normalized_range,
+        )
+        range_hint = self._build_year_range_hint(normalized_range, range_filter_stats)
+        retrieve_status = str(search_result["status"])
+        retrieve_elapsed = float(search_result["elapsed_seconds"])
 
-        semantic_start = perf_counter()
-        try:
-            payload = self.semantic.search_papers(query=safe_query, limit=candidate_limit)
-            candidate_papers = payload.get("papers", [])
-            if candidate_papers:
-                steps.append(
-                    self._build_retrieval_step(
-                        phase="retrieve",
-                        title="候选论文检索",
-                        detail=f"Semantic Scholar 返回 {len(candidate_papers)} 条候选论文。",
-                        provider="semantic_scholar",
-                        count=len(candidate_papers),
-                        links=[],
-                        elapsed_seconds=perf_counter() - semantic_start,
-                    )
-                )
-        except SemanticScholarClientError as exc:
-            semantic_error = exc
+        if provider_used == "semantic_scholar":
+            retrieve_detail = f"外部学术索引返回 {len(candidate_papers)} 条候选论文。{range_hint}"
+        elif provider_used == "openalex":
+            retrieve_detail = f"主检索通道不可用，已自动切换备用通道，返回 {len(candidate_papers)} 条候选论文。{range_hint}"
+        else:
+            retrieve_detail = f"外部检索失败，已降级为 mock 数据（{len(candidate_papers)} 条候选）。{range_hint}"
 
-        if not candidate_papers:
-            openalex_start = perf_counter()
-            try:
-                openalex_payload = self.openalex.search_papers(query=safe_query, limit=candidate_limit)
-                candidate_papers = openalex_payload.get("papers", [])
-                if candidate_papers:
-                    provider_used = "openalex"
-                    steps.append(
-                        self._build_retrieval_step(
-                            phase="retrieve",
-                            title="候选论文检索",
-                            detail=f"Semantic Scholar 不可用，已切换 OpenAlex，返回 {len(candidate_papers)} 条候选论文。",
-                            status="fallback",
-                            provider="openalex",
-                            count=len(candidate_papers),
-                            links=[],
-                            elapsed_seconds=perf_counter() - openalex_start,
-                        )
-                    )
-            except OpenAlexClientError as exc:
-                if semantic_error is not None:
-                    logger.warning(
-                        "Semantic Scholar and OpenAlex both failed: semantic=%s, openalex=%s",
-                        semantic_error,
-                        exc,
-                    )
-                else:
-                    logger.warning("OpenAlex fallback search failed: %s", exc)
-
-        if not candidate_papers:
-            provider_used = "mock"
-            candidate_papers = self._fallback_papers(query=safe_query, max_papers=candidate_limit)
-            steps.append(
-                self._build_retrieval_step(
-                    phase="retrieve",
-                    title="候选论文检索",
-                    detail=f"外部检索失败，已降级为 mock 数据（{len(candidate_papers)} 条候选）。",
-                    status="fallback",
-                    provider="mock",
-                    count=len(candidate_papers),
-                    links=[],
-                    elapsed_seconds=0.0,
-                )
+        steps.append(
+            self._build_retrieval_step(
+                phase="retrieve",
+                title="候选论文检索",
+                detail=retrieve_detail,
+                status=retrieve_status,
+                provider=provider_used,
+                count=len(candidate_papers),
+                links=[],
+                elapsed_seconds=retrieve_elapsed,
             )
+        )
 
         selected_papers, filter_stats = self._filter_and_rank_papers(candidate_papers, safe_max, safe_query)
         steps.append(
@@ -345,23 +536,713 @@ class GraphRAGService:
             )
         )
         return {
+            "query": safe_query,
             "provider": provider_used,
             "candidate_count": len(candidate_papers),
             "selected_papers": selected_papers,
             "steps": steps,
         }
 
+    def _search_candidates_for_query(
+        self,
+        *,
+        query: str,
+        limit: int,
+        allow_mock: bool,
+    ) -> dict[str, Any]:
+        safe_limit = max(1, min(limit, 60))
+
+        semantic_error: Exception | None = None
+        semantic_start = perf_counter()
+        try:
+            payload = self.semantic.search_papers(query=query, limit=safe_limit)
+            papers = payload.get("papers", [])
+            if papers:
+                return {
+                    "provider": "semantic_scholar",
+                    "status": "done",
+                    "papers": papers,
+                    "elapsed_seconds": perf_counter() - semantic_start,
+                }
+        except SemanticScholarClientError as exc:
+            semantic_error = exc
+
+        openalex_start = perf_counter()
+        try:
+            payload = self.openalex.search_papers(query=query, limit=safe_limit)
+            papers = payload.get("papers", [])
+            if papers:
+                return {
+                    "provider": "openalex",
+                    "status": "fallback",
+                    "papers": papers,
+                    "elapsed_seconds": perf_counter() - openalex_start,
+                }
+        except OpenAlexClientError as exc:
+            if semantic_error is not None:
+                logger.warning(
+                    "Semantic Scholar and OpenAlex both failed: semantic=%s, openalex=%s",
+                    semantic_error,
+                    exc,
+                )
+            else:
+                logger.warning("OpenAlex fallback search failed: %s", exc)
+
+        if allow_mock:
+            return {
+                "provider": "mock",
+                "status": "fallback",
+                "papers": self._fallback_papers(query=query, max_papers=safe_limit),
+                "elapsed_seconds": 0.0,
+            }
+
+        return {
+            "provider": "semantic_scholar",
+            "status": "fallback",
+            "papers": [],
+            "elapsed_seconds": 0.0,
+        }
+
+    def _seed_search_trace(self, *, input_type: str, input_value: str) -> tuple[str, list[str]]:
+        safe_value = input_value.strip()
+        if input_type == "arxiv_id":
+            return (
+                "正在解析 arXiv ID，定位种子论文并拉取引用/被引关系。",
+                [
+                    f"https://api.semanticscholar.org/graph/v1/paper/ARXIV:{quote_plus(safe_value)}",
+                    f"https://api.openalex.org/works/arXiv:{quote_plus(safe_value)}",
+                ],
+            )
+        if input_type == "doi":
+            return (
+                "正在解析 DOI，定位种子论文并拉取引用/被引关系。",
+                [
+                    f"https://api.semanticscholar.org/graph/v1/paper/DOI:{quote_plus(safe_value)}",
+                    f"https://api.openalex.org/works?search={quote_plus(safe_value)}",
+                ],
+            )
+        return (
+            "正在根据论文标题检索种子论文并拉取引用/被引关系。",
+            [
+                f"https://api.semanticscholar.org/graph/v1/paper/search?query={quote_plus(safe_value)}",
+                f"https://api.openalex.org/works?search={quote_plus(safe_value)}",
+            ],
+        )
+
+    def _collect_seed_candidates(self, seed_paper: dict[str, Any], candidate_limit: int) -> list[dict[str, Any]]:
+        normalized_seed = self._normalize_seed_candidate(seed_paper, relation_type="seed")
+        if not normalized_seed:
+            return []
+
+        references = seed_paper.get("references") or []
+        citations = seed_paper.get("citations") or []
+        normalized_seed["reference_ids"] = [
+            str(item.get("paper_id") or "").strip()
+            for item in references
+            if isinstance(item, dict) and str(item.get("paper_id") or "").strip()
+        ][:120]
+        normalized_seed["citation_ids"] = [
+            str(item.get("paper_id") or "").strip()
+            for item in citations
+            if isinstance(item, dict) and str(item.get("paper_id") or "").strip()
+        ][:120]
+
+        candidates = [normalized_seed]
+        for item in citations:
+            if not isinstance(item, dict):
+                continue
+            normalized = self._normalize_seed_candidate(item, relation_type="citation")
+            if normalized:
+                candidates.append(normalized)
+        for item in references:
+            if not isinstance(item, dict):
+                continue
+            normalized = self._normalize_seed_candidate(item, relation_type="reference")
+            if normalized:
+                candidates.append(normalized)
+
+        return self._merge_candidate_lists(primary=[], secondary=candidates, limit=candidate_limit)
+
+    def _normalize_seed_candidate(
+        self,
+        payload: dict[str, Any],
+        *,
+        relation_type: str = "",
+    ) -> dict[str, Any] | None:
+        paper_id = str(payload.get("paper_id") or "").strip()
+        title = str(payload.get("title") or "").strip()
+        if not paper_id or not title:
+            return None
+
+        publication_date = str(payload.get("publication_date") or "").strip()
+        month = self._safe_int(payload.get("month"))
+        if month <= 0:
+            month = self._month_from_publication_date(publication_date)
+
+        return {
+            "paper_id": paper_id,
+            "title": title,
+            "abstract": self._normalize_abstract_text(payload.get("abstract")),
+            "year": self._safe_int(payload.get("year")) or None,
+            "month": month if 1 <= month <= 12 else None,
+            "publication_date": publication_date,
+            "citation_count": self._safe_int(payload.get("citation_count")),
+            "venue": str(payload.get("venue") or "Unknown Venue").strip() or "Unknown Venue",
+            "fields_of_study": [
+                str(item).strip()
+                for item in (payload.get("fields_of_study") or [])
+                if str(item).strip()
+            ][:5],
+            "authors": [
+                str(item).strip()
+                for item in (payload.get("authors") or [])
+                if str(item).strip()
+            ][:8],
+            "url": payload.get("url"),
+            "reference_ids": [
+                str(item).strip()
+                for item in (payload.get("reference_ids") or [])
+                if str(item).strip()
+            ][:120],
+            "citation_ids": [
+                str(item).strip()
+                for item in (payload.get("citation_ids") or [])
+                if str(item).strip()
+            ][:120],
+            "seed_relation": relation_type.strip().lower(),
+        }
+
+    def _merge_candidate_lists(
+        self,
+        *,
+        primary: list[dict[str, Any]],
+        secondary: list[dict[str, Any]],
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        seen_titles: set[str] = set()
+        for payload in [*primary, *secondary]:
+            normalized = self._normalize_retrieved_paper(payload)
+            paper_id = str(normalized.get("paper_id") or "").strip().lower()
+            title = str(normalized.get("title") or "").strip()
+            if not paper_id or not title:
+                continue
+            title_key = re.sub(r"\s+", " ", title.lower()).strip()
+            if paper_id in seen_ids or title_key in seen_titles:
+                continue
+            seen_ids.add(paper_id)
+            seen_titles.add(title_key)
+            merged.append(normalized)
+            if len(merged) >= max(1, limit):
+                break
+        return merged
+
+    def _resolve_seed_candidate_by_title(
+        self,
+        *,
+        input_title: str,
+        candidates: list[dict[str, Any]],
+        fallback_seed: dict[str, Any],
+    ) -> dict[str, Any]:
+        input_key = self._normalized_title_key(input_title)
+        fallback = self._normalize_retrieved_paper(fallback_seed)
+        best = fallback
+        best_key: tuple[float, float, int, int] | None = None
+
+        for item in candidates:
+            normalized = self._normalize_retrieved_paper(item)
+            title = str(normalized.get("title") or "").strip()
+            paper_id = str(normalized.get("paper_id") or "").strip()
+            if not title or not paper_id:
+                continue
+            candidate_key = self._normalized_title_key(title)
+            exact = 1.0 if input_key and input_key == candidate_key else 0.0
+            overlap = self._title_token_overlap(input_title, title)
+            if exact <= 0 and overlap < 0.7:
+                continue
+            year = self._safe_int(normalized.get("year"))
+            citation = self._safe_int(normalized.get("citation_count"))
+            ranking_key = (
+                exact,
+                overlap,
+                -year if year > 0 else -9999,
+                min(citation, 200000),
+            )
+            if best_key is None or ranking_key > best_key:
+                best_key = ranking_key
+                best = normalized
+
+        return best
+
+    def _ensure_seed_first(self, papers: list[dict[str, Any]], seed_paper_id: str) -> list[dict[str, Any]]:
+        seed_key = self._paper_key(seed_paper_id)
+        if not seed_key:
+            return papers
+        for index, item in enumerate(papers):
+            item_key = self._paper_key(str(item.get("paper_id") or ""))
+            if item_key != seed_key:
+                continue
+            if index > 0:
+                papers.insert(0, papers.pop(index))
+            break
+        return papers
+
+    def _infer_seed_provider(self, seed_paper: dict[str, Any]) -> str:
+        paper_id = self._paper_key(str(seed_paper.get("paper_id") or ""))
+        if not paper_id:
+            return "mock"
+        if paper_id.startswith("openalex:"):
+            return "openalex"
+        if paper_id.startswith(("doi:", "arxiv:", "title:", "pdf:")):
+            return "mock"
+        return "semantic_scholar"
+
+    def _build_domain_expansion_plan(
+        self,
+        *,
+        seed_paper: dict[str, Any],
+        raw_query: str,
+    ) -> dict[str, Any]:
+        seed_title = str(seed_paper.get("title") or "").strip() or raw_query.strip()
+        seed_abstract = self._normalize_abstract_text(seed_paper.get("abstract"))
+        related_titles = self._collect_related_titles(seed_paper, limit=20)
+        fallback = self._fallback_domain_expansion_plan(
+            seed_title=seed_title,
+            seed_abstract=seed_abstract,
+            related_titles=related_titles,
+        )
+
+        if not is_configured():
+            return fallback
+
+        related_lines = "\n".join(f"- {item}" for item in related_titles[:10])
+        related_hint = f"\nRelated paper titles:\n{related_lines}" if related_lines else ""
+
+        prompt = (
+            "You are an expert research mapper.\n"
+            "Given one seed paper, infer its core research domain (not the paper title), "
+            "and produce domain-oriented expansion queries.\n"
+            "Return STRICT JSON only with this schema:\n"
+            "{\n"
+            '  "core_topic": "short english phrase",\n'
+            '  "expansion_queries": ["query1", "query2", "..."]\n'
+            "}\n"
+            "Rules:\n"
+            "1) Focus on the core domain and technical branches.\n"
+            "2) Include method variants and cross-domain applications.\n"
+            "3) Do NOT use near-duplicate title search strings.\n"
+            "4) Queries must be concise English academic search phrases.\n"
+            "5) 6-10 queries.\n\n"
+            f"Seed title: {seed_title}\n"
+            f"Seed abstract: {seed_abstract[:1500]}"
+            f"{related_hint}"
+        )
+        try:
+            response = chat(
+                [{"role": "user", "content": prompt}],
+                max_tokens=420,
+                timeout=40,
+            )
+            raw_content = str(response.choices[0].message.content or "").strip()
+            payload = self._extract_json_payload(raw_content)
+            if not isinstance(payload, dict):
+                return fallback
+
+            core_topic = str(payload.get("core_topic") or "").strip()
+            if not core_topic:
+                core_topic = str(fallback.get("core_topic") or seed_title).strip()
+            core_topic = self._canonicalize_core_topic(core_topic)
+            seed_title_lower = seed_title.lower()
+            seed_abstract_lower = seed_abstract.lower()
+            if "attention is all you need" in seed_title_lower:
+                core_topic = "transformer"
+            elif "transformer" in seed_abstract_lower and "attention" in core_topic.lower():
+                core_topic = "transformer"
+            if self._title_token_overlap(core_topic, seed_title) >= 0.72:
+                core_topic = str(fallback.get("core_topic") or "machine learning").strip() or "machine learning"
+            expansion_queries = self._normalize_expansion_queries(
+                [
+                    *(payload.get("expansion_queries") or []),
+                    *self._default_expansion_queries(core_topic),
+                ],
+                core_topic=core_topic,
+                seed_title=seed_title,
+            )
+            if not expansion_queries:
+                expansion_queries = list(fallback.get("queries") or [])
+            return {
+                "core_topic": core_topic,
+                "queries": expansion_queries[:8],
+                "used_llm": True,
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("domain expansion with llm failed, fallback to heuristic expansion: %s", exc)
+            return fallback
+
+    def _fallback_domain_expansion_plan(
+        self,
+        *,
+        seed_title: str,
+        seed_abstract: str,
+        related_titles: list[str],
+    ) -> dict[str, Any]:
+        core_topic = self._infer_core_topic(
+            seed_title=seed_title,
+            seed_abstract=seed_abstract,
+            related_titles=related_titles,
+        )
+        queries = self._default_expansion_queries(core_topic)
+        normalized_queries = self._normalize_expansion_queries(
+            queries,
+            core_topic=core_topic,
+            seed_title=seed_title,
+        )
+        return {
+            "core_topic": core_topic,
+            "queries": normalized_queries[:8],
+            "used_llm": False,
+        }
+
+    def _infer_core_topic(
+        self,
+        *,
+        seed_title: str,
+        seed_abstract: str,
+        related_titles: list[str],
+    ) -> str:
+        related_corpus = " ".join(related_titles[:30])
+        content = f"{seed_title}. {seed_abstract}. {related_corpus}".lower()
+        topic_rules = [
+            ("attention is all you need", "transformer"),
+            ("self attention", "transformer"),
+            ("multi head attention", "transformer"),
+            ("transformer", "transformer"),
+            ("vision transformer", "vision transformer"),
+            ("swin transformer", "vision transformer"),
+            ("bert", "transformer language model"),
+            ("gpt", "large language model"),
+            ("roformer", "transformer"),
+            ("graph neural network", "graph neural network"),
+            ("gnn", "graph neural network"),
+            ("diffusion", "diffusion model"),
+            ("reinforcement learning", "reinforcement learning"),
+            ("multimodal", "multimodal learning"),
+            ("retrieval augmented generation", "retrieval augmented generation"),
+            ("rag", "retrieval augmented generation"),
+            ("large language model", "large language model"),
+            ("llm", "large language model"),
+            ("vision language", "vision-language model"),
+        ]
+        for needle, topic in topic_rules:
+            if needle in content:
+                return topic
+
+        alias_map = {
+            "transformer": "transformer",
+            "attention": "transformer",
+            "swin": "vision transformer",
+            "vit": "vision transformer",
+            "bert": "transformer language model",
+            "gpt": "large language model",
+            "llm": "large language model",
+            "graph": "graph neural network",
+            "gnn": "graph neural network",
+            "diffusion": "diffusion model",
+            "retrieval": "retrieval augmented generation",
+            "multimodal": "multimodal learning",
+            "vision": "computer vision",
+            "language": "natural language processing",
+            "reinforcement": "reinforcement learning",
+        }
+        banned = {
+            *self._STOPWORDS,
+            "all",
+            "you",
+            "need",
+            "is",
+            "on",
+            "via",
+            "toward",
+            "towards",
+        }
+        text_for_tokens = f"{seed_abstract} {related_corpus}".lower()
+        token_counter: Counter[str] = Counter()
+        for token in re.findall(r"[a-z0-9]{3,}", text_for_tokens):
+            if token in banned:
+                continue
+            token_counter[token] += 1
+
+        for token, _count in token_counter.most_common(20):
+            if token in alias_map:
+                return alias_map[token]
+
+        if related_titles:
+            return "machine learning"
+        return "computer science"
+
+    @staticmethod
+    def _canonicalize_core_topic(core_topic: str) -> str:
+        topic = str(core_topic or "").strip()
+        lowered = topic.lower()
+        if "transformer" in lowered:
+            return "transformer"
+        if "graph neural" in lowered or re.search(r"\bgnn\b", lowered):
+            return "graph neural network"
+        if "diffusion" in lowered:
+            return "diffusion model"
+        if "retrieval augmented generation" in lowered or re.search(r"\brag\b", lowered):
+            return "retrieval augmented generation"
+        if "multimodal" in lowered:
+            return "multimodal learning"
+        if "reinforcement learning" in lowered:
+            return "reinforcement learning"
+        if "large language model" in lowered or re.search(r"\bllm\b", lowered):
+            return "large language model"
+        if "vision transformer" in lowered:
+            return "vision transformer"
+        return topic or "machine learning"
+
+    @staticmethod
+    def _default_expansion_queries(core_topic: str) -> list[str]:
+        topic = str(core_topic or "").strip() or "machine learning"
+        lowered = topic.lower()
+        if lowered == "transformer":
+            return [
+                "transformer",
+                "transformer language model",
+                "BERT pretraining transformer",
+                "GPT transformer language model",
+                "encoder decoder transformer sequence to sequence",
+                "vision transformer",
+                "long sequence transformer efficient attention",
+                "transformer scaling laws",
+            ]
+        return [
+            topic,
+            f"{topic} variants",
+            f"{topic} architecture",
+            f"{topic} efficiency",
+            f"{topic} benchmark",
+            f"{topic} computer vision",
+            f"{topic} multimodal",
+            f"{topic} domain adaptation",
+        ]
+
+    @staticmethod
+    def _collect_related_titles(seed_paper: dict[str, Any], limit: int = 20) -> list[str]:
+        titles: list[str] = []
+        for relation_key in ("references", "citations"):
+            for item in seed_paper.get(relation_key) or []:
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title") or "").strip()
+                if title:
+                    titles.append(title)
+                if len(titles) >= max(1, limit):
+                    return titles
+        return titles
+
+    def _normalize_expansion_queries(
+        self,
+        raw_queries: Any,
+        *,
+        core_topic: str,
+        seed_title: str,
+    ) -> list[str]:
+        candidates: list[str] = []
+        if isinstance(raw_queries, list):
+            for item in raw_queries:
+                text = str(item).strip()
+                if text:
+                    candidates.append(text)
+
+        if core_topic.strip():
+            candidates = [core_topic.strip(), *candidates]
+
+        seed_key = self._normalized_title_key(seed_title)
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for query in candidates:
+            normalized = re.sub(r"\s+", " ", query).strip()
+            if len(normalized) < 3:
+                continue
+            key = normalized.lower()
+            if key in seen:
+                continue
+            # Avoid using near-duplicate full title as expansion query.
+            if seed_key and self._normalized_title_key(normalized) == seed_key:
+                continue
+            if self._title_token_overlap(normalized, seed_title) >= 0.78:
+                continue
+            seen.add(key)
+            deduped.append(normalized)
+            if len(deduped) >= 10:
+                break
+        return deduped
+
+    @staticmethod
+    def _extract_json_payload(raw_content: str) -> dict[str, Any] | None:
+        content = str(raw_content or "").strip()
+        if not content:
+            return None
+
+        if content.startswith("```"):
+            content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.IGNORECASE | re.DOTALL).strip()
+
+        try:
+            payload = json.loads(content)
+            return payload if isinstance(payload, dict) else None
+        except json.JSONDecodeError:
+            pass
+
+        match = re.search(r"\{[\s\S]*\}", content)
+        if not match:
+            return None
+        try:
+            payload = json.loads(match.group(0))
+            return payload if isinstance(payload, dict) else None
+        except json.JSONDecodeError:
+            return None
+
+    @staticmethod
+    def _normalized_title_key(text: str) -> str:
+        lowered = str(text or "").lower()
+        lowered = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", lowered)
+        return re.sub(r"\s+", " ", lowered).strip()
+
+    @staticmethod
+    def _title_token_overlap(left: str, right: str) -> float:
+        left_tokens = {item for item in re.findall(r"[a-z0-9\u4e00-\u9fff]+", left.lower()) if len(item) >= 2}
+        right_tokens = {item for item in re.findall(r"[a-z0-9\u4e00-\u9fff]+", right.lower()) if len(item) >= 2}
+        if not left_tokens or not right_tokens:
+            return 0.0
+        intersection_size = len(left_tokens.intersection(right_tokens))
+        union_size = len(left_tokens.union(right_tokens))
+        if union_size <= 0:
+            return 0.0
+        return intersection_size / union_size
+
+    @staticmethod
+    def _merge_provider_labels(providers: set[str]) -> str:
+        normalized: set[str] = set()
+        for item in providers:
+            text = str(item).strip()
+            if not text:
+                continue
+            parts = [part.strip() for part in text.split("+") if part.strip()]
+            normalized.update(parts or [text])
+        if "semantic_scholar" in normalized:
+            return "semantic_scholar"
+        if "openalex" in normalized:
+            return "openalex"
+        return "mock"
+
+    @staticmethod
+    def _month_from_publication_date(publication_date: str) -> int:
+        text = str(publication_date or "").strip()
+        if not text:
+            return 0
+        parts = text.split("-")
+        if len(parts) < 2:
+            return 0
+        try:
+            month = int(parts[1])
+        except (TypeError, ValueError):
+            return 0
+        return month if 1 <= month <= 12 else 0
+
+    @staticmethod
+    def _normalize_paper_range_years(raw_value: int | None) -> int | None:
+        if raw_value is None:
+            return None
+        try:
+            parsed = int(raw_value)
+        except (TypeError, ValueError):
+            return None
+        if parsed <= 0:
+            return None
+        return min(30, parsed)
+
+    def _apply_paper_year_range(
+        self,
+        papers: list[dict[str, Any]],
+        *,
+        paper_range_years: int | None,
+        preserve_paper_id: str = "",
+    ) -> tuple[list[dict[str, Any]], dict[str, int | str | None]]:
+        normalized_range = self._normalize_paper_range_years(paper_range_years)
+        if normalized_range is None:
+            return papers, {"applied": False, "removed": 0, "from_year": None}
+
+        current_year = datetime.now(timezone.utc).year
+        from_year = max(1, current_year - normalized_range + 1)
+        preserve_key = self._paper_key(preserve_paper_id)
+        filtered: list[dict[str, Any]] = []
+        removed = 0
+
+        for paper in papers:
+            normalized = self._normalize_retrieved_paper(paper)
+            paper_key = self._paper_key(str(normalized.get("paper_id") or ""))
+            year = self._safe_int(normalized.get("year"))
+            in_range = year > 0 and year >= from_year
+            if in_range or (preserve_key and paper_key == preserve_key):
+                filtered.append(normalized)
+            else:
+                removed += 1
+
+        return filtered, {"applied": True, "removed": removed, "from_year": from_year}
+
+    @staticmethod
+    def _build_year_range_hint(
+        paper_range_years: int | None,
+        stats: dict[str, int | str | None],
+    ) -> str:
+        normalized_range = GraphRAGService._normalize_paper_range_years(paper_range_years)
+        if normalized_range is None:
+            return ""
+        from_year = int(stats.get("from_year") or 0)
+        removed = int(stats.get("removed") or 0)
+        if removed > 0:
+            return f" 已应用近 {normalized_range} 年范围（{from_year} 年起），过滤 {removed} 条候选。"
+        return f" 已应用近 {normalized_range} 年范围（{from_year} 年起）。"
+
+    @staticmethod
+    def _seed_relation_signal(seed_relation: str) -> float:
+        relation = str(seed_relation or "").strip().lower()
+        if relation == "seed":
+            return 1.0
+        if relation == "citation":
+            return 0.96
+        if relation == "reference":
+            return 0.42
+        return 0.0
+
     def _filter_and_rank_papers(
         self,
         papers: list[dict[str, Any]],
         max_papers: int,
         query: str,
+        ranking_profile: str = "balanced",
     ) -> tuple[list[dict[str, Any]], dict[str, int | float]]:
         start = perf_counter()
         ranked: list[tuple[float, dict[str, Any]]] = []
         seen_ids: set[str] = set()
         seen_titles: set[str] = set()
         input_count = len(papers)
+        current_year = datetime.now(timezone.utc).year
+
+        profile = str(ranking_profile or "balanced").strip().lower()
+        if profile == "seed_lineage":
+            relevance_weight = 0.20
+            citation_weight = 0.42
+            recency_weight = 0.12
+            relation_weight = 0.26
+        else:
+            relevance_weight = 0.62
+            citation_weight = 0.26
+            recency_weight = 0.12
+            relation_weight = 0.0
 
         for paper in papers:
             normalized = self._normalize_retrieved_paper(paper)
@@ -384,10 +1265,15 @@ class GraphRAGService:
             citation_count = self._safe_int(normalized["citation_count"])
             citation_signal = min(1.0, math.log1p(citation_count) / 8.0)
             year = self._safe_int(normalized["year"])
-            current_year = datetime.now(timezone.utc).year
             age = max(0, current_year - year) if year > 0 else 12
             recency_signal = max(0.0, 1.0 - min(age, 12) / 12)
-            score = relevance * 0.72 + citation_signal * 0.18 + recency_signal * 0.10
+            relation_signal = self._seed_relation_signal(str(normalized.get("seed_relation") or ""))
+            score = (
+                relevance * relevance_weight
+                + citation_signal * citation_weight
+                + recency_signal * recency_weight
+                + relation_signal * relation_weight
+            )
 
             ranked.append((score, normalized))
 
@@ -448,6 +1334,7 @@ class GraphRAGService:
             "url": url_value or None,
             "reference_ids": list(dict.fromkeys(reference_ids[:120])),
             "citation_ids": list(dict.fromkeys(citation_ids[:120])),
+            "seed_relation": str(paper.get("seed_relation") or "").strip().lower(),
         }
 
     @staticmethod
@@ -568,11 +1455,7 @@ class GraphRAGService:
             publication_month = self._extract_publication_month(paper)
             authors_text = self._format_authors(paper.get("authors") or [])
             abstract_text = self._normalize_abstract_text(paper.get("abstract"))
-            keywords = self._extract_keywords(
-                paper=paper,
-                title=title,
-                abstract=abstract_text,
-            )
+            keywords = self._extract_keywords(paper=paper)
             impact_factor, quartile = self._estimate_impact_metrics(citation_count, influence)
             size = 5.0 + min(16.0, math.log1p(citation_count + 1) * 2.2)
 
@@ -1041,18 +1924,13 @@ class GraphRAGService:
             return ""
         return re.sub(r"\s+", " ", text)
 
-    def _extract_keywords(self, paper: dict[str, Any], title: str, abstract: str) -> list[str]:
+    def _extract_keywords(self, paper: dict[str, Any]) -> list[str]:
         fields = paper.get("fields_of_study") or []
         keywords: list[str] = []
         for field in fields:
             value = str(field).strip()
             if value:
                 keywords.append(value)
-
-        if not keywords:
-            token_source = f"{title} {abstract}"
-            tokens = [token for token in self._relevance_tokens(token_source) if len(token) >= 4]
-            keywords = [token.title() for token in tokens]
 
         dedup: list[str] = []
         seen: set[str] = set()

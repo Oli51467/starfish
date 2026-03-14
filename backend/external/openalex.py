@@ -103,6 +103,26 @@ class OpenAlexClient:
 
         return self._normalize_paper(payload, reference_limit=reference_limit, citation_limit=citation_limit)
 
+    def fetch_paper(
+        self,
+        paper_id: str,
+        reference_limit: int = 20,
+        citation_limit: int = 20,
+    ) -> dict[str, Any] | None:
+        compact_id = self._normalize_openalex_compact_id(paper_id)
+        if not compact_id:
+            return None
+
+        full_id = self._to_openalex_full_id(compact_id)
+        payload = self._get(
+            f"/works/{quote(full_id, safe='')}",
+            params={"select": self._WORK_SELECT},
+        )
+        if payload is None:
+            return None
+
+        return self._normalize_paper(payload, reference_limit=reference_limit, citation_limit=citation_limit)
+
     def search_papers(self, query: str, limit: int = 12, offset: int = 0) -> dict[str, Any]:
         safe_limit = max(1, min(limit, 50))
         safe_offset = max(0, offset)

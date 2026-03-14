@@ -1,5 +1,5 @@
 <template>
-  <div class="knowledge-graph-body knowledge-graph-body-full">
+  <div ref="graphBodyRef" class="knowledge-graph-body knowledge-graph-body-full" :class="{ 'is-fullscreen': isFullscreen }">
     <div
       ref="graphContainerRef"
       class="knowledge-graph-canvas"
@@ -11,6 +11,33 @@
       @pointerleave="endGraphDragCursor"
       @pointercancel="endGraphDragCursor"
     ></div>
+
+    <div v-if="showTools" class="knowledge-canvas-tools">
+      <button class="btn graph-refresh-btn" type="button" aria-label="刷新图谱" title="刷新图谱" @click="refreshGraphDisplay">
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <path d="M13.5 8a5.5 5.5 0 1 1-1.16-3.4" />
+          <path d="M13.5 3.5v3.1h-3.1" />
+        </svg>
+      </button>
+      <button
+        class="btn graph-fullscreen-btn"
+        type="button"
+        :aria-label="fullscreenButtonLabel"
+        :title="fullscreenButtonLabel"
+        @click="toggleFullscreen"
+      >
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <path v-if="!isFullscreen" d="M6 2.5H2.5V6" />
+          <path v-if="!isFullscreen" d="M10 2.5h3.5V6" />
+          <path v-if="!isFullscreen" d="M2.5 10V13.5H6" />
+          <path v-if="!isFullscreen" d="M10 13.5h3.5V10" />
+          <path v-if="isFullscreen" d="M2.5 6h3.5V2.5" />
+          <path v-if="isFullscreen" d="M13.5 6H10V2.5" />
+          <path v-if="isFullscreen" d="M2.5 10h3.5v3.5" />
+          <path v-if="isFullscreen" d="M13.5 10H10v3.5" />
+        </svg>
+      </button>
+    </div>
 
     <div v-if="directionLegendRows.length" class="knowledge-legend-overlay">
       <div
@@ -98,7 +125,16 @@
       <header class="paper-node-card-top">
         <div class="paper-node-title-wrap">
           <div class="paper-node-title-line">
-            <p class="paper-node-title">{{ pinnedNodeDetail.name }}</p>
+            <a
+              v-if="pinnedNodeDetail.isPaper && pinnedNodeDetail.url"
+              class="paper-node-title paper-node-title-link"
+              :href="pinnedNodeDetail.url"
+              target="_blank"
+              rel="noreferrer noopener"
+            >
+              {{ pinnedNodeDetail.name }}
+            </a>
+            <p v-else class="paper-node-title">{{ pinnedNodeDetail.name }}</p>
           </div>
           <p class="paper-node-subtitle">{{ pinnedNodeDetail.authorVenueText }}</p>
         </div>
@@ -123,7 +159,7 @@
 
       <section class="paper-node-middle">
         <p class="paper-node-abstract">{{ pinnedNodeDetail.abstractSnippet }}</p>
-        <div class="paper-node-keywords">
+        <div v-if="pinnedNodeDetail.keywords.length" class="paper-node-keywords">
           <span v-for="keyword in pinnedNodeDetail.keywords" :key="keyword" class="paper-node-keyword-chip">
             {{ keyword }}
           </span>
@@ -244,15 +280,6 @@
         </div>
       </section>
 
-      <section v-else class="paper-node-metrics-grid paper-node-metrics-grid-seed">
-        <article class="paper-node-metric">
-          <div class="paper-node-metric-head">
-            <p class="paper-node-metric-label">中心节点</p>
-          </div>
-          <p class="paper-node-metric-value">中心论文</p>
-        </article>
-      </section>
-
       <footer v-if="pinnedNodeDetail.isPaper" class="paper-node-actions">
         <a
           v-if="pinnedNodeDetail.url"
@@ -285,9 +312,14 @@ const props = defineProps({
   graph: {
     type: Object,
     required: true
+  },
+  showTools: {
+    type: Boolean,
+    default: true
   }
 });
 
+const graphBodyRef = ref(null);
 const graphContainerRef = ref(null);
 const pinnedNode = ref(null);
 const pinnedCardPoint = ref(null);
@@ -297,6 +329,7 @@ const bookmarkedNodeIds = ref([]);
 const selectedDirectionId = ref('');
 const selectedDirectionMode = ref('none');
 const isGraphDragging = ref(false);
+const isFullscreen = ref(false);
 let graphInstance = null;
 let resizeObserver = null;
 let resizeRaf = 0;
@@ -842,6 +875,25 @@ async function refreshGraphDisplay() {
   await recreateGraph({ fitView: true });
 }
 
+function updateFullscreenState() {
+  const layout = graphBodyRef.value?.closest?.('.workflow-layout');
+  if (!layout) {
+    isFullscreen.value = false;
+    return;
+  }
+  isFullscreen.value = layout.classList.contains('is-graph-fullscreen');
+}
+
+async function toggleFullscreen() {
+  const layout = graphBodyRef.value?.closest?.('.workflow-layout');
+  if (!layout) return;
+  const nextState = !layout.classList.contains('is-graph-fullscreen');
+  layout.classList.toggle('is-graph-fullscreen', nextState);
+  isFullscreen.value = nextState;
+  await nextTick();
+  await updateGraphData();
+}
+
 function setupResizeObserver() {
   if (!graphContainerRef.value) return;
   resizeObserver = new ResizeObserver(() => {
@@ -958,6 +1010,7 @@ function focusPaperFromList(paperId) {
 }
 
 const graphAriaLabel = computed(() => `${props.graph?.title || '知识图谱'}可视化`);
+const fullscreenButtonLabel = computed(() => (isFullscreen.value ? '收回' : '全屏'));
 
 const directionLegendItems = computed(() => {
   const sorted = sortedDomainNodes(props.graph?.nodes || []);
@@ -1044,35 +1097,25 @@ const pinnedNodeDetail = computed(() => {
 });
 
 const pinnedCardStyle = computed(() => {
-  const point = pinnedCardPoint.value;
   const width = graphContainerRef.value?.clientWidth || 920;
   const height = graphContainerRef.value?.clientHeight || 560;
   const measuredWidth = Number(cardOverlayRef.value?.offsetWidth || pinnedCardSize.value.width || 0);
+  const measuredHeight = Number(cardOverlayRef.value?.offsetHeight || pinnedCardSize.value.height || 0);
   const cardWidth = clamp(measuredWidth || 420, 320, Math.max(320, width - 24));
-  const horizontalGap = 18;
+  const maxHeight = Math.max(220, height - 20);
+  const cardHeight = clamp(measuredHeight || 320, 220, maxHeight);
   const topInset = 10;
   const leftInset = 12;
-
-  if (!point) {
-    return {
-      left: `${leftInset}px`,
-      top: `${topInset}px`,
-      width: `${Math.round(cardWidth)}px`,
-      maxHeight: `${Math.round(Math.max(220, height - topInset * 2))}px`
-    };
-  }
-
-  const canPlaceRight = point.x + horizontalGap + cardWidth <= width - leftInset;
-  const canPlaceLeft = point.x - horizontalGap - cardWidth >= leftInset;
-  const leftCandidate = canPlaceRight || !canPlaceLeft
-    ? point.x + horizontalGap
-    : point.x - cardWidth - horizontalGap;
+  const leftCandidate = (width - cardWidth) / 2;
+  const topCandidate = (height - cardHeight) / 2;
+  const safeLeft = clamp(leftCandidate, leftInset, Math.max(leftInset, width - cardWidth - leftInset));
+  const safeTop = clamp(topCandidate, topInset, Math.max(topInset, height - cardHeight - topInset));
 
   return {
-    left: `${clamp(leftCandidate, leftInset, Math.max(leftInset, width - cardWidth - leftInset))}px`,
-    top: `${topInset}px`,
+    left: `${safeLeft}px`,
+    top: `${safeTop}px`,
     width: `${Math.round(cardWidth)}px`,
-    maxHeight: `${Math.round(Math.max(220, height - topInset * 2))}px`
+    maxHeight: `${Math.round(maxHeight)}px`
   };
 });
 
@@ -1128,6 +1171,7 @@ onMounted(async () => {
   setupResizeObserver();
   window.addEventListener('pointerup', endGraphDragCursor);
   window.addEventListener('pointercancel', endGraphDragCursor);
+  updateFullscreenState();
 });
 
 onBeforeUnmount(() => {
@@ -1146,8 +1190,13 @@ onBeforeUnmount(() => {
   }
   window.removeEventListener('pointerup', endGraphDragCursor);
   window.removeEventListener('pointercancel', endGraphDragCursor);
+  const layout = graphBodyRef.value?.closest?.('.workflow-layout');
+  if (layout && layout.classList.contains('is-graph-fullscreen')) {
+    layout.classList.remove('is-graph-fullscreen');
+  }
   pinnedNode.value = null;
   pinnedCardPoint.value = null;
   isGraphDragging.value = false;
+  isFullscreen.value = false;
 });
 </script>

@@ -5,6 +5,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 import json
 import logging
+import math
 import re
 from typing import Any
 
@@ -46,6 +47,89 @@ class DomainExplorer:
         "深度學習": "深度学习",
         "機器學習": "机器学习",
     }
+    _MECHANISM_HINTS = (
+        "mechanism",
+        "architecture",
+        "module",
+        "attention",
+        "representation",
+        "objective",
+        "loss",
+        "optimization",
+        "regularization",
+        "generalization",
+        "positional",
+        "encoding",
+        "memory",
+        "long context",
+        "routing",
+        "adapter",
+        "decomposition",
+        "sparse",
+        "alignment",
+        "theory",
+        "proof",
+        "机制",
+        "架构",
+        "模块",
+        "注意力",
+        "表征",
+        "目标函数",
+        "损失",
+        "优化",
+        "正则",
+        "泛化",
+        "位置编码",
+        "长上下文",
+        "记忆",
+        "对齐",
+        "理论",
+        "可证明",
+    )
+    _ENGINEERING_HINTS = (
+        "application",
+        "real-world",
+        "deployment",
+        "serving",
+        "system",
+        "platform",
+        "pipeline",
+        "product",
+        "benchmark",
+        "evaluation",
+        "trust",
+        "safety",
+        "governance",
+        "compliance",
+        "应用",
+        "场景",
+        "落地",
+        "部署",
+        "工程",
+        "系统",
+        "平台",
+        "评测",
+        "可信",
+        "安全",
+        "治理",
+        "合规",
+    )
+    _ENGINEERING_NAME_HINTS = (
+        "应用",
+        "部署",
+        "评测",
+        "可信",
+        "安全",
+        "产品",
+        "落地",
+        "application",
+        "deployment",
+        "evaluation",
+        "benchmark",
+        "trust",
+        "safety",
+        "product",
+    )
 
     def __init__(
         self,
@@ -192,7 +276,10 @@ class DomainExplorer:
 1. 子方向数量必须是 10 个，覆盖主流分支并避免语义重叠
 2. search_keywords 必须是英文学术搜索词
 3. status 仅允许 emerging/growing/stable/saturated
-4. 只输出 JSON，不输出解释文本"""
+4. 子方向必须优先体现“科研机制/方法学”维度，例如注意力机制变体、表示学习机制、目标函数与优化机制、结构编码机制等
+5. 避免输出工程管理或应用落地导向方向，例如“应用扩展/高效部署/评测可信性/安全治理/产品化”等泛工程主题
+6. 子方向名称尽量具体，不要使用空泛标题；每个方向都要能直接映射到学术论文检索词
+7. 只输出 JSON，不输出解释文本"""
 
         try:
             response = await asyncio.to_thread(
@@ -213,9 +300,11 @@ class DomainExplorer:
         skeleton: dict[str, Any],
         *,
         direction_callback: DirectionProgressCallback | None = None,
+        paper_range_years: int | None = None,
     ) -> dict[str, Any]:
         semaphore = asyncio.Semaphore(3)
         directions = list(skeleton.get("sub_directions") or [])
+        normalized_range = self._normalize_paper_range_years(paper_range_years)
 
         async def fetch_direction(index: int, direction: dict[str, Any]) -> dict[str, Any]:
             async with semaphore:
@@ -248,7 +337,11 @@ class DomainExplorer:
                     if lowered in searched_keywords:
                         continue
                     searched_keywords.add(lowered)
-                    papers, provider = await self.search_papers_by_keyword(keyword, limit=50)
+                    papers, provider = await self.search_papers_by_keyword(
+                        keyword,
+                        limit=50,
+                        paper_range_years=normalized_range,
+                    )
                     if papers:
                         merged_papers = self._merge_papers_by_identity(merged_papers, papers, max_size=120)
                         used_keyword = keyword
@@ -283,7 +376,11 @@ class DomainExplorer:
                         if not normalized or lowered in searched_keywords:
                             continue
                         searched_keywords.add(lowered)
-                        papers, provider = await self.search_papers_by_keyword(normalized, limit=40)
+                        papers, provider = await self.search_papers_by_keyword(
+                            normalized,
+                            limit=40,
+                            paper_range_years=normalized_range,
+                        )
                         if papers:
                             merged_papers = self._merge_papers_by_identity(merged_papers, papers, max_size=140)
                             used_keyword = normalized
@@ -320,16 +417,21 @@ class DomainExplorer:
         keyword: str,
         *,
         limit: int = 20,
+        paper_range_years: int | None = None,
     ) -> tuple[list[dict[str, Any]], str]:
         safe_keyword = str(keyword or "").strip()
         if not safe_keyword:
             return [], ""
 
         safe_limit = max(1, min(int(limit), 50))
+        normalized_range = self._normalize_paper_range_years(paper_range_years)
         openalex_error: Exception | None = None
         try:
             openalex_payload = await asyncio.to_thread(self.openalex.search_papers, safe_keyword, safe_limit, 0)
-            openalex_papers = list(openalex_payload.get("papers") or [])
+            openalex_papers = self._apply_paper_year_range(
+                list(openalex_payload.get("papers") or []),
+                paper_range_years=normalized_range,
+            )
             if openalex_papers:
                 return openalex_papers, "openalex"
         except OpenAlexClientError as exc:
@@ -337,7 +439,10 @@ class DomainExplorer:
 
         try:
             semantic_payload = await asyncio.to_thread(self.semantic.search_papers, safe_keyword, safe_limit, 0)
-            semantic_papers = list(semantic_payload.get("papers") or [])
+            semantic_papers = self._apply_paper_year_range(
+                list(semantic_payload.get("papers") or []),
+                paper_range_years=normalized_range,
+            )
             if semantic_papers:
                 return semantic_papers, "semantic_scholar"
         except SemanticScholarClientError as exc:
@@ -609,6 +714,36 @@ class DomainExplorer:
             selected.append(item)
         return selected[:limit]
 
+    @staticmethod
+    def _normalize_paper_range_years(raw_value: int | None) -> int | None:
+        if raw_value is None:
+            return None
+        try:
+            parsed = int(raw_value)
+        except (TypeError, ValueError):
+            return None
+        if parsed <= 0:
+            return None
+        return min(30, parsed)
+
+    def _apply_paper_year_range(
+        self,
+        papers: list[dict[str, Any]],
+        *,
+        paper_range_years: int | None,
+    ) -> list[dict[str, Any]]:
+        normalized_range = self._normalize_paper_range_years(paper_range_years)
+        if normalized_range is None:
+            return papers
+        current_year = datetime.now(timezone.utc).year
+        from_year = max(1, current_year - normalized_range + 1)
+        filtered: list[dict[str, Any]] = []
+        for item in papers:
+            year = self._safe_int(item.get("year"))
+            if year > 0 and year >= from_year:
+                filtered.append(item)
+        return filtered
+
     def _rank_direction_papers(self, papers: list[dict[str, Any]]) -> list[dict[str, Any]]:
         current_year = datetime.now(timezone.utc).year
 
@@ -616,9 +751,10 @@ class DomainExplorer:
             citation = self._safe_int(item.get("citation_count"))
             year = self._safe_int(item.get("year"))
             recent = 1 if year >= current_year - 2 else 0
-            citation_component = min(citation / 2500.0, 1.0)
-            recency_component = 0.32 if recent else 0.0
-            score_value = citation_component * 0.62 + recency_component + min(max(year - 2010, 0) / 30.0, 0.06)
+            citation_component = min(math.log1p(citation) / math.log1p(120000), 1.0)
+            recency_component = 0.18 if recent else 0.0
+            year_component = min(max(year - 2012, 0) / 18.0, 1.0) * 0.08
+            score_value = citation_component * 0.74 + recency_component + year_component
             return (score_value, citation, year)
 
         ranked = sorted(papers, key=score, reverse=True)
@@ -697,23 +833,86 @@ class DomainExplorer:
                 if len(directions) >= self._MAX_DIRECTIONS:
                     break
 
+        ranked = self._rank_directions_by_research_specificity(directions)
+        preferred = [item for item in ranked if self._direction_research_score(item) >= 1]
+        directions = preferred if preferred else ranked
+
         if len(directions) < self._MIN_DIRECTIONS:
-            fallback = self._fallback_skeleton(query).get("sub_directions") or []
-            known = {str(item.get("name") or "").strip().lower() for item in directions}
+            fallback = self._rank_directions_by_research_specificity(
+                self._fallback_skeleton(query).get("sub_directions") or []
+            )
+            known = {self._direction_identity(item) for item in directions}
             for item in fallback:
-                item_name = str(item.get("name") or "").strip()
-                if not item_name or item_name.lower() in known:
+                item_key = self._direction_identity(item)
+                if not item_key or item_key in known:
                     continue
                 directions.append(item)
+                known.add(item_key)
                 if len(directions) >= self._MIN_DIRECTIONS:
                     break
 
+        directions = self._rank_directions_by_research_specificity(directions)
         return {
             "domain_name": domain_name,
             "domain_name_en": domain_name_en,
             "description": description or f"{domain_name} 领域的关键方向与研究热度概览。",
             "sub_directions": directions[: self._MAX_DIRECTIONS],
         }
+
+    @staticmethod
+    def _direction_identity(direction: dict[str, Any]) -> str:
+        return str(direction.get("name") or "").strip().lower()
+
+    def _direction_research_score(self, direction: dict[str, Any]) -> int:
+        name = str(direction.get("name") or "").strip()
+        name_en = str(direction.get("name_en") or "").strip()
+        description = str(direction.get("description") or "").strip()
+        methods = " ".join(str(item).strip() for item in (direction.get("methods") or []) if str(item).strip())
+        keywords = " ".join(
+            str(item).strip() for item in (direction.get("search_keywords") or []) if str(item).strip()
+        )
+        blob = " ".join([name, name_en, description, methods, keywords]).strip().lower()
+        if not blob:
+            return -10
+
+        mechanism_hits = sum(1 for token in self._MECHANISM_HINTS if token and token in blob)
+        engineering_hits = sum(1 for token in self._ENGINEERING_HINTS if token and token in blob)
+        score = mechanism_hits * 3 - engineering_hits * 4
+
+        name_lower = name.lower()
+        if any(token in name_lower for token in self._ENGINEERING_NAME_HINTS):
+            score -= 8
+        if any(
+            token in name_lower
+            for token in ("机制", "attention", "architecture", "module", "objective", "optimization", "theory")
+        ):
+            score += 4
+        return score
+
+    def _rank_directions_by_research_specificity(self, directions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        indexed: list[tuple[int, int, int, dict[str, Any]]] = []
+        for idx, item in enumerate(directions):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            score = self._direction_research_score(item)
+            keyword_count = len(
+                [token for token in (item.get("search_keywords") or []) if str(token).strip()]
+            )
+            indexed.append((score, keyword_count, idx, item))
+
+        indexed.sort(key=lambda row: (-row[0], -row[1], row[2]))
+        deduped: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for _, _, _, item in indexed:
+            key = self._direction_identity(item)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return deduped
 
     def _fallback_skeleton(self, query: str) -> dict[str, Any]:
         normalized_query = self._normalize_query_for_search(query)
@@ -723,93 +922,93 @@ class DomainExplorer:
             "description": f"{query} 领域的主要研究分支、方法路线与发展阶段概览。",
             "sub_directions": [
                 {
-                    "name": "基础建模与理论",
-                    "name_en": "Core Modeling and Theory",
-                    "description": "关注问题定义、理论分析与标准化建模。",
+                    "name": "注意力与信息交互机制",
+                    "name_en": "Attention and Information Interaction Mechanisms",
+                    "description": "研究信息聚合、上下文建模与交互路径设计。",
                     "status": "stable",
-                    "methods": ["theoretical analysis", "benchmarking"],
-                    "search_keywords": [f"{normalized_query} survey", f"{normalized_query} benchmark"],
+                    "methods": ["self-attention", "cross-attention"],
+                    "search_keywords": [f"{normalized_query} attention mechanism", f"{normalized_query} self attention"],
                     "estimated_active_years": "2018-2026",
                 },
                 {
-                    "name": "训练与优化策略",
-                    "name_en": "Training and Optimization",
-                    "description": "围绕训练稳定性、效率和泛化能力优化。",
+                    "name": "表征学习与特征分解机制",
+                    "name_en": "Representation Learning and Feature Decomposition",
+                    "description": "研究隐空间结构、特征分解与表示质量提升路径。",
                     "status": "growing",
-                    "methods": ["curriculum learning", "regularization"],
-                    "search_keywords": [f"{normalized_query} training", f"{normalized_query} optimization"],
+                    "methods": ["contrastive representation learning", "disentangled representation"],
+                    "search_keywords": [f"{normalized_query} representation learning", f"{normalized_query} feature decomposition"],
                     "estimated_active_years": "2020-2026",
                 },
                 {
-                    "name": "高效化与部署",
-                    "name_en": "Efficiency and Deployment",
-                    "description": "探索轻量化、压缩和工程部署能力。",
+                    "name": "架构变体与模块组合机制",
+                    "name_en": "Architecture Variants and Modular Composition",
+                    "description": "聚焦核心模块替换、结构重组与层级组合机制。",
                     "status": "growing",
-                    "methods": ["distillation", "quantization"],
-                    "search_keywords": [f"efficient {normalized_query}", f"{normalized_query} deployment"],
+                    "methods": ["modular architecture design", "residual and routing modules"],
+                    "search_keywords": [f"{normalized_query} architecture variant", f"{normalized_query} module design"],
                     "estimated_active_years": "2021-2026",
                 },
                 {
-                    "name": "应用拓展",
-                    "name_en": "Applications",
-                    "description": "聚焦跨场景迁移与行业落地。",
+                    "name": "位置与结构先验编码机制",
+                    "name_en": "Positional and Structural Encoding Mechanisms",
+                    "description": "研究顺序、拓扑与结构先验的编码方式。",
                     "status": "stable",
-                    "methods": ["transfer learning", "domain adaptation"],
-                    "search_keywords": [f"{normalized_query} application", f"{normalized_query} real-world"],
+                    "methods": ["positional encoding", "structural encoding"],
+                    "search_keywords": [f"{normalized_query} positional encoding", f"{normalized_query} structural encoding"],
                     "estimated_active_years": "2019-2026",
                 },
                 {
-                    "name": "评测与可信性",
-                    "name_en": "Evaluation and Reliability",
-                    "description": "关注评测体系、鲁棒性与可解释性。",
+                    "name": "目标函数与训练信号机制",
+                    "name_en": "Objective Function and Training Signal Mechanisms",
+                    "description": "研究训练目标设计、监督信号构造与优化耦合关系。",
                     "status": "emerging",
-                    "methods": ["robustness evaluation", "interpretability"],
-                    "search_keywords": [f"{normalized_query} robustness", f"{normalized_query} evaluation"],
+                    "methods": ["objective design", "auxiliary supervision"],
+                    "search_keywords": [f"{normalized_query} training objective", f"{normalized_query} loss design"],
                     "estimated_active_years": "2022-2026",
                 },
                 {
-                    "name": "多模态融合",
-                    "name_en": "Multimodal Fusion",
-                    "description": "结合文本、视觉、语音等多模态信息进行联合建模。",
+                    "name": "优化稳定性与泛化机制",
+                    "name_en": "Optimization Stability and Generalization Mechanisms",
+                    "description": "研究训练动力学、稳定性与跨任务泛化能力。",
                     "status": "growing",
-                    "methods": ["cross-modal alignment", "contrastive learning"],
-                    "search_keywords": [f"{normalized_query} multimodal", f"{normalized_query} cross-modal"],
+                    "methods": ["optimization dynamics", "regularization"],
+                    "search_keywords": [f"{normalized_query} optimization stability", f"{normalized_query} generalization mechanism"],
                     "estimated_active_years": "2021-2026",
                 },
                 {
-                    "name": "可解释性与安全性",
-                    "name_en": "Interpretability and Safety",
-                    "description": "提升模型可解释、可控和安全对齐能力。",
+                    "name": "长上下文与记忆机制",
+                    "name_en": "Long-Context and Memory Mechanisms",
+                    "description": "研究长序列建模、记忆压缩与远程依赖保持机制。",
                     "status": "emerging",
-                    "methods": ["mechanistic interpretability", "safety alignment"],
-                    "search_keywords": [f"{normalized_query} interpretability", f"{normalized_query} safety"],
+                    "methods": ["memory compression", "recurrent memory mechanisms"],
+                    "search_keywords": [f"{normalized_query} long context", f"{normalized_query} memory mechanism"],
                     "estimated_active_years": "2022-2026",
                 },
                 {
-                    "name": "数据工程与合成数据",
-                    "name_en": "Data Engineering and Synthetic Data",
-                    "description": "优化数据质量、构建高价值训练语料与合成数据管线。",
+                    "name": "稀疏化与参数高效机制",
+                    "name_en": "Sparsity and Parameter-Efficient Mechanisms",
+                    "description": "研究稀疏计算、参数共享与结构化高效机制。",
                     "status": "growing",
-                    "methods": ["data curation", "synthetic data generation"],
-                    "search_keywords": [f"{normalized_query} data curation", f"{normalized_query} synthetic data"],
+                    "methods": ["sparse computation", "parameter-efficient adaptation"],
+                    "search_keywords": [f"{normalized_query} sparse mechanism", f"{normalized_query} parameter efficient method"],
                     "estimated_active_years": "2021-2026",
                 },
                 {
-                    "name": "推理增强与工具调用",
-                    "name_en": "Reasoning and Tool Use",
-                    "description": "强化复杂推理、规划与外部工具调用能力。",
+                    "name": "跨模态对齐与融合机制",
+                    "name_en": "Cross-Modal Alignment and Fusion Mechanisms",
+                    "description": "研究不同模态间的信息对齐与融合机制。",
                     "status": "growing",
-                    "methods": ["chain-of-thought", "tool augmentation"],
-                    "search_keywords": [f"{normalized_query} reasoning", f"{normalized_query} tool use"],
+                    "methods": ["cross-modal alignment", "fusion mechanisms"],
+                    "search_keywords": [f"{normalized_query} multimodal alignment", f"{normalized_query} cross modal fusion"],
                     "estimated_active_years": "2022-2026",
                 },
                 {
-                    "name": "领域迁移与垂直应用",
-                    "name_en": "Domain Adaptation and Vertical Applications",
-                    "description": "面向医疗、金融、工业等垂直场景进行迁移优化。",
+                    "name": "理论分析与可证明性质",
+                    "name_en": "Theoretical Analysis and Provable Properties",
+                    "description": "研究收敛性、表达能力与可证明理论边界。",
                     "status": "stable",
-                    "methods": ["domain adaptation", "instruction tuning"],
-                    "search_keywords": [f"{normalized_query} domain adaptation", f"{normalized_query} vertical application"],
+                    "methods": ["theoretical analysis", "convergence proof"],
+                    "search_keywords": [f"{normalized_query} theoretical analysis", f"{normalized_query} convergence proof"],
                     "estimated_active_years": "2020-2026",
                 },
             ],

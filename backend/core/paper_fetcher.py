@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from external.arxiv_client import ArxivClient
 from external.github_client import GitHubClient
@@ -20,6 +21,7 @@ class PaperFetcher:
         re.IGNORECASE,
     )
     _DOI_PATTERN = re.compile(r"^10\.\d{4,9}/\S+$", re.IGNORECASE)
+    _DOI_EXTRACT_PATTERN = re.compile(r"10\.\d{4,9}/\S+", re.IGNORECASE)
 
     def __init__(self) -> None:
         self.semantic = SemanticScholarClient()
@@ -35,7 +37,7 @@ class PaperFetcher:
         citation_limit: int = 20,
     ) -> dict:
         input_type = input_type.strip().lower()
-        value = input_value.strip()
+        value = self._normalize_input_value(input_type, input_value.strip())
 
         if input_type == "arxiv_id":
             try:
@@ -63,6 +65,8 @@ class PaperFetcher:
                     reference_limit=reference_limit,
                     citation_limit=citation_limit,
                 )
+        elif input_type == "paper_title":
+            raise ValueError("paper_title input_type is no longer supported")
         elif input_type == "github_url":
             repo = self.github.fetch_repo(value)
             paper = {
@@ -72,7 +76,10 @@ class PaperFetcher:
                 "authors": ["GitHub Contributors"],
                 "venue": "GitHub",
                 "citation_count": repo.get("stars", 0),
+                "reference_count": 0,
                 "abstract": repo.get("description", ""),
+                "references": [],
+                "citations": [],
             }
         elif input_type == "pdf":
             paper = {
@@ -82,7 +89,10 @@ class PaperFetcher:
                 "authors": ["Unknown"],
                 "venue": "PDF Upload",
                 "citation_count": 0,
+                "reference_count": 0,
                 "abstract": "PDF parsing is mocked in skeleton stage.",
+                "references": [],
+                "citations": [],
             }
         else:
             try:
@@ -156,13 +166,41 @@ class PaperFetcher:
                 reference_limit=reference_limit,
                 citation_limit=citation_limit,
             )
-        if self._DOI_PATTERN.match(normalized):
+        normalized_doi = self._normalize_doi(normalized)
+        if self._DOI_PATTERN.match(normalized_doi):
             return self._fetch_openalex_by_doi(
-                normalized,
+                normalized_doi,
                 reference_limit=reference_limit,
                 citation_limit=citation_limit,
             )
         return self._fallback_generic_paper(normalized)
+
+    def _normalize_input_value(self, input_type: str, input_value: str) -> str:
+        value = input_value.strip()
+        if input_type == "doi":
+            return self._normalize_doi(value)
+        return value
+
+    def _normalize_doi(self, value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return text
+
+        lowered = text.lower()
+        if lowered.startswith("doi:"):
+            text = text.split(":", 1)[1].strip()
+            lowered = text.lower()
+
+        doi_host = "doi.org/"
+        host_index = lowered.find(doi_host)
+        if host_index >= 0:
+            text = text[host_index + len(doi_host) :]
+
+        text = text.split("#", 1)[0].split("?", 1)[0].strip().rstrip("/")
+        matched = self._DOI_EXTRACT_PATTERN.search(text)
+        if matched:
+            return matched.group(0).rstrip(").,;")
+        return text
 
     @staticmethod
     def _fallback_doi_paper(doi: str) -> dict:
@@ -178,6 +216,27 @@ class PaperFetcher:
             "references": [],
             "citations": [],
         }
+
+    @staticmethod
+    def _extract_month(publication_date: Any) -> int:
+        text = str(publication_date or "").strip()
+        if not text:
+            return 0
+        parts = text.split("-")
+        if len(parts) < 2:
+            return 0
+        try:
+            month = int(parts[1])
+        except (TypeError, ValueError):
+            return 0
+        return month if 1 <= month <= 12 else 0
+
+    @staticmethod
+    def _safe_int(value: object) -> int:
+        try:
+            return max(0, int(value))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 0
 
     @staticmethod
     def _fallback_generic_paper(value: str) -> dict:

@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 InputType = Literal["arxiv_id", "doi", "pdf", "github_url"]
 PaperInputType = Literal["arxiv_id", "doi", "paper_id"]
+KnowledgeGraphRetrieveInputType = Literal["domain", "arxiv_id", "doi"]
 TrendLabel = Literal["rising", "stable", "saturated", "emerging"]
 LandscapeDirectionStatus = Literal["emerging", "growing", "stable", "saturated"]
 LandscapeStepKey = Literal["research", "retrieve", "summarize", "graph"]
@@ -85,6 +86,8 @@ class KnowledgeGraphBuildRequest(BaseModel):
 class KnowledgeGraphRetrieveRequest(BaseModel):
     query: str = Field(..., min_length=2)
     max_papers: int = Field(default=12, ge=3, le=30)
+    input_type: KnowledgeGraphRetrieveInputType = "domain"
+    paper_range_years: int | None = Field(default=None, ge=1, le=30)
 
 
 class RetrievalTraceStep(BaseModel):
@@ -164,6 +167,7 @@ class KnowledgeGraphResponse(BaseModel):
 
 class LandscapeGenerateRequest(BaseModel):
     query: str = Field(..., min_length=2, max_length=120)
+    paper_range_years: int | None = Field(default=None, ge=1, le=30)
 
 
 class LandscapeCorePaper(BaseModel):

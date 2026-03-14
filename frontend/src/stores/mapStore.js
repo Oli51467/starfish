@@ -3,8 +3,9 @@ import { computed, ref } from 'vue';
 import { generateMap, getMap, getTask } from '../api';
 
 const mapInput = ref({
-  input_type: 'arxiv_id',
+  input_type: '',
   input_value: '',
+  paper_range_years: '10',
   depth: 2
 });
 
@@ -73,7 +74,7 @@ async function pollTask(taskId) {
 }
 
 async function startMapGeneration() {
-  if (loading.value || !mapInput.value.input_value.trim()) return;
+  if (loading.value || !mapInput.value.input_value.trim() || !String(mapInput.value.input_type || '').trim()) return;
 
   loading.value = true;
   errorMessage.value = '';

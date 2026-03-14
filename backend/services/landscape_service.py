@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -124,23 +125,62 @@ class LandscapeService:
                 progress=5,
                 message="领域调研中：正在解析研究方向结构...",
             )
-            if bool(normalized_query.get("was_corrected")):
-                self._append_log(
-                    task_id,
-                    step_key="research",
-                    message=(
-                        "输入标准化："
-                        f"{normalized_query.get('original_query', request.query)} -> "
-                        f"{effective_query}"
-                    ),
-                    level="done" if normalized_query.get("used_llm") else "fallback",
-                )
+            original_query = str(normalized_query.get("original_query") or request.query).strip()
+            corrected_query = str(normalized_query.get("corrected_query") or original_query).strip()
+            translated_query = str(normalized_query.get("translated_query") or "").strip()
+            normalization_mode = "LLM+规则纠错" if bool(normalized_query.get("used_llm")) else "规则映射/直通"
+            self._append_log(
+                task_id,
+                step_key="research",
+                message=(
+                    "输入标准化完成："
+                    f"原始“{original_query}” -> 当前检索“{effective_query}”。"
+                ),
+                level="done",
+                meta={
+                    "处理方式": normalization_mode,
+                    "纠错后输入": corrected_query or original_query,
+                    "英文检索词": translated_query or effective_query,
+                    "是否发生修正": "是" if bool(normalized_query.get("was_corrected")) else "否",
+                },
+            )
+            self._append_log(
+                task_id,
+                step_key="research",
+                message="领域骨架规划：准备生成 10 个子方向（含状态、方法与检索关键词）。",
+                level="info",
+            )
             self._append_log(task_id, step_key="research", message="开始调用 LLM 生成领域骨架。", level="info")
 
             skeleton = await self.explorer.generate_domain_skeleton(effective_query)
             skeleton["domain_name"] = effective_query
             skeleton["domain_name_en"] = effective_query
-            direction_count = len(skeleton.get("sub_directions") or [])
+            sub_directions = list(skeleton.get("sub_directions") or [])
+            direction_count = len(sub_directions)
+            status_counter = Counter(
+                str(item.get("status") or "unknown").strip().lower()
+                for item in sub_directions
+            )
+            all_keywords = [
+                str(keyword).strip().lower()
+                for direction in sub_directions
+                for keyword in (direction.get("search_keywords") or [])
+                if str(keyword).strip()
+            ]
+            avg_keywords = (len(all_keywords) / direction_count) if direction_count else 0.0
+            missing_keyword_count = sum(
+                1
+                for direction in sub_directions
+                if not [item for item in (direction.get("search_keywords") or []) if str(item).strip()]
+            )
+            status_summary = ", ".join(
+                f"{name}:{count}" for name, count in sorted(status_counter.items())
+            ) or "unknown:0"
+            direction_preview = "、".join(
+                str(direction.get("name") or "").strip()
+                for direction in sub_directions[:6]
+                if str(direction.get("name") or "").strip()
+            ) or "暂无可展示方向"
             self._append_log(
                 task_id,
                 step_key="research",
@@ -148,17 +188,47 @@ class LandscapeService:
                 level="done",
                 meta={"sub_direction_count": str(direction_count)},
             )
+            self._append_log(
+                task_id,
+                step_key="research",
+                message=f"子方向状态分布：{status_summary}",
+                level="done",
+                meta={
+                    "子方向总数": str(direction_count),
+                    "缺少关键词方向": str(missing_keyword_count),
+                    "关键词总数": str(len(all_keywords)),
+                    "关键词去重后": str(len(set(all_keywords))),
+                },
+            )
+            self._append_log(
+                task_id,
+                step_key="research",
+                message=f"子方向预览：{direction_preview}",
+                level="done",
+                meta={
+                    "平均每方向关键词": f"{avg_keywords:.1f}",
+                    "领域描述": str(skeleton.get("description") or "暂无"),
+                },
+            )
             preview_graph = build_landscape_graph(skeleton, max_papers_per_direction=0)
             self._set_preview(task_id, preview_graph, self._build_preview_stats(skeleton, preview_graph))
 
+            self._set_step(task_id, "retrieve")
             self.task_manager.update_task(
                 task_id,
                 status="processing",
                 progress=26,
                 message="论文检索中：正在并行抓取真实论文...",
             )
-            self._set_step(task_id, "retrieve")
-            self._append_log(task_id, step_key="retrieve", message="开始论文检索（OpenAlex 优先）。", level="info")
+            range_hint = ""
+            if request.paper_range_years:
+                range_hint = f"，时间范围近 {int(request.paper_range_years)} 年"
+            self._append_log(
+                task_id,
+                step_key="retrieve",
+                message=f"开始论文检索并并行抓取候选论文{range_hint}。",
+                level="info",
+            )
 
             partial_directions = list(skeleton.get("sub_directions") or [])
             completed = 0
@@ -184,18 +254,19 @@ class LandscapeService:
                 self._append_log(
                     task_id,
                     step_key="retrieve",
-                    message=f"{direction.get('name', '未命名方向')} 检索完成：{paper_count} 篇（{provider}）。",
+                    message=f"{direction.get('name', '未命名方向')} 检索完成：{paper_count} 篇。",
                     level=level,
                     meta={
-                        "provider": provider,
                         "paper_count": str(paper_count),
                         "recent_ratio": f"{float(direction.get('recent_ratio') or 0.0):.3f}",
+                        "retrieval_status": "done" if level == "done" else "fallback",
                     },
                 )
 
             enriched = await self.explorer.enrich_with_papers(
                 skeleton,
                 direction_callback=direction_callback,
+                paper_range_years=request.paper_range_years,
             )
             enriched = self.explorer.sort_sub_directions(enriched)
             self._append_log(
@@ -239,12 +310,6 @@ class LandscapeService:
                     status="processing",
                     progress=graph_progress - 2,
                     message="深度总结已关闭：直接进入图谱生成...",
-                )
-                self._append_log(
-                    task_id,
-                    step_key="retrieve",
-                    message="深度总结步骤已关闭，跳过趋势洞察生成。",
-                    level="fallback",
                 )
 
             self._set_step(task_id, "graph")

@@ -3,7 +3,7 @@
     <div class="workflow-layout">
       <article class="workflow-left">
         <ErrorBoundary v-if="errorMessage && !graphData" :message="errorMessage" />
-        <KnowledgeGraphView v-else-if="graphData" :graph-data="graphData" />
+        <KnowledgeGraphView v-else-if="graphData" :graph-data="graphData" mode="panorama_only" />
         <LoadingState v-else-if="graphLoading" :message="activeStepHint" />
         <section v-else class="panel workflow-empty">
           <p class="muted">等待工作流执行...</p>
@@ -21,6 +21,7 @@ import { computed, onMounted, ref } from 'vue';
 import { buildKnowledgeGraph, getKnowledgeGraph, retrieveKnowledgePapers } from '../api';
 import ErrorBoundary from '../components/common/ErrorBoundary.vue';
 import KnowledgeGraphView from '../components/graph/KnowledgeGraphView.vue';
+import { buildKnowledgeGraphSets } from '../components/graph/knowledgeGraphModel';
 import LandscapeWorkflowPanel from '../components/landscape/LandscapeWorkflowPanel.vue';
 import LoadingState from '../components/common/LoadingState.vue';
 
@@ -58,14 +59,25 @@ const graphLoading = ref(false);
 const graphData = ref(null);
 const errorMessage = ref('');
 
-const graphStats = computed(() => {
-  const nodes = Array.isArray(graphData.value?.nodes) ? graphData.value.nodes : [];
-  const edges = Array.isArray(graphData.value?.edges) ? graphData.value.edges : [];
-  const directionCount = nodes.filter((node) => (node?.kind || node?.type) === 'domain').length;
+function extractPanoramaStats(rawGraph) {
+  const graphSets = buildKnowledgeGraphSets(rawGraph || {});
+  const panorama = graphSets.panorama || {};
+  const nodes = Array.isArray(panorama?.nodes) ? panorama.nodes : [];
+  const edges = Array.isArray(panorama?.edges) ? panorama.edges : [];
+  const paperCount = nodes.filter((node) => String(node?.kind || node?.type || '').toLowerCase() === 'paper').length;
   return {
     nodeCount: nodes.length,
     edgeCount: edges.length,
-    directionCount
+    paperCount
+  };
+}
+
+const graphStats = computed(() => {
+  const stats = extractPanoramaStats(graphData.value || {});
+  return {
+    nodeCount: stats.nodeCount,
+    edgeCount: stats.edgeCount,
+    directionCount: 0
   };
 });
 
@@ -115,46 +127,60 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function formatProviderLabel(provider) {
-  const value = String(provider || '').trim().toLowerCase();
-  if (value === 'semantic_scholar') return 'Semantic Scholar';
-  if (value === 'openalex') return 'OpenAlex';
-  if (value === 'mock') return 'Mock';
-  return provider || 'Unknown';
+function toStatusText(status) {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (normalized === 'doing' || normalized === 'running') return '进行中';
+  if (normalized === 'done') return '已完成';
+  if (normalized === 'pending') return '准备中';
+  if (normalized === 'fallback' || normalized === 'failed' || normalized === 'error') return '失败';
+  return '准备中';
 }
 
 function normalizeTraceStep(step) {
-  const providerLabel = formatProviderLabel(step?.provider);
   const count = Number(step?.count);
   const elapsedMs = Number(step?.elapsed_ms);
   const status = String(step?.status || '').toLowerCase() === 'fallback' ? 'fallback' : 'done';
   const metaParts = [];
-  if (providerLabel) metaParts.push(`来源 ${providerLabel}`);
   if (Number.isFinite(count) && count > 0) metaParts.push(`数量 ${count}`);
   if (Number.isFinite(elapsedMs) && elapsedMs > 0) metaParts.push(`耗时 ${Math.round(elapsedMs)}ms`);
   return {
     title: String(step?.title || ''),
     detail: String(step?.detail || ''),
     status,
-    statusText: status === 'fallback' ? 'Fallback' : 'Done',
+    statusText: toStatusText(status),
     metaText: metaParts.join(' · ')
   };
 }
 
-function createRunningRetrievalLogs() {
+function createRetrievalRunningMessage(inputType) {
+  if (inputType === 'arxiv_id') return '正在解析 arXiv ID，定位种子论文并扩展引用网络...';
+  if (inputType === 'doi') return '正在解析 DOI，定位种子论文并扩展引用网络...';
+  return '正在执行网页检索、候选抓取与筛选...';
+}
+
+function parsePaperRangeYears(rawValue) {
+  const parsed = Number(rawValue);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return Math.min(30, Math.round(parsed));
+}
+
+function createRunningRetrievalLogs(inputType) {
+  const sourceDetail = inputType === 'domain'
+    ? '正在构造检索请求并访问学术数据源...'
+    : '正在定位种子论文并拉取引用/被引关系...';
   return [
     {
-      title: 'LLM 检索规划与网页搜索',
-      detail: '正在构造检索请求并访问学术数据源...',
+      title: inputType === 'domain' ? 'LLM 检索规划与网页搜索' : '种子论文定位与请求构造',
+      detail: sourceDetail,
       status: 'doing',
-      statusText: 'Doing',
+      statusText: toStatusText('doing'),
       metaText: ''
     },
     {
       title: '候选论文评分与筛选',
       detail: '等待候选结果返回后执行评分筛选。',
       status: 'pending',
-      statusText: 'Pending',
+      statusText: toStatusText('pending'),
       metaText: ''
     }
   ];
@@ -168,7 +194,7 @@ async function playRetrievalTrace(rawSteps) {
     evolving.push({
       ...item,
       status: 'doing',
-      statusText: 'Doing'
+      statusText: toStatusText('doing')
     });
     setStepLogs('retrieve', [...evolving]);
     await sleep(220);
@@ -178,83 +204,28 @@ async function playRetrievalTrace(rawSteps) {
 }
 
 function createFallbackRetrievalLogs(retrieval) {
-  const provider = formatProviderLabel(retrieval?.provider);
   const selectedCount = Number(retrieval?.selected_count || 0);
   const candidateCount = Number(retrieval?.candidate_count || 0);
   return [
     {
       title: 'LLM 检索规划与网页搜索',
-      detail: `已访问数据源 ${provider} 并完成候选收集。`,
+      detail: '候选论文收集已完成。',
       status: 'done',
-      statusText: 'Done',
+      statusText: toStatusText('done'),
       metaText: ''
     },
     {
       title: '候选论文评分与筛选',
       detail: `已从 ${candidateCount} 个候选中筛选 ${selectedCount} 篇论文。`,
       status: 'done',
-      statusText: 'Done',
+      statusText: toStatusText('done'),
       metaText: ''
     }
   ];
-}
-
-function normalizeBuildTraceStep(step) {
-  const status = String(step?.status || '').toLowerCase() === 'fallback' ? 'fallback' : 'done';
-  const elapsedMs = Number(step?.elapsed_ms);
-  const metaParts = [];
-  if (Number.isFinite(elapsedMs) && elapsedMs > 0) metaParts.push(`耗时 ${Math.round(elapsedMs)}ms`);
-  return {
-    title: String(step?.title || ''),
-    detail: String(step?.detail || ''),
-    status,
-    statusText: status === 'fallback' ? 'Fallback' : 'Done',
-    metaText: metaParts.join(' · ')
-  };
-}
-
-function normalizeBuildTrace(rawSteps, result) {
-  const fromBackend = Array.isArray(rawSteps)
-    ? rawSteps.map(normalizeBuildTraceStep).filter((item) => item.title || item.detail)
-    : [];
-  if (fromBackend.length >= 2) return fromBackend.slice(0, 2);
-
-  const fallbackItems = [
-    normalizeBuildTraceStep({
-      title: '建图与实体关系抽取',
-      detail: `已构建 ${Number(result?.paper_count || 0)} 个论文节点、${Number(result?.entity_count || 0)} 个实体节点和 ${Number(result?.domain_count || 0)} 个领域节点。`,
-      status: 'done',
-      elapsed_ms: 0
-    }),
-    normalizeBuildTraceStep({
-      title: '图谱落库与回读准备',
-      detail: result?.stored_in_neo4j
-        ? `已写入 Neo4j（graph_id=${String(result?.graph_id || '')}），支持回读验证。`
-        : 'Neo4j 不可用，已保留实时构建结果。',
-      status: result?.stored_in_neo4j ? 'done' : 'fallback',
-      elapsed_ms: 0
-    })
-  ];
-  return [...fromBackend, ...fallbackItems].slice(0, 2);
 }
 
 function createRunningBuildLogs() {
-  return [
-    {
-      title: '建图与实体关系抽取',
-      detail: '正在构建论文、实体与领域节点关系...',
-      status: 'doing',
-      statusText: 'Doing',
-      metaText: ''
-    },
-    {
-      title: '图谱落库与回读准备',
-      detail: '等待构建完成后执行落库与回读。',
-      status: 'pending',
-      statusText: 'Pending',
-      metaText: ''
-    }
-  ];
+  return [];
 }
 
 function toNodeId(raw, fallback) {
@@ -333,12 +304,17 @@ async function runWorkflow() {
   graphLoading.value = true;
 
   try {
-    setStepStatus(1, 'running', '正在执行网页检索、候选抓取与筛选...');
-    setStepLogs('retrieve', createRunningRetrievalLogs());
+    const inputType = String(props.seed?.input_type || 'domain').trim().toLowerCase();
+    setStepStatus(1, 'running', createRetrievalRunningMessage(inputType));
+    setStepLogs('retrieve', createRunningRetrievalLogs(inputType));
+    const paperRangeYears = parsePaperRangeYears(props.seed?.paper_range_years);
     const retrieval = await retrieveKnowledgePapers({
       query: props.seed.input_value,
+      input_type: inputType,
+      paper_range_years: paperRangeYears,
       max_papers: 12
     });
+    const retrievalQuery = String(retrieval?.query || props.seed.input_value).trim() || props.seed.input_value;
     await playRetrievalTrace(retrieval.steps || []);
     if (!Array.isArray(retrieval.steps) || !retrieval.steps.length) {
       setStepLogs('retrieve', createFallbackRetrievalLogs(retrieval));
@@ -346,34 +322,18 @@ async function runWorkflow() {
     setStepStatus(
       1,
       'done',
-      `${retrieval.selected_count} 篇论文已筛选（候选 ${retrieval.candidate_count}，来源 ${formatProviderLabel(retrieval.provider)}）。`
+      `${retrieval.selected_count} 篇论文已筛选（候选 ${retrieval.candidate_count}）。`
     );
-    graphData.value = buildRetrievalPreviewGraph(props.seed.input_value, retrieval.papers || []);
+    graphData.value = buildRetrievalPreviewGraph(retrievalQuery, retrieval.papers || []);
 
     setStepStatus(2, 'running', '正在建图并抽取实体关系...');
     setStepLogs('graph', createRunningBuildLogs());
     const result = await buildKnowledgeGraph({
-      query: props.seed.input_value,
+      query: retrievalQuery,
       max_papers: 12,
       max_entities_per_paper: 6,
       prefetched_papers: retrieval.papers || []
     });
-    const completedBuildLogs = normalizeBuildTrace(result?.build_steps, result);
-    if (completedBuildLogs.length) {
-      const partial = [
-        completedBuildLogs[0],
-        {
-          title: '图谱落库与回读准备',
-          detail: '正在写入图数据库并准备回读。',
-          status: 'doing',
-          statusText: 'Doing',
-          metaText: ''
-        }
-      ];
-      setStepLogs('graph', partial);
-      await sleep(220);
-      setStepLogs('graph', completedBuildLogs);
-    }
     let resolvedGraph = result;
     let storageHint = '已使用实时结果。';
     if (result.stored_in_neo4j) {
@@ -384,9 +344,14 @@ async function runWorkflow() {
         storageHint = '已写入 Neo4j，回读失败，已使用实时结果。';
       }
     }
-
+    setStepLogs('graph', []);
     graphData.value = resolvedGraph;
-    setStepStatus(2, 'done', `${result.paper_count} 篇论文已建图，抽取 ${result.entity_count} 个实体。${storageHint}`);
+    const panoramaStats = extractPanoramaStats(resolvedGraph || result || {});
+    setStepStatus(
+      2,
+      'done',
+      `全景图谱展示 ${panoramaStats.paperCount} 个论文节点、${panoramaStats.edgeCount} 条论文关联边。${storageHint}`
+    );
   } catch (error) {
     const failed = activeStep.value?.index || 2;
     setStepStatus(failed, 'failed', '步骤执行失败。');
@@ -397,7 +362,7 @@ async function runWorkflow() {
       title: '执行异常',
       detail: errorMessage.value,
       status: 'fallback',
-      statusText: 'Error',
+      statusText: toStatusText('error'),
       metaText: ''
     }];
     setStepLogs(failedKey, nextLogs);

@@ -8,7 +8,7 @@
       :aria-expanded="open ? 'true' : 'false'"
       @click="toggle"
     >
-      <span>{{ selectedLabel }}</span>
+      <span :class="{ 'is-placeholder': !hasSelection }">{{ selectedLabel }}</span>
       <span class="custom-select-caret" aria-hidden="true">▾</span>
     </button>
 
@@ -48,6 +48,10 @@ const props = defineProps({
   ariaLabel: {
     type: String,
     default: '选择输入类型'
+  },
+  placeholder: {
+    type: String,
+    default: '请选择'
   }
 });
 
@@ -56,9 +60,11 @@ const emit = defineEmits(['update:modelValue']);
 const open = ref(false);
 const rootRef = ref(null);
 
+const hasSelection = computed(() => props.options.some((item) => item.value === props.modelValue));
+
 const selectedLabel = computed(() => {
   const selected = props.options.find((item) => item.value === props.modelValue);
-  return selected?.label || '请选择';
+  return selected?.label || props.placeholder;
 });
 
 function toggle() {

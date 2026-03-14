@@ -14,6 +14,7 @@
       <LandscapeView
         v-else-if="isDomainWorkflow"
         :query="workflowSeed.input_value"
+        :paper-range-years="workflowSeed.paper_range_years"
         @step-change="updateHeaderStep"
       />
       <WorkflowView v-else :seed="workflowSeed" @step-change="updateHeaderStep" @back="exitWorkflow" />
@@ -31,8 +32,9 @@ import WorkflowView from './views/WorkflowView.vue';
 
 const workflowActive = ref(false);
 const workflowSeed = ref({
-  input_type: 'arxiv_id',
+  input_type: '',
   input_value: '',
+  paper_range_years: null,
   depth: 2
 });
 const headerStep = ref({

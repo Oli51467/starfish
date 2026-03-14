@@ -3,6 +3,7 @@ const MAX_PAPER_NODES = 24;
 const MAX_DOMAIN_NODES = 16;
 const MAX_PAPER_RELATED_EDGES = 34;
 const MAX_DOMAIN_RELATED_EDGES = 16;
+const MAX_PANORAMA_PAPER_NODES = 80;
 const MIN_ASSOCIATION_RATE = 0.02;
 
 export function clamp(value, min, max) {
@@ -105,6 +106,19 @@ function normalizeDomainNode(node) {
     kind: 'domain',
     name,
     relevance: normalizeRate(node?.meta?.relevance ?? node?.score),
+    size: safeNumber(node?.size, 1)
+  };
+}
+
+function normalizeEntityNode(node, query) {
+  const name = resolveNodeName(node);
+  const relevance = normalizeRate(node?.meta?.relevance ?? node?.score ?? fallbackRelevance(name, query));
+  return {
+    ...node,
+    kind: 'entity',
+    name,
+    relevance,
+    score: normalizeRate(node?.score),
     size: safeNumber(node?.size, 1)
   };
 }
@@ -348,12 +362,124 @@ function buildDomainGraph(nodesRaw, edgesRaw, query) {
   };
 }
 
+function buildPanoramaGraph(nodesRaw, edgesRaw, query) {
+  const papers = nodesRaw
+    .filter((node) => node?.type === 'paper')
+    .map((node) => normalizePaperNode(node, query))
+    .filter((paper) => paper.relevance > MIN_ASSOCIATION_RATE)
+    .sort(sortByRelevance)
+    .slice(0, MAX_PANORAMA_PAPER_NODES);
+
+  const centerNode = buildQueryNode(query);
+  const paperIds = new Set(papers.map((paper) => String(paper.id || '')));
+
+  const centerEdges = papers.map((paper) => ({
+    id: `panorama-seed-${paper.id}`,
+    source: QUERY_NODE_ID,
+    target: paper.id,
+    relation: 'seed_related',
+    kind: 'center',
+    relevance: paper.relevance,
+    meta: {
+      relation_label: '由种子论文延伸'
+    }
+  }));
+
+  const peerEdges = (edgesRaw || [])
+    .filter((edge) => edge?.relation === 'related')
+    .filter((edge) => paperIds.has(String(edge?.source || '')) && paperIds.has(String(edge?.target || '')))
+    .map((edge, index) => ({
+      id: String(edge?.id || `panorama-peer-${index}`),
+      source: String(edge.source || ''),
+      target: String(edge.target || ''),
+      relation: 'peer_related',
+      kind: 'peer',
+      relevance: normalizeRate(edge?.weight),
+      meta: edge?.meta || {}
+    }))
+    .filter((edge) => edge.source && edge.target && edge.relevance > MIN_ASSOCIATION_RATE)
+    .sort((left, right) => right.relevance - left.relevance);
+
+  const nodes = [centerNode, ...papers];
+  const edges = [...centerEdges, ...peerEdges];
+
+  return {
+    key: 'panorama',
+    title: '全景论文知识图谱',
+    description: '展示与种子论文强相关、并由其延伸出的论文网络。',
+    centerNodeId: QUERY_NODE_ID,
+    nodes,
+    edges,
+    counts: {
+      seed: 1,
+      paper: papers.length,
+      domain: 0,
+      edges: edges.length
+    }
+  };
+}
+
+function normalizeFullNode(node, query) {
+  const type = String(node?.type || node?.kind || '').toLowerCase();
+  if (type === 'paper') return normalizePaperNode(node, query);
+  if (type === 'domain') return normalizeDomainNode(node);
+  if (type === 'seed') return buildQueryNode(query);
+  return normalizeEntityNode(node, query);
+}
+
+function normalizeFullEdge(edge, index, nodeIds) {
+  const source = String(edge?.source || '').trim();
+  const target = String(edge?.target || '').trim();
+  if (!source || !target || !nodeIds.has(source) || !nodeIds.has(target)) return null;
+  const relation = String(edge?.relation || 'related').trim() || 'related';
+  const relevance = normalizeRate(edge?.weight ?? edge?.meta?.relevance ?? 0.32);
+  return {
+    id: String(edge?.id || `full-edge-${index}`),
+    source,
+    target,
+    relation,
+    kind: relation === 'seed_related' ? 'center' : 'peer',
+    relevance,
+    meta: edge?.meta || {}
+  };
+}
+
+function buildFullGraph(nodesRaw, edgesRaw, query) {
+  const nodes = nodesRaw.map((node) => normalizeFullNode(node, query));
+  const nodeIds = new Set(nodes.map((node) => String(node?.id || '')).filter(Boolean));
+  const edges = (edgesRaw || [])
+    .map((edge, index) => normalizeFullEdge(edge, index, nodeIds))
+    .filter(Boolean);
+
+  const paperCount = nodes.filter((node) => node.kind === 'paper').length;
+  const domainCount = nodes.filter((node) => node.kind === 'domain').length;
+  const entityCount = nodes.filter((node) => node.kind === 'entity').length;
+
+  return {
+    key: 'full',
+    title: '全量知识图谱',
+    description: '展示后端构建的完整节点与关系网络。',
+    centerNodeId: QUERY_NODE_ID,
+    nodes,
+    edges,
+    counts: {
+      seed: nodes.filter((node) => node.kind === 'seed').length,
+      paper: paperCount,
+      domain: domainCount,
+      entity: entityCount,
+      edges: edges.length
+    }
+  };
+}
+
 export function buildKnowledgeGraphSets(rawGraph) {
   const nodesRaw = Array.isArray(rawGraph?.nodes) ? rawGraph.nodes : [];
   const edgesRaw = Array.isArray(rawGraph?.edges) ? rawGraph.edges : [];
   const query = String(rawGraph?.query || '').trim();
 
   return {
+    panorama: buildPanoramaGraph(nodesRaw, edgesRaw, query),
+    full: buildFullGraph(nodesRaw, edgesRaw, query),
     paper: buildPaperGraph(nodesRaw, edgesRaw, query),
     domain: buildDomainGraph(nodesRaw, edgesRaw, query)
   };
