@@ -20,6 +20,7 @@
                     <th>研究类型</th>
                     <th>搜索记录</th>
                     <th>搜索范围</th>
+                    <th>血缘树</th>
                     <th>搜索时间</th>
                   </tr>
                 </thead>
@@ -39,6 +40,11 @@
                     <td>{{ mapResearchType(item.research_type) }}</td>
                     <td class="history-record-cell" :title="item.search_record">{{ item.search_record }}</td>
                     <td>{{ mapSearchRange(item.search_range, item.research_type) }}</td>
+                    <td>
+                      <span class="history-lineage-badge mono" :class="mapLineageStatusClass(item)">
+                        {{ mapLineageStatusLabel(item) }}
+                      </span>
+                    </td>
                     <td>{{ formatDateTime(item.search_time) }}</td>
                   </tr>
                 </tbody>
@@ -133,6 +139,22 @@ function mapSearchRange(searchRange, researchType) {
   const value = String(searchRange || '').trim();
   if (value) return value;
   return String(researchType || '').toLowerCase() === 'domain' ? '所有时间' : '不适用';
+}
+
+function mapLineageStatusLabel(item) {
+  const researchType = String(item?.research_type || '').trim().toLowerCase();
+  if (researchType === 'domain') return '不适用';
+  const lineage = item?.lineage || {};
+  if (!lineage?.generated) return '未生成';
+  const ancestors = Number(lineage?.ancestor_count || 0);
+  const descendants = Number(lineage?.descendant_count || 0);
+  return `已生成 ${Math.max(0, Math.round(ancestors))}/${Math.max(0, Math.round(descendants))}`;
+}
+
+function mapLineageStatusClass(item) {
+  const researchType = String(item?.research_type || '').trim().toLowerCase();
+  if (researchType === 'domain') return 'is-na';
+  return item?.lineage?.generated ? 'is-done' : 'is-pending';
 }
 
 function formatDateTime(rawValue) {

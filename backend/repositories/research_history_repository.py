@@ -82,7 +82,16 @@ class ResearchHistoryRepository:
 
                 cursor.execute(
                     """
-                    SELECT history_id, research_type, search_record, search_range, search_time
+                    SELECT history_id,
+                           research_type,
+                           search_record,
+                           search_range,
+                           search_time,
+                           lineage_ready,
+                           lineage_ancestor_count,
+                           lineage_descendant_count,
+                           lineage_seed_paper_id,
+                           lineage_updated_at
                     FROM research_history_records
                     WHERE user_id = %s
                     ORDER BY search_time DESC
@@ -99,6 +108,13 @@ class ResearchHistoryRepository:
                 "search_record": str(row.get("search_record") or ""),
                 "search_range": str(row.get("search_range") or ""),
                 "search_time": row.get("search_time"),
+                "lineage": {
+                    "generated": bool(row.get("lineage_ready")),
+                    "ancestor_count": max(0, int(row.get("lineage_ancestor_count") or 0)),
+                    "descendant_count": max(0, int(row.get("lineage_descendant_count") or 0)),
+                    "seed_paper_id": str(row.get("lineage_seed_paper_id") or ""),
+                    "updated_at": row.get("lineage_updated_at"),
+                },
             }
             for row in rows
             if str(row.get("history_id") or "").strip()
@@ -114,7 +130,17 @@ class ResearchHistoryRepository:
         with self._connect() as conn, conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 """
-                SELECT history_id, research_type, search_record, search_range, search_time, graph_payload
+                SELECT history_id,
+                       research_type,
+                       search_record,
+                       search_range,
+                       search_time,
+                       graph_payload,
+                       lineage_ready,
+                       lineage_ancestor_count,
+                       lineage_descendant_count,
+                       lineage_seed_paper_id,
+                       lineage_updated_at
                 FROM research_history_records
                 WHERE user_id = %s AND history_id = %s
                 LIMIT 1
@@ -136,8 +162,70 @@ class ResearchHistoryRepository:
             "search_record": str(row.get("search_record") or ""),
             "search_range": str(row.get("search_range") or ""),
             "search_time": row.get("search_time"),
+            "lineage": {
+                "generated": bool(row.get("lineage_ready")),
+                "ancestor_count": max(0, int(row.get("lineage_ancestor_count") or 0)),
+                "descendant_count": max(0, int(row.get("lineage_descendant_count") or 0)),
+                "seed_paper_id": str(row.get("lineage_seed_paper_id") or ""),
+                "updated_at": row.get("lineage_updated_at"),
+            },
             "graph_payload": payload,
         }
+
+    def mark_lineage_generated(
+        self,
+        *,
+        user_id: str,
+        graph_id: str,
+        seed_paper_id: str,
+        ancestor_count: int,
+        descendant_count: int,
+    ) -> bool:
+        self._ensure_table()
+        safe_user_id = str(user_id or "").strip()
+        safe_graph_id = str(graph_id or "").strip()
+        safe_seed_paper_id = str(seed_paper_id or "").strip()
+        if not safe_user_id or not safe_graph_id or not safe_seed_paper_id:
+            return False
+
+        try:
+            safe_ancestor_count = max(0, int(ancestor_count))
+        except (TypeError, ValueError):
+            safe_ancestor_count = 0
+        try:
+            safe_descendant_count = max(0, int(descendant_count))
+        except (TypeError, ValueError):
+            safe_descendant_count = 0
+
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                WITH target AS (
+                    SELECT ctid
+                    FROM research_history_records
+                    WHERE user_id = %s AND graph_id = %s
+                    ORDER BY search_time DESC
+                    LIMIT 1
+                )
+                UPDATE research_history_records AS r
+                SET lineage_ready = TRUE,
+                    lineage_ancestor_count = %s,
+                    lineage_descendant_count = %s,
+                    lineage_seed_paper_id = %s,
+                    lineage_updated_at = NOW()
+                WHERE r.ctid IN (SELECT ctid FROM target)
+                RETURNING history_id
+                """,
+                (
+                    safe_user_id,
+                    safe_graph_id,
+                    safe_ancestor_count,
+                    safe_descendant_count,
+                    safe_seed_paper_id,
+                ),
+            )
+            updated = cursor.fetchone()
+        return bool(updated and str(updated.get("history_id") or "").strip())
 
     def _ensure_table(self) -> None:
         if self._table_ready:
@@ -158,6 +246,11 @@ class ResearchHistoryRepository:
                         search_range TEXT NOT NULL DEFAULT '',
                         graph_id TEXT NOT NULL,
                         graph_payload JSONB NOT NULL,
+                        lineage_ready BOOLEAN NOT NULL DEFAULT FALSE,
+                        lineage_ancestor_count INTEGER NOT NULL DEFAULT 0,
+                        lineage_descendant_count INTEGER NOT NULL DEFAULT 0,
+                        lineage_seed_paper_id TEXT NOT NULL DEFAULT '',
+                        lineage_updated_at TIMESTAMPTZ,
                         search_time TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     )
                     """
@@ -166,6 +259,36 @@ class ResearchHistoryRepository:
                     """
                     ALTER TABLE research_history_records
                     ADD COLUMN IF NOT EXISTS search_range TEXT NOT NULL DEFAULT ''
+                    """
+                )
+                cursor.execute(
+                    """
+                    ALTER TABLE research_history_records
+                    ADD COLUMN IF NOT EXISTS lineage_ready BOOLEAN NOT NULL DEFAULT FALSE
+                    """
+                )
+                cursor.execute(
+                    """
+                    ALTER TABLE research_history_records
+                    ADD COLUMN IF NOT EXISTS lineage_ancestor_count INTEGER NOT NULL DEFAULT 0
+                    """
+                )
+                cursor.execute(
+                    """
+                    ALTER TABLE research_history_records
+                    ADD COLUMN IF NOT EXISTS lineage_descendant_count INTEGER NOT NULL DEFAULT 0
+                    """
+                )
+                cursor.execute(
+                    """
+                    ALTER TABLE research_history_records
+                    ADD COLUMN IF NOT EXISTS lineage_seed_paper_id TEXT NOT NULL DEFAULT ''
+                    """
+                )
+                cursor.execute(
+                    """
+                    ALTER TABLE research_history_records
+                    ADD COLUMN IF NOT EXISTS lineage_updated_at TIMESTAMPTZ
                     """
                 )
                 cursor.execute(

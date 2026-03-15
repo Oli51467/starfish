@@ -13,6 +13,7 @@ from models.schemas import (
     LandscapeGenerateRequest,
     LandscapeResponse,
     ResearchHistoryDetailResponse,
+    ResearchHistoryLineageStatus,
     ResearchHistoryListItem,
     ResearchHistoryListResponse,
     UserProfile,
@@ -113,6 +114,7 @@ class ResearchHistoryService:
                         research_type=item.get("research_type"),
                     ),
                     search_time=item.get("search_time"),
+                    lineage=self._to_lineage_status(item.get("lineage")),
                 )
                 for item in items
             ],
@@ -151,9 +153,36 @@ class ResearchHistoryService:
                 research_type=normalized_research_type,
             ),
             search_time=payload.get("search_time"),
+            lineage=self._to_lineage_status(payload.get("lineage")),
             graph=graph,
             landscape_graph=landscape_graph,
         )
+
+    def record_lineage_status(
+        self,
+        *,
+        user: UserProfile,
+        graph_id: str,
+        seed_paper_id: str,
+        ancestor_count: int,
+        descendant_count: int,
+    ) -> bool:
+        safe_graph_id = str(graph_id or "").strip()
+        safe_seed_paper_id = str(seed_paper_id or "").strip()
+        if not safe_graph_id or not safe_seed_paper_id:
+            return False
+
+        try:
+            return self.repository.mark_lineage_generated(
+                user_id=user.id,
+                graph_id=safe_graph_id,
+                seed_paper_id=safe_seed_paper_id,
+                ancestor_count=max(0, self._safe_int(ancestor_count, fallback=0)),
+                descendant_count=max(0, self._safe_int(descendant_count, fallback=0)),
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed updating lineage status in research history.")
+            return False
 
     @staticmethod
     def _normalize_research_type(raw_value: str | None) -> str:
@@ -181,6 +210,17 @@ class ResearchHistoryService:
         if years > 0:
             return f"近 {years} 年"
         return "所有时间"
+
+    @staticmethod
+    def _to_lineage_status(raw_value: Any) -> ResearchHistoryLineageStatus:
+        source = raw_value if isinstance(raw_value, dict) else {}
+        return ResearchHistoryLineageStatus(
+            generated=bool(source.get("generated")),
+            ancestor_count=max(0, ResearchHistoryService._safe_int(source.get("ancestor_count"), fallback=0)),
+            descendant_count=max(0, ResearchHistoryService._safe_int(source.get("descendant_count"), fallback=0)),
+            seed_paper_id=str(source.get("seed_paper_id") or ""),
+            updated_at=source.get("updated_at"),
+        )
 
     @staticmethod
     def _to_history_graph(landscape: LandscapeResponse) -> KnowledgeGraphResponse:
@@ -315,6 +355,13 @@ class ResearchHistoryService:
     def _safe_float(raw_value: Any, *, fallback: float) -> float:
         try:
             return float(raw_value)
+        except (TypeError, ValueError):
+            return fallback
+
+    @staticmethod
+    def _safe_int(raw_value: Any, *, fallback: int) -> int:
+        try:
+            return int(raw_value)
         except (TypeError, ValueError):
             return fallback
 

@@ -79,9 +79,9 @@
           <div class="seed-strategy-picker" ref="strategyPickerRef">
             <button
               class="seed-strategy-trigger mono"
-              :class="{ 'is-disabled': !isDomainInput || !canUseFeatures }"
+              :class="{ 'is-disabled': !isStrategyAvailable || !canUseFeatures }"
               type="button"
-              :disabled="!isDomainInput || !canUseFeatures"
+              :disabled="!isStrategyAvailable || !canUseFeatures"
               :aria-expanded="strategyMenuOpen ? 'true' : 'false'"
               aria-label="选择检索模式"
               @click="toggleStrategyMenu"
@@ -248,6 +248,7 @@ const selectedMode = computed(() => {
 });
 const hasInputType = computed(() => Boolean(String(mapInput.value.input_type || '').trim()));
 const isDomainInput = computed(() => String(mapInput.value.input_type || '').trim() === 'domain');
+const isStrategyAvailable = computed(() => hasInputType.value);
 const selectedStrategyKey = computed(() => (mapInput.value.quick_mode ? 'quick' : 'normal'));
 const selectedStrategyLabel = computed(() => (mapInput.value.quick_mode ? '快速模式' : '普通模式'));
 const selectedPaperTypeLabel = computed(() => {
@@ -286,7 +287,7 @@ function closeModeMenu() {
 }
 
 function toggleStrategyMenu() {
-  if (!canUseFeatures.value || !isDomainInput.value) return;
+  if (!canUseFeatures.value || !isStrategyAvailable.value) return;
   strategyMenuOpen.value = !strategyMenuOpen.value;
   if (strategyMenuOpen.value) {
     closeModeMenu();
@@ -337,7 +338,7 @@ function selectDomainRange(rangeValue) {
 }
 
 function selectStrategy(nextMode) {
-  if (!canUseFeatures.value || !isDomainInput.value) return;
+  if (!canUseFeatures.value || !isStrategyAvailable.value) return;
   mapInput.value.quick_mode = nextMode === 'quick';
   closeStrategyMenu();
 }
@@ -377,20 +378,10 @@ function startAnalysis() {
     input_type: selectedInputType,
     input_value: value,
     paper_range_years: paperRangeYears,
-    quick_mode: Boolean(isDomainInput.value && mapInput.value.quick_mode),
+    quick_mode: Boolean(mapInput.value.quick_mode),
     depth: mapInput.value.depth || 2
   });
 }
-
-watch(
-  () => mapInput.value.input_type,
-  (nextType) => {
-    if (String(nextType || '').trim() !== 'domain') {
-      mapInput.value.quick_mode = false;
-      closeStrategyMenu();
-    }
-  }
-);
 
 watch(
   canUseFeatures,

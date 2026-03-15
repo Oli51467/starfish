@@ -50,6 +50,15 @@
             <span class="workflow-badge-spinner" aria-hidden="true"></span>
             正在处理中
           </button>
+          <button
+            v-else-if="isActionRequired(step)"
+            class="workflow-step-active-btn"
+            type="button"
+            :disabled="Boolean(step?.action?.disabled)"
+            @click="$emit('step-action', step.key)"
+          >
+            {{ String(step?.action?.label || '继续执行') }}
+          </button>
         </div>
       </article>
     </div>
@@ -73,9 +82,11 @@ const props = defineProps({
     })
   }
 });
+defineEmits(['step-action']);
 
 function normalizeStatusKey(rawStatus) {
   const normalized = String(rawStatus || '').toLowerCase();
+  if (normalized === 'action_required') return 'pending';
   if (['running', 'doing', 'info'].includes(normalized)) return 'doing';
   if (['done', 'completed'].includes(normalized)) return 'done';
   if (['failed', 'error', 'fallback'].includes(normalized)) return 'fallback';
@@ -87,6 +98,8 @@ function stepBadgeStatus(stepStatus) {
 }
 
 function stepBadgeText(stepStatus) {
+  const raw = String(stepStatus || '').toLowerCase();
+  if (raw === 'action_required') return '待操作';
   const status = stepBadgeStatus(stepStatus);
   if (status === 'doing') return '进行中';
   if (status === 'done') return '已完成';
@@ -108,6 +121,10 @@ function traceBadgeText(logStatus) {
 
 function isDoingStatus(status) {
   return String(status || '').toLowerCase() === 'doing';
+}
+
+function isActionRequired(step) {
+  return String(step?.status || '').toLowerCase() === 'action_required' && Boolean(step?.action);
 }
 
 function isGraphStep(step) {

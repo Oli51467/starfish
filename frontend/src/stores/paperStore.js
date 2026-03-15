@@ -26,8 +26,10 @@ async function runRequest({
   try {
     const payload = await requestFn();
     onSuccess(payload);
+    return payload;
   } catch (error) {
     errorRef.value = error.message || fallbackMessage;
+    return null;
   } finally {
     loadingRef.value = false;
   }
@@ -35,7 +37,7 @@ async function runRequest({
 
 async function loadReadingList(mapId, options = {}) {
   if (!mapId) return;
-  await runRequest({
+  return await runRequest({
     requestFn: () => getReadingList(mapId, options),
     loadingRef: readingListLoading,
     errorRef: readingListErrorMessage,
@@ -48,7 +50,7 @@ async function loadReadingList(mapId, options = {}) {
 
 async function loadGaps(mapId, options = {}) {
   if (!mapId) return;
-  await runRequest({
+  return await runRequest({
     requestFn: () => getGaps(mapId, options),
     loadingRef: gapsLoading,
     errorRef: gapsErrorMessage,
@@ -61,15 +63,20 @@ async function loadGaps(mapId, options = {}) {
 
 async function loadLineage(paperId, options = {}) {
   if (!paperId) return;
-  await runRequest({
+  return await runRequest({
     requestFn: () => getLineage(paperId, options),
     loadingRef: lineageLoading,
     errorRef: lineageErrorMessage,
-    fallbackMessage: '获取论文血缘树失败。',
+    fallbackMessage: '获取血缘树失败。',
     onSuccess: (payload) => {
       lineage.value = payload;
     }
   });
+}
+
+function clearLineage() {
+  lineage.value = null;
+  lineageErrorMessage.value = '';
 }
 
 export function usePaperStore() {
@@ -85,6 +92,7 @@ export function usePaperStore() {
     lineageErrorMessage,
     loadReadingList,
     loadGaps,
-    loadLineage
+    loadLineage,
+    clearLineage
   };
 }

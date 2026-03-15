@@ -19,7 +19,6 @@ from external.semantic_scholar import (
     SemanticScholarClientError,
 )
 from core.llm_client import chat, get_client, is_configured
-from core.paper_fetcher import PaperFetcher
 from core.settings import get_settings
 from models.schemas import (
     BuildTraceStep,
@@ -74,7 +73,6 @@ class GraphRAGService:
     def __init__(self, neo4j_repo: Neo4jRepository | None = None) -> None:
         self.semantic = SemanticScholarClient()
         self.openalex = OpenAlexClient()
-        self.paper_fetcher = PaperFetcher()
         self.neo4j_repo = neo4j_repo or get_neo4j_repository()
         self.settings = get_settings()
         self._embedding_client = None
@@ -194,6 +192,7 @@ class GraphRAGService:
             query=request.query,
             max_papers=request.max_papers,
             input_type=request.input_type,
+            quick_mode=request.quick_mode,
             paper_range_years=request.paper_range_years,
         )
         papers = [RetrievedPaper.model_validate(item) for item in retrieval_payload["selected_papers"]]
@@ -214,12 +213,14 @@ class GraphRAGService:
         query: str,
         max_papers: int,
         input_type: str = "domain",
+        quick_mode: bool = False,
         paper_range_years: int | None = None,
     ) -> list[dict[str, Any]]:
         payload = self._retrieve_papers_with_trace(
             query=query,
             max_papers=max_papers,
             input_type=input_type,
+            quick_mode=quick_mode,
             paper_range_years=paper_range_years,
         )
         return payload["selected_papers"]
@@ -229,6 +230,7 @@ class GraphRAGService:
         query: str,
         max_papers: int,
         input_type: str = "domain",
+        quick_mode: bool = False,
         paper_range_years: int | None = None,
     ) -> dict[str, Any]:
         normalized_input_type = str(input_type or "domain").strip().lower()
@@ -237,6 +239,7 @@ class GraphRAGService:
                 input_type=normalized_input_type,
                 input_value=query,
                 max_papers=max_papers,
+                quick_mode=quick_mode,
                 paper_range_years=paper_range_years,
             )
         return self._retrieve_papers_from_query_with_trace(
@@ -251,6 +254,7 @@ class GraphRAGService:
         input_type: str,
         input_value: str,
         max_papers: int,
+        quick_mode: bool = False,
         paper_range_years: int | None = None,
     ) -> dict[str, Any]:
         safe_value = input_value.strip()
@@ -258,14 +262,19 @@ class GraphRAGService:
         candidate_limit = min(220, max(safe_max + 36, safe_max * 16))
         normalized_range = self._normalize_paper_range_years(paper_range_years)
         steps: list[dict[str, Any]] = []
+        preferred_seed_provider = "openalex" if quick_mode else "semantic_scholar"
 
-        search_detail, search_links = self._seed_search_trace(input_type=input_type, input_value=safe_value)
+        search_detail, search_links = self._seed_search_trace(
+            input_type=input_type,
+            input_value=safe_value,
+            preferred_provider=preferred_seed_provider,
+        )
         steps.append(
             self._build_retrieval_step(
                 phase="search_web",
                 title="种子论文定位与请求构造",
                 detail=search_detail,
-                provider="semantic_scholar+openalex",
+                provider=preferred_seed_provider,
                 count=0,
                 links=search_links,
                 elapsed_seconds=0.0,
@@ -321,12 +330,20 @@ class GraphRAGService:
 
         fetch_start = perf_counter()
         try:
-            seed_document = self.paper_fetcher.fetch_seed_document(
-                input_type=input_type,
-                input_value=safe_value,
-                reference_limit=candidate_limit,
-                citation_limit=candidate_limit,
-            )
+            if quick_mode:
+                seed_document = self._fetch_seed_document_openalex(
+                    input_type=input_type,
+                    input_value=safe_value,
+                    reference_limit=candidate_limit,
+                    citation_limit=candidate_limit,
+                )
+            else:
+                seed_document = self._fetch_seed_document_semantic(
+                    input_type=input_type,
+                    input_value=safe_value,
+                    reference_limit=candidate_limit,
+                    citation_limit=candidate_limit,
+                )
             seed_paper = seed_document.get("seed_paper") or {}
         except Exception as exc:  # noqa: BLE001
             logger.warning("seed retrieval failed for input_type=%s, value=%s: %s", input_type, safe_value, exc)
@@ -343,7 +360,7 @@ class GraphRAGService:
                     title="种子论文定位与请求构造",
                     detail="种子论文定位失败，已自动降级为关键词检索。",
                     status="fallback",
-                    provider="semantic_scholar+openalex",
+                    provider=preferred_seed_provider,
                     count=0,
                     links=search_links,
                     elapsed_seconds=0.0,
@@ -354,7 +371,8 @@ class GraphRAGService:
 
         seed_title = str(seed_paper.get("title") or "").strip() or safe_value
         seed_paper_id = str(seed_paper.get("paper_id") or "").strip()
-        provider_used = self._infer_seed_provider(seed_paper)
+        inferred_provider = self._infer_seed_provider(seed_paper)
+        provider_used = inferred_provider if inferred_provider in {"semantic_scholar", "openalex"} else preferred_seed_provider
 
         candidates = self._collect_seed_candidates(seed_paper, candidate_limit=candidate_limit)
         related_references = len(seed_paper.get("references") or [])
@@ -370,7 +388,7 @@ class GraphRAGService:
         )
         range_hint = self._build_year_range_hint(normalized_range, range_filter_stats)
 
-        retrieve_status = "done" if "semantic_scholar" in provider_used else "fallback"
+        retrieve_status = "done" if provider_used in {"semantic_scholar", "openalex"} else "fallback"
         steps.append(
             self._build_retrieval_step(
                 phase="retrieve",
@@ -415,6 +433,58 @@ class GraphRAGService:
             "selected_papers": selected_papers,
             "steps": steps,
         }
+
+    def _fetch_seed_document_semantic(
+        self,
+        *,
+        input_type: str,
+        input_value: str,
+        reference_limit: int,
+        citation_limit: int,
+    ) -> dict[str, Any]:
+        if input_type == "arxiv_id":
+            paper = self.semantic.fetch_paper_by_arxiv_id(
+                input_value,
+                reference_limit=reference_limit,
+                citation_limit=citation_limit,
+            )
+            return {"seed_paper": paper}
+        if input_type == "doi":
+            paper = self.semantic.fetch_paper_by_doi(
+                input_value,
+                reference_limit=reference_limit,
+                citation_limit=citation_limit,
+            )
+            return {"seed_paper": paper}
+        raise ValueError(f"unsupported seed input_type: {input_type}")
+
+    def _fetch_seed_document_openalex(
+        self,
+        *,
+        input_type: str,
+        input_value: str,
+        reference_limit: int,
+        citation_limit: int,
+    ) -> dict[str, Any]:
+        paper: dict[str, Any] | None = None
+        if input_type == "arxiv_id":
+            paper = self.openalex.fetch_paper_by_arxiv_id(
+                input_value,
+                reference_limit=reference_limit,
+                citation_limit=citation_limit,
+            )
+        elif input_type == "doi":
+            paper = self.openalex.fetch_paper_by_doi(
+                input_value,
+                reference_limit=reference_limit,
+                citation_limit=citation_limit,
+            )
+        else:
+            raise ValueError(f"unsupported seed input_type: {input_type}")
+
+        if not paper:
+            raise OpenAlexClientError(f"openalex_seed_not_found: {input_value}")
+        return {"seed_paper": paper}
 
     def _retrieve_papers_from_query_with_trace(
         self,
@@ -603,23 +673,37 @@ class GraphRAGService:
             "elapsed_seconds": 0.0,
         }
 
-    def _seed_search_trace(self, *, input_type: str, input_value: str) -> tuple[str, list[str]]:
+    def _seed_search_trace(
+        self,
+        *,
+        input_type: str,
+        input_value: str,
+        preferred_provider: str = "semantic_scholar",
+    ) -> tuple[str, list[str]]:
         safe_value = input_value.strip()
+        normalized_provider = str(preferred_provider or "semantic_scholar").strip().lower()
+        use_openalex = normalized_provider == "openalex"
         if input_type == "arxiv_id":
             return (
-                "正在解析 arXiv ID，定位种子论文并拉取引用/被引关系。",
-                [
-                    f"https://api.semanticscholar.org/graph/v1/paper/ARXIV:{quote_plus(safe_value)}",
-                    f"https://api.openalex.org/works/arXiv:{quote_plus(safe_value)}",
-                ],
+                (
+                    "正在解析 arXiv ID，使用 OpenAlex 定位种子论文并拉取引用/被引关系。"
+                    if use_openalex
+                    else "正在解析 arXiv ID，使用 Semantic Scholar 定位种子论文并拉取引用/被引关系。"
+                ),
+                [f"https://api.openalex.org/works/arXiv:{quote_plus(safe_value)}"]
+                if use_openalex
+                else [f"https://api.semanticscholar.org/graph/v1/paper/ARXIV:{quote_plus(safe_value)}"],
             )
         if input_type == "doi":
             return (
-                "正在解析 DOI，定位种子论文并拉取引用/被引关系。",
-                [
-                    f"https://api.semanticscholar.org/graph/v1/paper/DOI:{quote_plus(safe_value)}",
-                    f"https://api.openalex.org/works?search={quote_plus(safe_value)}",
-                ],
+                (
+                    "正在解析 DOI，使用 OpenAlex 定位种子论文并拉取引用/被引关系。"
+                    if use_openalex
+                    else "正在解析 DOI，使用 Semantic Scholar 定位种子论文并拉取引用/被引关系。"
+                ),
+                [f"https://api.openalex.org/works?search={quote_plus(safe_value)}"]
+                if use_openalex
+                else [f"https://api.semanticscholar.org/graph/v1/paper/DOI:{quote_plus(safe_value)}"],
             )
         return (
             "正在根据论文标题检索种子论文并拉取引用/被引关系。",

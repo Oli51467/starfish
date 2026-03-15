@@ -18,7 +18,15 @@
         :quick-mode="workflowSeed.quick_mode"
         @step-change="updateHeaderStep"
       />
-      <WorkflowView v-else :seed="workflowSeed" @step-change="updateHeaderStep" @back="exitWorkflow" />
+      <WorkflowView
+        v-else
+        :seed="workflowSeed"
+        :result-view="paperResultView"
+        @step-change="updateHeaderStep"
+        @result-view-change="handleWorkflowResultViewChange"
+        @lineage-availability-change="handleLineageAvailabilityChange"
+        @back="exitWorkflow"
+      />
     </main>
   </div>
 </template>
@@ -45,6 +53,8 @@ const headerStep = ref({
   total: 2,
   title: '论文检索'
 });
+const paperResultView = ref('graph');
+const paperLineageEnabled = ref(false);
 const isDomainWorkflow = computed(() => workflowSeed.value.input_type === 'domain');
 const { isAuthenticated, loadSession } = useAuthStore();
 
@@ -55,9 +65,11 @@ function enterWorkflow(payload) {
   const isDomain = payload.input_type === 'domain';
   headerStep.value = {
     index: 1,
-    total: isDomain ? 4 : 2,
+    total: isDomain ? 4 : 3,
     title: isDomain ? '领域调研' : '论文检索'
   };
+  paperResultView.value = 'graph';
+  paperLineageEnabled.value = false;
   workflowActive.value = true;
 }
 
@@ -71,11 +83,31 @@ function updateHeaderStep(payload) {
 
 function exitWorkflow() {
   workflowActive.value = false;
+  paperResultView.value = 'graph';
+  paperLineageEnabled.value = false;
+}
+
+function handleWorkflowResultViewChange(nextView) {
+  const normalized = String(nextView || '').trim().toLowerCase();
+  if (normalized === 'lineage' && !paperLineageEnabled.value) {
+    paperResultView.value = 'graph';
+    return;
+  }
+  paperResultView.value = normalized === 'lineage' ? 'lineage' : 'graph';
+}
+
+function handleLineageAvailabilityChange(enabled) {
+  paperLineageEnabled.value = Boolean(enabled);
+  if (!paperLineageEnabled.value && paperResultView.value === 'lineage') {
+    paperResultView.value = 'graph';
+  }
 }
 
 watch(isAuthenticated, (next) => {
   if (!next && workflowActive.value) {
     workflowActive.value = false;
+    paperResultView.value = 'graph';
+    paperLineageEnabled.value = false;
   }
 });
 

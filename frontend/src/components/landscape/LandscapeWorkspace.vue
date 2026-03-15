@@ -37,8 +37,8 @@
           <button
             v-for="tab in tabs"
             :key="tab.key"
-            class="knowledge-switch-btn mono"
-            :class="{ 'is-active': activeTab === tab.key, 'is-disabled': tab.disabled }"
+            class="workflow-result-tab mono"
+            :class="{ 'is-active': activeTab === tab.key }"
             type="button"
             role="tab"
             :aria-selected="activeTab === tab.key"
@@ -211,11 +211,11 @@ defineExpose({
 .landscape-tab-switcher {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  padding: 2px;
-  background: #fff;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  gap: 0;
+  overflow: hidden;
 }
 
 .landscape-workspace-body {
@@ -255,22 +255,38 @@ defineExpose({
   transform: none;
 }
 
-.landscape-tab-switcher .knowledge-switch-btn {
-  height: 26px;
-  padding: 0 8px;
-  font-size: 10px;
+.landscape-tab-switcher .workflow-result-tab {
+  height: 30px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  padding: 0 10px;
+  cursor: pointer;
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
 
-.landscape-tab-switcher .knowledge-switch-btn.is-disabled {
-  color: #9ca3af;
-  background: #f3f4f6;
-  border-color: transparent;
+.landscape-tab-switcher .workflow-result-tab:last-child {
+  border-right: 0;
+}
+
+.landscape-tab-switcher .workflow-result-tab:hover:not(:disabled) {
+  background: var(--panel);
+  color: var(--text);
+}
+
+.landscape-tab-switcher .workflow-result-tab.is-active {
+  background: var(--text);
+  color: var(--bg);
+}
+
+.landscape-tab-switcher .workflow-result-tab:disabled {
+  background: var(--panel);
+  color: var(--muted);
   cursor: not-allowed;
-}
-
-.landscape-tab-switcher .knowledge-switch-btn.is-disabled:hover {
-  color: #9ca3af;
-  background: #f3f4f6;
 }
 
 .landscape-workspace-body > * {

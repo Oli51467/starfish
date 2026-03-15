@@ -51,12 +51,21 @@ class AuthSessionResponse(BaseModel):
     user: UserProfile
 
 
+class ResearchHistoryLineageStatus(BaseModel):
+    generated: bool = False
+    ancestor_count: int = Field(default=0, ge=0)
+    descendant_count: int = Field(default=0, ge=0)
+    seed_paper_id: str = ""
+    updated_at: datetime | None = None
+
+
 class ResearchHistoryListItem(BaseModel):
     history_id: str
     research_type: ResearchType = "unknown"
     search_record: str
     search_range: str = ""
     search_time: datetime
+    lineage: ResearchHistoryLineageStatus = Field(default_factory=ResearchHistoryLineageStatus)
 
 
 class ResearchHistoryListResponse(BaseModel):
@@ -125,6 +134,7 @@ class KnowledgeGraphRetrieveRequest(BaseModel):
     query: str = Field(..., min_length=2)
     max_papers: int = Field(default=12, ge=3, le=30)
     input_type: KnowledgeGraphRetrieveInputType = "domain"
+    quick_mode: bool = False
     paper_range_years: int | None = Field(default=None, ge=1, le=30)
 
 
@@ -209,8 +219,20 @@ class ResearchHistoryDetailResponse(BaseModel):
     search_record: str
     search_range: str = ""
     search_time: datetime
+    lineage: ResearchHistoryLineageStatus = Field(default_factory=ResearchHistoryLineageStatus)
     graph: KnowledgeGraphResponse
     landscape_graph: dict[str, Any] | None = None
+
+
+class ResearchHistoryLineageUpdateRequest(BaseModel):
+    graph_id: str = Field(..., min_length=1)
+    seed_paper_id: str = Field(..., min_length=1)
+    ancestor_count: int = Field(default=0, ge=0)
+    descendant_count: int = Field(default=0, ge=0)
+
+
+class ResearchHistoryLineageUpdateResponse(BaseModel):
+    updated: bool = False
 
 
 class LandscapeGenerateRequest(BaseModel):
@@ -357,33 +379,50 @@ class GapsResponse(BaseModel):
     summary: str
 
 
-class PaperRef(BaseModel):
-    paper_id: str
-    title: str
-    year: int
-    citation_count: int = Field(ge=0)
+LineageNodeType = Literal["root", "ancestor", "descendant"]
 
 
-class LineageNode(BaseModel):
+class LineagePaper(BaseModel):
+    id: str
     paper_id: str
     title: str
-    year: int
-    relation_type: CitationRelationType
-    relation_description: str
-    generation: int = Field(ge=1)
-    citation_type_source: str | None = None
+    authors: list[str] = Field(default_factory=list)
+    year: int | None = None
+    citation_count: int = Field(default=0, ge=0)
+    venue: str | None = None
+    abstract: str | None = None
+    arxiv_id: str | None = None
+    node_type: LineageNodeType
+    ctype: CitationRelationType | None = None
+    relevance: float | None = Field(default=None, ge=0, le=1)
+    hop: int = Field(default=1, ge=0)
+
+    # Backward-compatible fields for legacy frontend consumers.
+    relation_type: CitationRelationType | None = None
+    relation_description: str = ""
+    generation: int = Field(default=1, ge=0)
+
+
+class LineageEdge(BaseModel):
+    source: str
+    target: str
+    ctype: CitationRelationType
+    hop: int = Field(default=1, ge=1)
 
 
 class LineageStats(BaseModel):
-    total_descendants: int = Field(ge=0)
-    supporting_ratio: float = Field(ge=0, le=1)
-    contradicting_ratio: float = Field(ge=0, le=1)
-    extending_ratio: float = Field(ge=0, le=1)
+    total_ancestors: int = Field(default=0, ge=0)
+    total_descendants: int = Field(default=0, ge=0)
+    type_distribution: dict[str, int] = Field(default_factory=dict)
+    has_controversy: bool = False
+    controversy_count: int = Field(default=0, ge=0)
+    year_range: tuple[int, int] = (0, 0)
 
 
 class LineageResponse(BaseModel):
-    root_paper: PaperRef
-    ancestors: list[LineageNode] = Field(default_factory=list)
-    descendants: list[LineageNode] = Field(default_factory=list)
-    controversy_summary: str
-    lineage_stats: LineageStats
+    root: LineagePaper
+    ancestors: list[LineagePaper] = Field(default_factory=list)
+    descendants: list[LineagePaper] = Field(default_factory=list)
+    edges: list[LineageEdge] = Field(default_factory=list)
+    stats: LineageStats = Field(default_factory=LineageStats)
+    cached: bool = False

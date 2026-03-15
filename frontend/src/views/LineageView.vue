@@ -1,7 +1,7 @@
 <template>
   <section class="panel">
     <div class="panel-head">
-      <h2>论文血缘树</h2>
+      <h2>血缘树</h2>
       <span class="mono muted">Step 4</span>
     </div>
 
@@ -15,7 +15,7 @@
     </div>
 
     <div class="panel-body">
-      <LoadingState v-if="lineageLoading" message="正在生成论文血缘树..." />
+      <LoadingState v-if="lineageLoading" message="正在生成血缘树..." />
       <ErrorBoundary :message="lineageErrorMessage" />
       <LineageTree :lineage="lineage" />
     </div>

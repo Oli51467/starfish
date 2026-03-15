@@ -37,6 +37,7 @@
           <path v-if="isFullscreen" d="M13.5 10H10v3.5" />
         </svg>
       </button>
+      <slot name="tools-extra"></slot>
     </div>
 
     <div v-if="directionLegendRows.length" class="knowledge-legend-overlay">

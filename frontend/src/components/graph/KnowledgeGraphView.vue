@@ -22,7 +22,11 @@
       </div>
     </div>
 
-    <KnowledgeGraphCanvas :graph="activeGraph" />
+    <KnowledgeGraphCanvas :graph="activeGraph">
+      <template #tools-extra>
+        <slot name="tools-extra"></slot>
+      </template>
+    </KnowledgeGraphCanvas>
   </section>
 </template>
 

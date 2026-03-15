@@ -223,18 +223,35 @@
   border: 0;
   border-radius: 0;
   background: transparent;
+  box-shadow: none;
   color: var(--text);
   padding: 0 12px;
 }
 
 .seed-text-input:focus {
   outline: 0;
+  background: transparent;
 }
 
 .seed-text-input:disabled {
   background: transparent;
   color: var(--muted);
   cursor: not-allowed;
+}
+
+.seed-text-input::selection {
+  background: color-mix(in srgb, var(--text) 16%, var(--bg));
+  color: var(--text);
+}
+
+.seed-text-input:-webkit-autofill,
+.seed-text-input:-webkit-autofill:hover,
+.seed-text-input:-webkit-autofill:focus,
+.seed-text-input:-webkit-autofill:active {
+  -webkit-text-fill-color: var(--text);
+  transition: background-color 9999s ease-out 0s;
+  box-shadow: 0 0 0 1000px transparent inset;
+  caret-color: var(--text);
 }
 
 .seed-submit-btn {
@@ -409,19 +426,23 @@
   pointer-events: none;
 }
 
-.workflow-layout.is-graph-fullscreen {
+.workflow-layout.is-graph-fullscreen,
+.workflow-layout.is-lineage-fullscreen {
   grid-template-columns: minmax(0, 1fr);
 }
 
-.workflow-layout.is-graph-fullscreen::after {
+.workflow-layout.is-graph-fullscreen::after,
+.workflow-layout.is-lineage-fullscreen::after {
   display: none;
 }
 
-.workflow-layout.is-graph-fullscreen .workflow-left {
+.workflow-layout.is-graph-fullscreen .workflow-left,
+.workflow-layout.is-lineage-fullscreen .workflow-left {
   padding-right: 0;
 }
 
-.workflow-layout.is-graph-fullscreen .workflow-right {
+.workflow-layout.is-graph-fullscreen .workflow-right,
+.workflow-layout.is-lineage-fullscreen .workflow-right {
   display: none;
 }
 
@@ -647,6 +668,11 @@
   align-items: center;
   justify-content: center;
   gap: 8px;
+  cursor: pointer;
+}
+
+.workflow-step-active-btn:disabled {
+  cursor: not-allowed;
 }
 
 .workflow-step-active-btn .workflow-badge-spinner {
@@ -681,10 +707,21 @@
   background: #fff;
 }
 
+.workflow-step-item.is-action_required {
+  border-color: rgba(17, 24, 39, 0.42);
+  background: #fff;
+}
+
 .workflow-step-item.is-running .workflow-step-index {
   border-color: rgba(255, 87, 34, 0.46);
   background: rgba(255, 87, 34, 0.12);
   color: #ff5722;
+}
+
+.workflow-step-item.is-action_required .workflow-step-index {
+  border-color: rgba(17, 24, 39, 0.28);
+  background: rgba(17, 24, 39, 0.06);
+  color: #111827;
 }
 
 .workflow-step-item.is-failed .workflow-step-index {
@@ -783,6 +820,38 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.history-lineage-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.history-lineage-badge.is-done {
+  border-color: color-mix(in srgb, var(--success) 36%, var(--line-2));
+  background: color-mix(in srgb, var(--success) 12%, var(--bg));
+  color: color-mix(in srgb, var(--success) 78%, var(--text));
+}
+
+.history-lineage-badge.is-pending {
+  border-color: var(--line-2);
+  background: var(--panel);
+  color: var(--muted);
+}
+
+.history-lineage-badge.is-na {
+  border-color: var(--line);
+  background: var(--panel);
+  color: var(--muted);
 }
 
 .history-pagination {

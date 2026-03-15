@@ -52,6 +52,16 @@
   text-overflow: ellipsis;
 }
 
+.header.is-workflow .header-step-inline {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(56vw, 620px);
+  text-align: center;
+  z-index: 2;
+  pointer-events: none;
+}
+
 .header-step-strong {
   font-weight: 700;
 }
@@ -63,6 +73,42 @@
   min-width: 0;
   gap: 16px;
   justify-content: flex-end;
+}
+
+.header-result-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 6px;
+}
+
+.header-result-tab {
+  height: 32px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-2);
+  background: #fff;
+  color: #6b7280;
+  font-size: 11px;
+  padding: 0 12px;
+  cursor: pointer;
+}
+
+.header-result-tab:hover:not(:disabled) {
+  background: #f5f5f5;
+  color: #2f2f2f;
+}
+
+.header-result-tab.is-active {
+  border-color: #111;
+  background: #111;
+  color: #fff;
+}
+
+.header-result-tab:disabled {
+  border-color: #e5e7eb;
+  background: #f9fafb;
+  color: #9ca3af;
+  cursor: not-allowed;
 }
 
 .header.is-workflow .header-actions {
@@ -317,6 +363,10 @@
     padding: 0 14px;
   }
 
+  .header-result-tabs {
+    display: none;
+  }
+
   .brand-logo {
     width: 164px;
     height: 38px;
@@ -383,5 +433,6 @@
 
   .header-step-inline {
     font-size: 12px;
+    max-width: min(50vw, 260px);
   }
 }

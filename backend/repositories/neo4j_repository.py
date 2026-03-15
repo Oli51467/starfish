@@ -209,6 +209,58 @@ class Neo4jRepository:
             logger.exception("Unexpected Neo4j read error")
             return None
 
+    def fetch_lineage_neighborhood(
+        self,
+        paper_id: str,
+        *,
+        ancestor_limit: int = 25,
+        descendant_limit: int = 25,
+    ) -> dict[str, Any]:
+        driver = self._driver_or_none()
+        if driver is None:
+            return {"root": None, "ancestors": [], "descendants": []}
+
+        try:
+            with driver.session() as session:
+                return session.execute_read(
+                    self._read_lineage_neighborhood,
+                    paper_id,
+                    max(1, min(int(ancestor_limit), 80)),
+                    max(1, min(int(descendant_limit), 80)),
+                )
+        except Neo4jError:
+            logger.exception("Failed reading lineage neighborhood from Neo4j")
+            return {"root": None, "ancestors": [], "descendants": []}
+        except Exception:  # noqa: BLE001
+            logger.exception("Unexpected Neo4j lineage read error")
+            return {"root": None, "ancestors": [], "descendants": []}
+
+    def persist_lineage_snapshot(
+        self,
+        root: dict[str, Any],
+        ancestors: list[dict[str, Any]],
+        descendants: list[dict[str, Any]],
+    ) -> bool:
+        driver = self._driver_or_none()
+        if driver is None:
+            return False
+
+        try:
+            with driver.session() as session:
+                session.execute_write(
+                    self._write_lineage_snapshot,
+                    root,
+                    ancestors,
+                    descendants,
+                )
+            return True
+        except Neo4jError:
+            logger.exception("Failed persisting lineage data to Neo4j")
+            return False
+        except Exception:  # noqa: BLE001
+            logger.exception("Unexpected Neo4j lineage write error")
+            return False
+
     @staticmethod
     def _write_graph(tx, graph_id: str, query: str, nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> None:
         tx.run(
@@ -711,6 +763,232 @@ class Neo4jRepository:
             return float(value)
         except (TypeError, ValueError):
             return default
+
+    @staticmethod
+    def _read_lineage_neighborhood(
+        tx,
+        paper_id: str,
+        ancestor_limit: int,
+        descendant_limit: int,
+    ) -> dict[str, Any]:
+        root_row = tx.run(
+            """
+            MATCH (p:Paper)
+            WHERE coalesce(p.paper_id, p.id) = $paper_id
+            RETURN properties(p) AS props
+            LIMIT 1
+            """,
+            paper_id=paper_id,
+        ).single()
+        if root_row is None:
+            return {"root": None, "ancestors": [], "descendants": []}
+
+        root = Neo4jRepository._map_lineage_node(root_row.get("props") or {})
+        if root is None:
+            return {"root": None, "ancestors": [], "descendants": []}
+
+        ancestor_rows = tx.run(
+            """
+            MATCH (root:Paper)-[r:CITES]->(a:Paper)
+            WHERE coalesce(root.paper_id, root.id) = $paper_id
+            RETURN properties(a) AS props,
+                   coalesce(r.ctype, '') AS ctype,
+                   coalesce(r.hop, 1) AS hop
+            ORDER BY coalesce(a.citation_count, 0) DESC
+            LIMIT $limit
+            """,
+            paper_id=paper_id,
+            limit=ancestor_limit,
+        )
+        ancestors: list[dict[str, Any]] = []
+        for row in ancestor_rows:
+            mapped = Neo4jRepository._map_lineage_node(
+                row.get("props") or {},
+                ctype=str(row.get("ctype") or "").strip(),
+                hop=row.get("hop"),
+            )
+            if mapped:
+                ancestors.append(mapped)
+
+        descendant_rows = tx.run(
+            """
+            MATCH (d:Paper)-[r:CITES]->(root:Paper)
+            WHERE coalesce(root.paper_id, root.id) = $paper_id
+            RETURN properties(d) AS props,
+                   coalesce(r.ctype, '') AS ctype,
+                   coalesce(r.hop, 1) AS hop
+            ORDER BY coalesce(d.citation_count, 0) DESC
+            LIMIT $limit
+            """,
+            paper_id=paper_id,
+            limit=descendant_limit,
+        )
+        descendants: list[dict[str, Any]] = []
+        for row in descendant_rows:
+            mapped = Neo4jRepository._map_lineage_node(
+                row.get("props") or {},
+                ctype=str(row.get("ctype") or "").strip(),
+                hop=row.get("hop"),
+            )
+            if mapped:
+                descendants.append(mapped)
+
+        return {
+            "root": root,
+            "ancestors": ancestors,
+            "descendants": descendants,
+        }
+
+    @staticmethod
+    def _write_lineage_snapshot(
+        tx,
+        root: dict[str, Any],
+        ancestors: list[dict[str, Any]],
+        descendants: list[dict[str, Any]],
+    ) -> None:
+        root_id = Neo4jRepository._lineage_paper_id(root)
+        if not root_id:
+            return
+
+        Neo4jRepository._merge_lineage_paper(tx, root_id, root)
+
+        for paper in ancestors:
+            paper_id = Neo4jRepository._lineage_paper_id(paper)
+            if not paper_id:
+                continue
+            Neo4jRepository._merge_lineage_paper(tx, paper_id, paper)
+            tx.run(
+                """
+                MATCH (root:Paper {paper_id: $root_id})
+                MATCH (ancestor:Paper {paper_id: $paper_id})
+                MERGE (root)-[r:CITES]->(ancestor)
+                SET r.ctype = $ctype,
+                    r.hop = $hop,
+                    r.updated_at = datetime()
+                """,
+                root_id=root_id,
+                paper_id=paper_id,
+                ctype=Neo4jRepository._lineage_ctype(paper),
+                hop=max(1, int(paper.get("hop") or 1)),
+            )
+
+        for paper in descendants:
+            paper_id = Neo4jRepository._lineage_paper_id(paper)
+            if not paper_id:
+                continue
+            Neo4jRepository._merge_lineage_paper(tx, paper_id, paper)
+            tx.run(
+                """
+                MATCH (descendant:Paper {paper_id: $paper_id})
+                MATCH (root:Paper {paper_id: $root_id})
+                MERGE (descendant)-[r:CITES]->(root)
+                SET r.ctype = $ctype,
+                    r.hop = $hop,
+                    r.updated_at = datetime()
+                """,
+                root_id=root_id,
+                paper_id=paper_id,
+                ctype=Neo4jRepository._lineage_ctype(paper),
+                hop=max(1, int(paper.get("hop") or 1)),
+            )
+
+    @staticmethod
+    def _lineage_ctype(payload: dict[str, Any]) -> str:
+        raw = str(payload.get("ctype") or payload.get("relation_type") or "").strip().lower()
+        if raw in {"supporting", "contradicting", "extending", "migrating", "mentioning"}:
+            return raw
+        return "mentioning"
+
+    @staticmethod
+    def _lineage_paper_id(payload: dict[str, Any]) -> str:
+        return str(payload.get("paper_id") or payload.get("paperId") or payload.get("id") or "").strip()
+
+    @staticmethod
+    def _lineage_authors(payload: dict[str, Any]) -> str:
+        raw_authors = payload.get("authors") or []
+        if isinstance(raw_authors, str):
+            return ", ".join(item.strip() for item in raw_authors.split(",") if item.strip())
+        names: list[str] = []
+        for item in raw_authors:
+            if isinstance(item, str) and item.strip():
+                names.append(item.strip())
+                continue
+            if isinstance(item, dict):
+                name = str(item.get("name") or "").strip()
+                if name:
+                    names.append(name)
+        return ", ".join(names)
+
+    @staticmethod
+    def _merge_lineage_paper(tx, paper_id: str, payload: dict[str, Any]) -> None:
+        external_ids = payload.get("external_ids") or payload.get("externalIds") or {}
+        arxiv_id = (
+            payload.get("arxiv_id")
+            or payload.get("arxivId")
+            or (external_ids.get("ArXiv") if isinstance(external_ids, dict) else "")
+        )
+        tx.run(
+            """
+            MERGE (p:Paper {paper_id: $paper_id})
+            SET p.id = $paper_id,
+                p.title = $title,
+                p.abstract = $abstract,
+                p.year = $year,
+                p.citation_count = $citation_count,
+                p.venue = $venue,
+                p.authors = $authors,
+                p.arxiv_id = $arxiv_id,
+                p.updated_at = datetime()
+            """,
+            paper_id=paper_id,
+            title=str(payload.get("title") or "").strip(),
+            abstract=str(payload.get("abstract") or "").strip(),
+            year=payload.get("year"),
+            citation_count=int(payload.get("citation_count") or payload.get("citationCount") or 0),
+            venue=str(payload.get("venue") or "").strip(),
+            authors=Neo4jRepository._lineage_authors(payload),
+            arxiv_id=str(arxiv_id or "").strip(),
+        )
+
+    @staticmethod
+    def _map_lineage_node(
+        props: dict[str, Any],
+        *,
+        ctype: str = "",
+        hop: Any = 1,
+    ) -> dict[str, Any] | None:
+        if not props:
+            return None
+        paper_id = str(props.get("paper_id") or props.get("id") or "").strip()
+        if not paper_id:
+            return None
+        authors_raw = props.get("authors") or []
+        authors: list[str] = []
+        if isinstance(authors_raw, str):
+            authors = [item.strip() for item in authors_raw.split(",") if item.strip()]
+        elif isinstance(authors_raw, list):
+            for item in authors_raw:
+                if isinstance(item, str) and item.strip():
+                    authors.append(item.strip())
+                elif isinstance(item, dict):
+                    name = str(item.get("name") or "").strip()
+                    if name:
+                        authors.append(name)
+        mapped_ctype = ctype.strip().lower()
+        if mapped_ctype not in {"supporting", "contradicting", "extending", "migrating", "mentioning"}:
+            mapped_ctype = ""
+        return {
+            "paper_id": paper_id,
+            "title": str(props.get("title") or "").strip(),
+            "abstract": str(props.get("abstract") or "").strip(),
+            "year": props.get("year"),
+            "citation_count": int(props.get("citation_count") or 0),
+            "venue": str(props.get("venue") or "").strip(),
+            "authors": authors,
+            "arxiv_id": str(props.get("arxiv_id") or "").strip(),
+            "ctype": mapped_ctype,
+            "hop": max(1, int(hop or 1)),
+        }
 
     def close(self) -> None:
         if self._driver is None:

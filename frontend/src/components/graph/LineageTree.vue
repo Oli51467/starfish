@@ -1,21 +1,21 @@
 <template>
   <section class="panel lineage-panel">
     <div class="panel-head">
-      <h2>论文血缘树</h2>
+      <h2>血缘树</h2>
       <span class="mono muted">Skeleton</span>
     </div>
 
     <div class="lineage-body" v-if="lineage">
       <article class="lineage-root">
         <p class="result-title mono">当前论文</p>
-        <p>{{ lineage.root_paper.title }}</p>
+        <p>{{ rootPaper.title || '未知论文' }}</p>
       </article>
 
       <div class="lineage-columns">
         <section>
           <p class="result-title mono">祖先</p>
           <ul class="simple-list">
-            <li v-for="item in lineage.ancestors" :key="item.paper_id">
+            <li v-for="item in lineage.ancestors" :key="item.paper_id || item.id">
               {{ item.title }}
             </li>
           </ul>
@@ -24,7 +24,7 @@
         <section>
           <p class="result-title mono">后代</p>
           <ul class="simple-list">
-            <li v-for="item in lineage.descendants" :key="item.paper_id">
+            <li v-for="item in lineage.descendants" :key="item.paper_id || item.id">
               {{ item.title }}
             </li>
           </ul>
@@ -39,10 +39,14 @@
 </template>
 
 <script setup>
-defineProps({
+import { computed } from 'vue';
+
+const props = defineProps({
   lineage: {
     type: Object,
     default: () => null
   }
 });
+
+const rootPaper = computed(() => props.lineage?.root || props.lineage?.root_paper || {});
 </script>

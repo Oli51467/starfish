@@ -24,9 +24,10 @@ def is_configured() -> bool:
 def chat(messages: list[dict[str, Any]], **kwargs: Any) -> Any:
     settings = get_settings()
     client = get_client()
+    temperature = kwargs.pop("temperature", 0.2)
     return client.chat.completions.create(
         model=settings.openai_model,
         messages=messages,
-        temperature=0.2,
+        temperature=temperature,
         **kwargs,
     )

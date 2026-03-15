@@ -1,394 +1,271 @@
 <template>
-  <section class="workflow-page">
-    <div class="workflow-layout">
-      <article class="workflow-left">
-        <ErrorBoundary v-if="errorMessage && !graphData" :message="errorMessage" />
-        <KnowledgeGraphView v-else-if="graphData" :graph-data="graphData" mode="panorama_only" />
-        <LoadingState v-else-if="graphLoading" :message="activeStepHint" />
-        <section v-else class="panel workflow-empty">
-          <p class="muted">等待工作流执行...</p>
-        </section>
+  <section class="workflow-page paper-fixed-page">
+    <div class="workflow-layout paper-fixed-layout">
+      <article class="workflow-left workflow-result-shell">
+        <div class="workflow-result-stage">
+          <template v-if="activeViewKey === 'graph'">
+            <ErrorBoundary v-if="errorMessage && !graphData" :message="errorMessage" />
+            <KnowledgeGraphView v-else-if="graphData" :graph-data="graphData" mode="panorama_only">
+              <template #tools-extra>
+                <div class="workflow-result-tabbar" role="tablist" aria-label="论文检索结果切换">
+                  <div class="workflow-result-tabs">
+                    <button
+                      v-for="tab in resultTabs"
+                      :key="tab.key"
+                      class="workflow-result-tab mono"
+                      :class="{ 'is-active': activeViewKey === tab.key }"
+                      type="button"
+                      role="tab"
+                      :aria-selected="activeViewKey === tab.key"
+                      :disabled="tab.disabled"
+                      @click="activateResultTab(tab)"
+                    >
+                      {{ tab.label }}
+                    </button>
+                  </div>
+                </div>
+              </template>
+            </KnowledgeGraphView>
+            <LoadingState v-else-if="graphLoading" :message="activeStepHint" />
+            <section v-else class="panel workflow-empty">
+              <p class="muted">等待工作流执行...</p>
+            </section>
+          </template>
+
+          <template v-else>
+            <LoadingState v-if="lineageLoading && !lineageData" message="正在生成血缘树..." />
+            <ErrorBoundary v-else-if="lineageErrorMessage && !lineageData" :message="lineageErrorMessage" />
+            <BloodLineageTree v-else-if="lineageData" :lineage="lineageData">
+              <template #tools-extra>
+                <div class="workflow-result-tabbar" role="tablist" aria-label="论文检索结果切换">
+                  <div class="workflow-result-tabs">
+                    <button
+                      v-for="tab in resultTabs"
+                      :key="`lineage-${tab.key}`"
+                      class="workflow-result-tab mono"
+                      :class="{ 'is-active': activeViewKey === tab.key }"
+                      type="button"
+                      role="tab"
+                      :aria-selected="activeViewKey === tab.key"
+                      :disabled="tab.disabled"
+                      @click="activateResultTab(tab)"
+                    >
+                      {{ tab.label }}
+                    </button>
+                  </div>
+                </div>
+              </template>
+            </BloodLineageTree>
+            <section v-else class="panel workflow-empty">
+              <p class="muted">点击右侧第 3 步按钮后生成血缘树。</p>
+            </section>
+          </template>
+        </div>
       </article>
 
-      <LandscapeWorkflowPanel :steps="steps" :graph-stats="graphStats" />
+      <LandscapeWorkflowPanel :steps="steps" :graph-stats="graphStats" @step-action="handleStepAction" />
     </div>
   </section>
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted } from 'vue';
 
-import { buildKnowledgeGraph, getKnowledgeGraph, retrieveKnowledgePapers } from '../api';
 import ErrorBoundary from '../components/common/ErrorBoundary.vue';
-import KnowledgeGraphView from '../components/graph/KnowledgeGraphView.vue';
-import { buildKnowledgeGraphSets } from '../components/graph/knowledgeGraphModel';
-import LandscapeWorkflowPanel from '../components/landscape/LandscapeWorkflowPanel.vue';
 import LoadingState from '../components/common/LoadingState.vue';
+import KnowledgeGraphView from '../components/graph/KnowledgeGraphView.vue';
+import LandscapeWorkflowPanel from '../components/landscape/LandscapeWorkflowPanel.vue';
+import BloodLineageTree from '../components/lineage/BloodLineageTree.vue';
+import { usePaperWorkflow } from '../composables/usePaperWorkflow';
 import { useAuthStore } from '../stores/authStore';
 
 const props = defineProps({
   seed: {
     type: Object,
     required: true
+  },
+  resultView: {
+    type: String,
+    default: 'graph'
   }
 });
 
-const emit = defineEmits(['step-change', 'back']);
+const emit = defineEmits(['step-change', 'back', 'result-view-change', 'lineage-availability-change']);
 const { accessToken } = useAuthStore();
 
-const steps = ref([
+const {
+  steps,
+  graphLoading,
+  graphData,
+  errorMessage,
+  lineageLoading,
+  lineageData,
+  lineageErrorMessage,
+  graphStats,
+  activeStepHint,
+  activeViewKey,
+  canViewLineage,
+  runWorkflow,
+  handleStepAction
+} = usePaperWorkflow({
+  seedRef: computed(() => props.seed),
+  resultViewRef: computed(() => props.resultView),
+  accessTokenRef: accessToken,
+  onStepChange: (payload) => emit('step-change', payload),
+  onResultViewChange: (nextView) => emit('result-view-change', nextView),
+  onLineageAvailabilityChange: (enabled) => emit('lineage-availability-change', enabled)
+});
+
+const resultTabs = computed(() => ([
   {
-    index: 1,
-    key: 'retrieve',
-    title: '论文检索',
-    description: '检索与当前输入相关的论文集合。',
-    status: 'pending',
-    message: '',
-    logs: []
+    key: 'graph',
+    label: '知识图谱',
+    disabled: false
   },
   {
-    index: 2,
-    key: 'graph',
-    title: '知识图谱构建',
-    description: '构建图谱并完成实体关系抽取。',
-    status: 'pending',
-    message: '',
-    logs: []
+    key: 'lineage',
+    label: '血缘树',
+    disabled: !canViewLineage.value
   }
-]);
+]));
 
-const graphLoading = ref(false);
-const graphData = ref(null);
-const errorMessage = ref('');
-
-function extractPanoramaStats(rawGraph) {
-  const graphSets = buildKnowledgeGraphSets(rawGraph || {});
-  const panorama = graphSets.panorama || {};
-  const nodes = Array.isArray(panorama?.nodes) ? panorama.nodes : [];
-  const edges = Array.isArray(panorama?.edges) ? panorama.edges : [];
-  const paperCount = nodes.filter((node) => String(node?.kind || node?.type || '').toLowerCase() === 'paper').length;
-  return {
-    nodeCount: nodes.length,
-    edgeCount: edges.length,
-    paperCount
-  };
-}
-
-const graphStats = computed(() => {
-  const stats = extractPanoramaStats(graphData.value || {});
-  return {
-    nodeCount: stats.nodeCount,
-    edgeCount: stats.edgeCount,
-    directionCount: 0
-  };
-});
-
-const activeStep = computed(() => {
-  const running = steps.value.find((item) => item.status === 'running');
-  if (running) return running;
-
-  const failed = steps.value.find((item) => item.status === 'failed');
-  if (failed) return failed;
-
-  const done = [...steps.value].reverse().find((item) => ['done', 'skipped'].includes(item.status));
-  return done || steps.value[0];
-});
-
-const activeStepHint = computed(() => {
-  const current = activeStep.value;
-  if (!current) return '工作流运行中...';
-  if (current.message) return current.message;
-  const latestLog = Array.isArray(current.logs) ? current.logs.at(-1) : null;
-  if (latestLog?.detail) return latestLog.detail;
-  return current.description || '工作流运行中...';
-});
-
-function updateStepSignal() {
-  emit('step-change', {
-    index: activeStep.value.index,
-    total: steps.value.length,
-    title: activeStep.value.title
-  });
-}
-
-function setStepStatus(index, status, message = '') {
-  const target = steps.value.find((item) => item.index === index);
-  if (!target) return;
-  target.status = status;
-  target.message = message;
-  updateStepSignal();
-}
-
-function setStepLogs(stepKey, logs) {
-  const target = steps.value.find((item) => item.key === String(stepKey || '').trim());
-  if (!target) return;
-  target.logs = Array.isArray(logs) ? logs : [];
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function toStatusText(status) {
-  const normalized = String(status || '').trim().toLowerCase();
-  if (normalized === 'doing' || normalized === 'running') return '进行中';
-  if (normalized === 'done') return '已完成';
-  if (normalized === 'pending') return '准备中';
-  if (normalized === 'fallback' || normalized === 'failed' || normalized === 'error') return '失败';
-  return '准备中';
-}
-
-function normalizeTraceStep(step) {
-  const count = Number(step?.count);
-  const elapsedMs = Number(step?.elapsed_ms);
-  const status = String(step?.status || '').toLowerCase() === 'fallback' ? 'fallback' : 'done';
-  const metaParts = [];
-  if (Number.isFinite(count) && count > 0) metaParts.push(`数量 ${count}`);
-  if (Number.isFinite(elapsedMs) && elapsedMs > 0) metaParts.push(`耗时 ${Math.round(elapsedMs)}ms`);
-  return {
-    title: String(step?.title || ''),
-    detail: String(step?.detail || ''),
-    status,
-    statusText: toStatusText(status),
-    metaText: metaParts.join(' · ')
-  };
-}
-
-function createRetrievalRunningMessage(inputType) {
-  if (inputType === 'arxiv_id') return '正在解析 arXiv ID，定位种子论文并扩展引用网络...';
-  if (inputType === 'doi') return '正在解析 DOI，定位种子论文并扩展引用网络...';
-  return '正在执行网页检索、候选抓取与筛选...';
-}
-
-function parsePaperRangeYears(rawValue) {
-  const parsed = Number(rawValue);
-  if (!Number.isFinite(parsed) || parsed <= 0) return null;
-  return Math.min(30, Math.round(parsed));
-}
-
-function formatSearchRangeLabel(inputType, paperRangeYears) {
-  if (String(inputType || '').trim().toLowerCase() === 'domain') {
-    if (Number.isFinite(Number(paperRangeYears)) && Number(paperRangeYears) > 0) {
-      return `近 ${Math.round(Number(paperRangeYears))} 年`;
-    }
-    return '所有时间';
-  }
-  return '不适用';
-}
-
-function createRunningRetrievalLogs(inputType) {
-  const sourceDetail = inputType === 'domain'
-    ? '正在构造检索请求并访问学术数据源...'
-    : '正在定位种子论文并拉取引用/被引关系...';
-  return [
-    {
-      title: inputType === 'domain' ? 'LLM 检索规划与网页搜索' : '种子论文定位与请求构造',
-      detail: sourceDetail,
-      status: 'doing',
-      statusText: toStatusText('doing'),
-      metaText: ''
-    },
-    {
-      title: '候选论文评分与筛选',
-      detail: '等待候选结果返回后执行评分筛选。',
-      status: 'pending',
-      statusText: toStatusText('pending'),
-      metaText: ''
-    }
-  ];
-}
-
-async function playRetrievalTrace(rawSteps) {
-  const items = Array.isArray(rawSteps) ? rawSteps.map(normalizeTraceStep) : [];
-  if (!items.length) return;
-  const evolving = [];
-  for (const item of items) {
-    evolving.push({
-      ...item,
-      status: 'doing',
-      statusText: toStatusText('doing')
-    });
-    setStepLogs('retrieve', [...evolving]);
-    await sleep(220);
-    evolving[evolving.length - 1] = item;
-    setStepLogs('retrieve', [...evolving]);
-  }
-}
-
-function createFallbackRetrievalLogs(retrieval) {
-  const selectedCount = Number(retrieval?.selected_count || 0);
-  const candidateCount = Number(retrieval?.candidate_count || 0);
-  return [
-    {
-      title: 'LLM 检索规划与网页搜索',
-      detail: '候选论文收集已完成。',
-      status: 'done',
-      statusText: toStatusText('done'),
-      metaText: ''
-    },
-    {
-      title: '候选论文评分与筛选',
-      detail: `已从 ${candidateCount} 个候选中筛选 ${selectedCount} 篇论文。`,
-      status: 'done',
-      statusText: toStatusText('done'),
-      metaText: ''
-    }
-  ];
-}
-
-function createRunningBuildLogs() {
-  return [];
-}
-
-function toNodeId(raw, fallback) {
-  const value = String(raw || '').trim();
-  if (!value) return fallback;
-  const sanitized = value.replace(/\s+/g, '-').replace(/[^\w:.-]/g, '');
-  return sanitized || fallback;
-}
-
-function buildRetrievalPreviewGraph(query, papers) {
-  const safeQuery = String(query || '').trim();
-  const sourcePapers = Array.isArray(papers) ? papers : [];
-  const topPapers = sourcePapers.slice(0, 12);
-  const maxCitation = Math.max(1, ...topPapers.map((paper) => Number(paper?.citation_count || 0)));
-
-  const nodes = topPapers
-    .map((paper, index) => {
-      const title = String(paper?.title || '').trim();
-      if (!title) return null;
-      const citationCount = Number(paper?.citation_count || 0);
-      const citationRate = Math.min(citationCount / maxCitation, 1);
-      const rankRate = 1 - index / Math.max(1, topPapers.length);
-      const relevance = Math.max(0.12, Math.min(0.22 + citationRate * 0.56 + rankRate * 0.22, 1));
-      const paperId = toNodeId(paper?.paper_id, `preview-${index}`);
-      return {
-        id: `paper:${paperId}`,
-        label: title,
-        type: 'paper',
-        score: Number(relevance.toFixed(3)),
-        meta: {
-          title,
-          abstract: String(paper?.abstract || ''),
-          year: String(paper?.year || ''),
-          published_month: String(paper?.month || ''),
-          citation_count: String(citationCount),
-          venue: String(paper?.venue || ''),
-          authors: Array.isArray(paper?.authors) ? paper.authors.join(', ') : '',
-          url: String(paper?.url || ''),
-          relevance: relevance.toFixed(3)
-        }
-      };
-    })
-    .filter(Boolean);
-
-  const edges = [];
-  for (let index = 0; index < nodes.length - 1; index += 1) {
-    edges.push({
-      source: nodes[index].id,
-      target: nodes[index + 1].id,
-      relation: 'related',
-      weight: 0.36
-    });
-  }
-
-  return {
-    query: safeQuery,
-    title: `${safeQuery} 实时图谱预览`,
-    nodes,
-    edges
-  };
-}
-
-function resetSteps() {
-  for (const step of steps.value) {
-    step.status = 'pending';
-    step.message = '';
-    step.logs = [];
-  }
-  updateStepSignal();
-}
-
-async function runWorkflow() {
-  if (graphLoading.value) return;
-  resetSteps();
-  errorMessage.value = '';
-  graphLoading.value = true;
-
-  try {
-    const inputType = String(props.seed?.input_type || 'domain').trim().toLowerCase();
-    setStepStatus(1, 'running', createRetrievalRunningMessage(inputType));
-    setStepLogs('retrieve', createRunningRetrievalLogs(inputType));
-    const paperRangeYears = parsePaperRangeYears(props.seed?.paper_range_years);
-    const retrieval = await retrieveKnowledgePapers({
-      query: props.seed.input_value,
-      input_type: inputType,
-      paper_range_years: paperRangeYears,
-      max_papers: 12
-    });
-    const retrievalQuery = String(retrieval?.query || props.seed.input_value).trim() || props.seed.input_value;
-    await playRetrievalTrace(retrieval.steps || []);
-    if (!Array.isArray(retrieval.steps) || !retrieval.steps.length) {
-      setStepLogs('retrieve', createFallbackRetrievalLogs(retrieval));
-    }
-    setStepStatus(
-      1,
-      'done',
-      `${retrieval.selected_count} 篇论文已筛选（候选 ${retrieval.candidate_count}）。`
-    );
-    graphData.value = buildRetrievalPreviewGraph(retrievalQuery, retrieval.papers || []);
-
-    setStepStatus(2, 'running', '正在建图并抽取实体关系...');
-    setStepLogs('graph', createRunningBuildLogs());
-    const result = await buildKnowledgeGraph({
-      query: retrievalQuery,
-      max_papers: 12,
-      max_entities_per_paper: 6,
-      prefetched_papers: retrieval.papers || [],
-      research_type: inputType || 'unknown',
-      search_input: String(props.seed?.input_value || '').trim(),
-      search_range: formatSearchRangeLabel(inputType, paperRangeYears)
-    }, accessToken.value);
-    let resolvedGraph = result;
-    let storageHint = '已使用实时结果。';
-    if (result.stored_in_neo4j) {
-      try {
-        resolvedGraph = await getKnowledgeGraph(result.graph_id);
-        storageHint = '已写入并从 Neo4j 回读。';
-      } catch (neo4jReadError) {
-        storageHint = '已写入 Neo4j，回读失败，已使用实时结果。';
-      }
-    }
-    setStepLogs('graph', []);
-    graphData.value = resolvedGraph;
-    const panoramaStats = extractPanoramaStats(resolvedGraph || result || {});
-    setStepStatus(
-      2,
-      'done',
-      `全景图谱展示 ${panoramaStats.paperCount} 个论文节点、${panoramaStats.edgeCount} 条论文关联边。${storageHint}`
-    );
-  } catch (error) {
-    const failed = activeStep.value?.index || 2;
-    setStepStatus(failed, 'failed', '步骤执行失败。');
-    errorMessage.value = error.message || '工作流执行失败。';
-    const failedKey = failed === 1 ? 'retrieve' : 'graph';
-    const target = steps.value.find((item) => item.key === failedKey);
-    const nextLogs = [...(target?.logs || []), {
-      title: '执行异常',
-      detail: errorMessage.value,
-      status: 'fallback',
-      statusText: toStatusText('error'),
-      metaText: ''
-    }];
-    setStepLogs(failedKey, nextLogs);
-  } finally {
-    graphLoading.value = false;
-    updateStepSignal();
-  }
+function activateResultTab(tab) {
+  if (!tab || tab.disabled) return;
+  activeViewKey.value = tab.key;
 }
 
 onMounted(async () => {
-  updateStepSignal();
   await runWorkflow();
 });
 </script>
+
+<style scoped>
+.paper-fixed-page {
+  height: calc(100dvh - 110px);
+  min-height: calc(100vh - 110px);
+}
+
+.paper-fixed-layout {
+  height: 100%;
+  min-height: 0;
+}
+
+.paper-fixed-layout .workflow-left,
+.paper-fixed-layout .workflow-right {
+  min-height: 0;
+}
+
+.paper-fixed-layout .workflow-right {
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.workflow-result-shell {
+  min-height: 0;
+  height: 100%;
+  max-height: 100%;
+  grid-template-rows: minmax(0, 1fr);
+  gap: 0;
+}
+
+.workflow-result-tabbar {
+  display: inline-flex;
+  align-items: center;
+  pointer-events: auto;
+}
+
+.workflow-result-tabs {
+  width: fit-content;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  overflow: hidden;
+}
+
+.workflow-result-tab {
+  height: 30px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  padding: 0 10px;
+  cursor: pointer;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+.workflow-result-tab:last-child {
+  border-right: 0;
+}
+
+.workflow-result-tab:hover:not(:disabled) {
+  background: var(--panel);
+  color: var(--text);
+}
+
+.workflow-result-tab.is-active {
+  background: var(--text);
+  color: var(--bg);
+}
+
+.workflow-result-tab:disabled {
+  background: var(--panel);
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.workflow-result-stage {
+  min-height: 0;
+  height: 100%;
+  align-self: stretch;
+}
+
+.workflow-result-stage :deep(.knowledge-graph-panel) {
+  min-height: 0;
+  height: 100%;
+  max-height: 100%;
+  padding: 2px 0 0;
+}
+
+.workflow-result-stage :deep(.knowledge-graph-body-full),
+.workflow-result-stage :deep(.knowledge-graph-canvas) {
+  min-height: 0;
+  height: 100%;
+}
+
+.workflow-result-stage :deep(.blood-lineage) {
+  min-height: 0;
+  height: 100%;
+}
+
+@media (max-width: 768px) {
+  .paper-fixed-page {
+    min-height: calc(100dvh - 86px);
+  }
+
+  .workflow-result-tab {
+    padding: 0 8px;
+  }
+}
+
+@media (max-width: 980px) {
+  .paper-fixed-page {
+    height: auto;
+    min-height: calc(100dvh - 110px);
+  }
+
+  .paper-fixed-layout {
+    height: auto;
+  }
+
+  .paper-fixed-layout .workflow-right {
+    overflow: visible;
+    padding-right: 0;
+  }
+}
+</style>
