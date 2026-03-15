@@ -158,8 +158,9 @@
 }
 
 .seed-mode-option.is-selected {
-  border-color: var(--line-2);
-  background: #fdf4f1;
+  border-color: var(--accent-soft-border);
+  background: var(--accent-soft-bg);
+  color: var(--accent);
 }
 
 .seed-mode-option-next {
@@ -327,9 +328,9 @@
 }
 
 .seed-strategy-option.is-selected {
-  border-color: var(--line-2);
-  background: #fdf4f1;
-  color: #6a2a1d;
+  border-color: var(--accent-soft-border);
+  background: var(--accent-soft-bg);
+  color: var(--accent);
 }
 
 .seed-strategy-option.is-selected .seed-strategy-icon {

@@ -6,6 +6,8 @@
   --line-2: #e0e0e0;
   --panel: #fafafa;
   --accent: #ff5722;
+  --accent-soft-bg: rgba(255, 87, 34, 0.11);
+  --accent-soft-border: rgba(255, 87, 34, 0.3);
   --success: #4caf50;
 
   --radius-sm: 4px;

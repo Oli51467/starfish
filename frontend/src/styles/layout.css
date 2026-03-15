@@ -83,6 +83,10 @@
   font-size: 12px;
 }
 
+.header:not(.is-workflow) .header-github-link {
+  margin-right: 8px;
+}
+
 .header-github-icon {
   width: 14px;
   height: 14px;
@@ -212,6 +216,10 @@
 
   .header-github-link {
     padding: 0 10px;
+  }
+
+  .header:not(.is-workflow) .header-github-link {
+    margin-right: 4px;
   }
 
   .header-step-inline {
