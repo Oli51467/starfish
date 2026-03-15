@@ -6,6 +6,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 InputType = Literal["arxiv_id", "doi", "pdf", "github_url"]
+ResearchType = Literal["arxiv_id", "doi", "domain", "unknown"]
 PaperInputType = Literal["arxiv_id", "doi", "paper_id"]
 KnowledgeGraphRetrieveInputType = Literal["domain", "arxiv_id", "doi"]
 TrendLabel = Literal["rising", "stable", "saturated", "emerging"]
@@ -30,6 +31,40 @@ class HealthResponse(BaseModel):
     service: str
     version: str
     timestamp: datetime
+
+
+class AuthGoogleRequest(BaseModel):
+    credential: str = Field(..., min_length=10)
+
+
+class UserProfile(BaseModel):
+    id: str
+    email: str
+    name: str = ""
+    picture: str | None = None
+
+
+class AuthSessionResponse(BaseModel):
+    access_token: str
+    token_type: Literal["bearer"] = "bearer"
+    expires_in: int = Field(ge=1)
+    user: UserProfile
+
+
+class ResearchHistoryListItem(BaseModel):
+    history_id: str
+    research_type: ResearchType = "unknown"
+    search_record: str
+    search_range: str = ""
+    search_time: datetime
+
+
+class ResearchHistoryListResponse(BaseModel):
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1, le=50)
+    total: int = Field(ge=0)
+    total_pages: int = Field(ge=0)
+    items: list[ResearchHistoryListItem] = Field(default_factory=list)
 
 
 class MapGenerateRequest(BaseModel):
@@ -81,6 +116,9 @@ class KnowledgeGraphBuildRequest(BaseModel):
     max_papers: int = Field(default=12, ge=3, le=30)
     max_entities_per_paper: int = Field(default=6, ge=2, le=12)
     prefetched_papers: list["RetrievedPaper"] = Field(default_factory=list)
+    research_type: ResearchType = "unknown"
+    search_input: str = ""
+    search_range: str = ""
 
 
 class KnowledgeGraphRetrieveRequest(BaseModel):
@@ -163,6 +201,16 @@ class KnowledgeGraphResponse(BaseModel):
     stored_in_neo4j: bool = False
     summary: str
     generated_at: datetime
+
+
+class ResearchHistoryDetailResponse(BaseModel):
+    history_id: str
+    research_type: ResearchType = "unknown"
+    search_record: str
+    search_range: str = ""
+    search_time: datetime
+    graph: KnowledgeGraphResponse
+    landscape_graph: dict[str, Any] | None = None
 
 
 class LandscapeGenerateRequest(BaseModel):

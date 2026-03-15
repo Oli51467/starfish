@@ -76,6 +76,11 @@ class Settings:
         }
         self.enable_landscape_summary = self._parse_bool(os.getenv("ENABLE_LANDSCAPE_SUMMARY"), default=False)
 
+        # Auth
+        self.google_client_id = (os.getenv("GOOGLE_CLIENT_ID") or "").strip()
+        self.session_secret = (os.getenv("SESSION_SECRET") or "change-this-session-secret").strip()
+        self.session_expire_hours = max(1, int(os.getenv("SESSION_EXPIRE_HOURS", "168")))
+
     @staticmethod
     def _parse_csv(raw_value: str) -> list[str]:
         return [item.strip() for item in raw_value.split(",") if item.strip()]

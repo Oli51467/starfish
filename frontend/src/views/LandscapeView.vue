@@ -27,6 +27,7 @@ import { generateLandscape } from '../api';
 import LandscapeWorkflowPanel from '../components/landscape/LandscapeWorkflowPanel.vue';
 import LandscapeWorkspace from '../components/landscape/LandscapeWorkspace.vue';
 import { buildLandscapeGraphFallback } from '../components/landscape/landscapeGraphAdapter';
+import { useAuthStore } from '../stores/authStore';
 
 const props = defineProps({
   query: {
@@ -44,6 +45,7 @@ const props = defineProps({
 });
 
 const emit = defineEmits(['step-change']);
+const { accessToken } = useAuthStore();
 
 const STEP_DEFINITION = {
   research: {
@@ -361,6 +363,7 @@ async function runWorkflow() {
       {
         paperRangeYears: parsePaperRangeYears(props.paperRangeYears),
         quickMode: Boolean(props.quickMode),
+        accessToken: accessToken.value,
       }
     );
     finalizeResult(result);

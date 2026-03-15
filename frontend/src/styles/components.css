@@ -1372,21 +1372,21 @@
   width: 100%;
   padding: 18px;
   display: grid;
-  gap: 20px;
+  gap: 14px;
   background: #fff;
   overflow: hidden;
   transition: padding 0.42s ease, gap 0.42s ease;
 }
 
 .workflow-shell.is-collapsed {
-  padding-top: 14px;
-  padding-bottom: 14px;
-  gap: 8px;
+  padding-top: 10px;
+  padding-bottom: 8px;
+  gap: 2px;
 }
 
 .workflow-head {
   display: grid;
-  gap: 8px;
+  gap: 6px;
   justify-items: center;
   text-align: center;
 }
@@ -1413,7 +1413,7 @@
 
 .workflow-head > .muted {
   max-width: 600px;
-  line-height: 1.7;
+  line-height: 1.6;
 }
 
 .workflow-sequence {
@@ -1509,6 +1509,10 @@
   opacity: 1;
   transform: translateY(0);
   transition: max-height 0.42s ease, opacity 0.3s ease, transform 0.35s ease;
+}
+
+.workflow-shell.is-collapsed .workflow-head {
+  gap: 4px;
 }
 
 .workflow-start-btn {

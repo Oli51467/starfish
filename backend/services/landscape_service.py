@@ -20,11 +20,13 @@ from models.schemas import (
     LandscapeStepLog,
     LandscapeTaskDetailResponse,
     TaskCreateResponse,
+    UserProfile,
 )
 from repositories.landscape_repository import LandscapeRepository, get_landscape_repository
 from repositories.neo4j_repository import Neo4jRepository, get_neo4j_repository
 from services.landscape_cache_service import LandscapeCacheService, get_landscape_cache_service
 from services.landscape_graph_adapter import build_landscape_graph
+from services.research_history_service import ResearchHistoryService, get_research_history_service
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +50,7 @@ class LandscapeService:
         explorer: DomainExplorer | None = None,
         neo4j_repository: Neo4jRepository | None = None,
         cache_service: LandscapeCacheService | None = None,
+        history_service: ResearchHistoryService | None = None,
     ) -> None:
         settings = get_settings()
         self.task_manager = task_manager or get_task_manager()
@@ -55,12 +58,13 @@ class LandscapeService:
         self.explorer = explorer or DomainExplorer()
         self.neo4j_repository = neo4j_repository or get_neo4j_repository()
         self.cache_service = cache_service or get_landscape_cache_service()
+        self.history_service = history_service or get_research_history_service()
         self.summary_enabled = bool(settings.enable_landscape_summary)
         self._runtime: dict[str, _LandscapeRuntime] = {}
         self._runtime_lock = Lock()
         self._task_create_lock = asyncio.Lock()
 
-    async def create_landscape_task(self, request: LandscapeGenerateRequest) -> TaskCreateResponse:
+    async def create_landscape_task(self, request: LandscapeGenerateRequest, *, user: UserProfile) -> TaskCreateResponse:
         cache_key = self.cache_service.build_cache_key(
             query=request.query,
             paper_range_years=request.paper_range_years,
@@ -93,7 +97,9 @@ class LandscapeService:
                         message="命中公共缓存：准备加载历史结果并回放工作流步骤。",
                         level="info",
                     )
-                    asyncio.create_task(self._run_cached_task(task.task_id, request, cached_response))
+                    asyncio.create_task(
+                        self._run_cached_task(task.task_id, request, cached_response, user=user)
+                    )
                     return TaskCreateResponse(
                         task_id=task.task_id,
                         status=task.status,
@@ -166,7 +172,7 @@ class LandscapeService:
                 message="任务已创建，准备开始领域调研。",
                 level="info",
             )
-            asyncio.create_task(self._run_task(task.task_id, request, cache_key=cache_key))
+            asyncio.create_task(self._run_task(task.task_id, request, user=user, cache_key=cache_key))
             return TaskCreateResponse(
                 task_id=task.task_id,
                 status=task.status,
@@ -205,6 +211,7 @@ class LandscapeService:
         task_id: str,
         request: LandscapeGenerateRequest,
         *,
+        user: UserProfile,
         cache_key: str | None = None,
     ) -> None:
         landscape_id = f"landscape-{uuid4().hex[:12]}"
@@ -470,6 +477,11 @@ class LandscapeService:
                 generated_at=datetime.now(timezone.utc),
             )
             self.repository.save_landscape(landscape_id, response.model_dump())
+            self.history_service.record_landscape_result(
+                user=user,
+                request=request,
+                landscape=response,
+            )
             if cache_key:
                 try:
                     await self.cache_service.set(cache_key, response.model_dump(mode="json"))
@@ -515,6 +527,8 @@ class LandscapeService:
         task_id: str,
         request: LandscapeGenerateRequest,
         cached_response: LandscapeResponse,
+        *,
+        user: UserProfile,
     ) -> None:
         self._ensure_runtime(task_id)
         cached_landscape = cached_response.model_dump()
@@ -655,6 +669,11 @@ class LandscapeService:
             )
             await asyncio.sleep(0.54)
 
+            self.history_service.record_landscape_result(
+                user=user,
+                request=request,
+                landscape=cached_response,
+            )
             self.task_manager.update_task(
                 task_id,
                 status="completed",

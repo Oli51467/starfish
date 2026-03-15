@@ -20,6 +20,7 @@
         <span>Step {{ stepIndex }}/{{ stepTotal }} · </span>
         <strong class="header-step-strong">{{ stepTitle }}</strong>
       </p>
+      <GoogleAuthStatus v-if="isAuthenticated" />
       <GithubLinkButton />
     </div>
   </header>
@@ -27,6 +28,10 @@
 
 <script setup>
 import GithubLinkButton from '../common/GithubLinkButton.vue';
+import GoogleAuthStatus from '../common/GoogleAuthStatus.vue';
+import { useAuthStore } from '../../stores/authStore';
+
+const { isAuthenticated } = useAuthStore();
 
 defineProps({
   showStep: {

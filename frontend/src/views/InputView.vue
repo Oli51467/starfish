@@ -1,14 +1,15 @@
 <template>
   <section class="seed-workspace home-two-layer" :class="{ 'is-started': isInputVisible }">
-    <WorkflowShowcase :steps="workflowSteps" :started="isInputVisible" @start="isInputVisible = true" />
+    <WorkflowShowcase :steps="workflowSteps" :started="isInputVisible" @start="handleStartClick" />
 
-    <form v-if="isInputVisible" class="seed-input-shell panel" @submit.prevent="startAnalysis">
+    <form v-if="isInputVisible && canUseFeatures" class="seed-input-shell panel" @submit.prevent="startAnalysis">
       <div class="seed-input-row">
         <div class="seed-mode-picker" ref="modePickerRef">
           <button
             id="input-type"
             class="seed-mode-trigger mono"
             type="button"
+            :disabled="!canUseFeatures"
             aria-label="选择研究模式"
             :aria-expanded="modeMenuOpen ? 'true' : 'false'"
             @click="toggleModeMenu"
@@ -67,20 +68,20 @@
             </div>
           </div>
         </div>
-        <div class="seed-query-field" :class="{ 'is-disabled': !hasInputType }">
+        <div class="seed-query-field" :class="{ 'is-disabled': !hasInputType || !canUseFeatures }">
           <input
             id="input-value"
             class="seed-text-input mono"
             v-model="mapInput.input_value"
             :placeholder="currentInputMeta.placeholder"
-            :disabled="!hasInputType"
+            :disabled="!hasInputType || !canUseFeatures"
           />
           <div class="seed-strategy-picker" ref="strategyPickerRef">
             <button
               class="seed-strategy-trigger mono"
-              :class="{ 'is-disabled': !isDomainInput }"
+              :class="{ 'is-disabled': !isDomainInput || !canUseFeatures }"
               type="button"
-              :disabled="!isDomainInput"
+              :disabled="!isDomainInput || !canUseFeatures"
               :aria-expanded="strategyMenuOpen ? 'true' : 'false'"
               aria-label="选择检索模式"
               @click="toggleStrategyMenu"
@@ -164,22 +165,35 @@
           <button
             class="btn btn-accent mono seed-submit-btn"
             type="submit"
-            :disabled="!String(mapInput.input_type || '').trim() || !mapInput.input_value.trim()"
+            :disabled="!canUseFeatures || !String(mapInput.input_type || '').trim() || !mapInput.input_value.trim()"
           >
             开始分析
           </button>
         </div>
       </div>
     </form>
+
+    <article v-else-if="isInputVisible" class="seed-auth-card panel">
+      <p class="seed-auth-card-kicker mono">Authentication</p>
+      <p class="seed-auth-card-title">请先登录再开始分析</p>
+      <GoogleAuthStatus />
+    </article>
   </section>
 </template>
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 
+import GoogleAuthStatus from '../components/common/GoogleAuthStatus.vue';
 import WorkflowShowcase from '../components/home/WorkflowShowcase.vue';
 import { useMapStore } from '../stores/mapStore';
 
+const props = defineProps({
+  canUseFeatures: {
+    type: Boolean,
+    default: false
+  }
+});
 const emit = defineEmits(['start-analysis']);
 
 const workflowSteps = [
@@ -249,8 +263,14 @@ const modeTriggerLabel = computed(() => {
   if (selectedMode.value === 'domain') return `领域研究 · ${selectedRangeLabel.value}`;
   return '选择研究模式';
 });
+const canUseFeatures = computed(() => Boolean(props.canUseFeatures));
+
+function handleStartClick() {
+  isInputVisible.value = true;
+}
 
 function toggleModeMenu() {
+  if (!canUseFeatures.value) return;
   modeMenuOpen.value = !modeMenuOpen.value;
   if (modeMenuOpen.value) {
     paperSubmenuOpen.value = false;
@@ -266,7 +286,7 @@ function closeModeMenu() {
 }
 
 function toggleStrategyMenu() {
-  if (!isDomainInput.value) return;
+  if (!canUseFeatures.value || !isDomainInput.value) return;
   strategyMenuOpen.value = !strategyMenuOpen.value;
   if (strategyMenuOpen.value) {
     closeModeMenu();
@@ -278,40 +298,46 @@ function closeStrategyMenu() {
 }
 
 function openPaperSubmenu() {
+  if (!canUseFeatures.value) return;
   paperSubmenuOpen.value = true;
   domainSubmenuOpen.value = false;
 }
 
 function togglePaperSubmenu() {
+  if (!canUseFeatures.value) return;
   paperSubmenuOpen.value = !paperSubmenuOpen.value;
   domainSubmenuOpen.value = false;
 }
 
 function selectPaperType(nextType) {
+  if (!canUseFeatures.value) return;
   mapInput.value.input_type = String(nextType || '').trim() === 'doi' ? 'doi' : 'arxiv_id';
   closeModeMenu();
 }
 
 function openDomainSubmenu() {
+  if (!canUseFeatures.value) return;
   mapInput.value.input_type = 'domain';
   paperSubmenuOpen.value = false;
   domainSubmenuOpen.value = true;
 }
 
 function toggleDomainSubmenu() {
+  if (!canUseFeatures.value) return;
   mapInput.value.input_type = 'domain';
   paperSubmenuOpen.value = false;
   domainSubmenuOpen.value = !domainSubmenuOpen.value;
 }
 
 function selectDomainRange(rangeValue) {
+  if (!canUseFeatures.value) return;
   mapInput.value.input_type = 'domain';
   mapInput.value.paper_range_years = String(rangeValue ?? '');
   closeModeMenu();
 }
 
 function selectStrategy(nextMode) {
-  if (!isDomainInput.value) return;
+  if (!canUseFeatures.value || !isDomainInput.value) return;
   mapInput.value.quick_mode = nextMode === 'quick';
   closeStrategyMenu();
 }
@@ -340,6 +366,7 @@ function parsePaperRangeYears(rawValue) {
 }
 
 function startAnalysis() {
+  if (!canUseFeatures.value) return;
   const selectedInputType = String(mapInput.value.input_type || '').trim();
   const value = mapInput.value.input_value.trim();
   if (!selectedInputType || !value) return;
@@ -360,6 +387,16 @@ watch(
   (nextType) => {
     if (String(nextType || '').trim() !== 'domain') {
       mapInput.value.quick_mode = false;
+      closeStrategyMenu();
+    }
+  }
+);
+
+watch(
+  canUseFeatures,
+  (enabled) => {
+    if (!enabled) {
+      closeModeMenu();
       closeStrategyMenu();
     }
   }

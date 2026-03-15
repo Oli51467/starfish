@@ -11,7 +11,8 @@
   },
   "dependencies": {
     "@antv/g6": "^5.0.51",
-    "vue": "^3.5.30"
+    "vue": "^3.5.30",
+    "vue-router": "^4.6.3"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.4",

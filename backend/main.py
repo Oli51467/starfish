@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from api.auth import router as auth_router
 from api.gaps import router as gaps_router
 from api.graphrag import router as graphrag_router
 from api.landscape import router as landscape_router
@@ -12,6 +13,7 @@ from api.lineage import router as lineage_router
 from api.map import router as map_router
 from api.papers import router as papers_router
 from api.reading_list import router as reading_list_router
+from api.research_history import router as research_history_router
 from api.tasks import router as tasks_router
 from core.settings import get_settings
 from models.schemas import HealthResponse
@@ -32,12 +34,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth_router)
 app.include_router(map_router)
 app.include_router(graphrag_router)
 app.include_router(landscape_router)
 app.include_router(papers_router)
 app.include_router(tasks_router)
 app.include_router(reading_list_router)
+app.include_router(research_history_router)
 app.include_router(gaps_router)
 app.include_router(lineage_router)
 

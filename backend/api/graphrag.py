@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from api.dependencies import get_current_user_profile
 from external.semantic_scholar import SemanticScholarClientError
 from models.schemas import (
     KnowledgeGraphBuildRequest,
@@ -9,6 +10,11 @@ from models.schemas import (
     KnowledgeGraphRetrievalResponse,
     KnowledgeGraphRetrieveRequest,
     Neo4jStatusResponse,
+    UserProfile,
+)
+from services.research_history_service import (
+    ResearchHistoryService,
+    get_research_history_service,
 )
 from services.graphrag_service import get_graphrag_service
 
@@ -17,9 +23,15 @@ graphrag_service = get_graphrag_service()
 
 
 @router.post("/build", response_model=KnowledgeGraphResponse)
-def build_knowledge_graph(request: KnowledgeGraphBuildRequest) -> KnowledgeGraphResponse:
+def build_knowledge_graph(
+    request: KnowledgeGraphBuildRequest,
+    user: UserProfile = Depends(get_current_user_profile),
+    history_service: ResearchHistoryService = Depends(get_research_history_service),
+) -> KnowledgeGraphResponse:
     try:
-        return graphrag_service.build_knowledge_graph(request)
+        response = graphrag_service.build_knowledge_graph(request)
+        history_service.record_graph_result(user=user, request=request, graph=response)
+        return response
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except SemanticScholarClientError as exc:

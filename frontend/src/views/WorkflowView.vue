@@ -24,6 +24,7 @@ import KnowledgeGraphView from '../components/graph/KnowledgeGraphView.vue';
 import { buildKnowledgeGraphSets } from '../components/graph/knowledgeGraphModel';
 import LandscapeWorkflowPanel from '../components/landscape/LandscapeWorkflowPanel.vue';
 import LoadingState from '../components/common/LoadingState.vue';
+import { useAuthStore } from '../stores/authStore';
 
 const props = defineProps({
   seed: {
@@ -33,6 +34,7 @@ const props = defineProps({
 });
 
 const emit = defineEmits(['step-change', 'back']);
+const { accessToken } = useAuthStore();
 
 const steps = ref([
   {
@@ -162,6 +164,16 @@ function parsePaperRangeYears(rawValue) {
   const parsed = Number(rawValue);
   if (!Number.isFinite(parsed) || parsed <= 0) return null;
   return Math.min(30, Math.round(parsed));
+}
+
+function formatSearchRangeLabel(inputType, paperRangeYears) {
+  if (String(inputType || '').trim().toLowerCase() === 'domain') {
+    if (Number.isFinite(Number(paperRangeYears)) && Number(paperRangeYears) > 0) {
+      return `近 ${Math.round(Number(paperRangeYears))} 年`;
+    }
+    return '所有时间';
+  }
+  return '不适用';
 }
 
 function createRunningRetrievalLogs(inputType) {
@@ -332,8 +344,11 @@ async function runWorkflow() {
       query: retrievalQuery,
       max_papers: 12,
       max_entities_per_paper: 6,
-      prefetched_papers: retrieval.papers || []
-    });
+      prefetched_papers: retrieval.papers || [],
+      research_type: inputType || 'unknown',
+      search_input: String(props.seed?.input_value || '').trim(),
+      search_range: formatSearchRangeLabel(inputType, paperRangeYears)
+    }, accessToken.value);
     let resolvedGraph = result;
     let storageHint = '已使用实时结果。';
     if (result.stored_in_neo4j) {
