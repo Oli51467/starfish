@@ -446,6 +446,17 @@
   display: none;
 }
 
+.history-layout.is-graph-fullscreen,
+.history-layout.is-lineage-fullscreen {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+}
+
+.history-layout.is-graph-fullscreen .history-list-panel,
+.history-layout.is-lineage-fullscreen .history-list-panel {
+  display: none;
+}
+
 .workflow-left {
   display: grid;
   gap: 12px;
@@ -752,8 +763,69 @@
 
 .history-detail-panel {
   display: grid;
-  align-content: stretch;
+  grid-template-rows: minmax(0, 1fr);
   overflow: hidden;
+}
+
+.history-detail-content {
+  min-height: 0;
+  height: 100%;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  align-content: stretch;
+}
+
+.history-detail-tabbar {
+  padding: 10px 12px 0;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.history-detail-tabs {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--panel);
+}
+
+.history-detail-tab {
+  height: 32px;
+  min-width: 88px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 0 10px;
+  cursor: pointer;
+}
+
+.history-detail-tab:hover:not(.is-active) {
+  background: color-mix(in srgb, var(--panel) 70%, var(--bg));
+  color: var(--text);
+}
+
+.history-detail-tab.is-active {
+  background: var(--text);
+  color: var(--bg);
+}
+
+.history-detail-stage {
+  min-height: 0;
+  height: 100%;
+  display: grid;
+  align-content: stretch;
+  padding: 8px 0 0;
+}
+
+.history-detail-stage .knowledge-graph-panel,
+.history-detail-stage .knowledge-graph-body,
+.history-detail-stage .knowledge-graph-body-full,
+.history-detail-stage .knowledge-graph-canvas,
+.history-detail-stage .blood-lineage {
+  min-height: 0;
+  height: 100%;
 }
 
 .history-count {
@@ -784,7 +856,7 @@
   padding: 10px 10px;
   font-size: 12px;
   line-height: 1.5;
-  text-align: left;
+  text-align: center;
   vertical-align: middle;
 }
 
@@ -792,6 +864,29 @@
   background: var(--panel);
   color: var(--muted);
   font-weight: 600;
+}
+
+.history-table thead th {
+  height: 44px;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.history-actions-head {
+  width: 84px;
+  text-align: center;
+}
+
+.history-actions-cell {
+  text-align: center;
+}
+
+.history-action-slot {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .history-table tbody tr:last-child td {
@@ -820,6 +915,153 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.history-check-input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.history-check-input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.history-batch-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.history-action-icon-btn {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.history-action-icon-btn svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.history-action-icon-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 46%, var(--line));
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg));
+}
+
+.history-action-icon-btn.is-danger:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--line));
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg));
+}
+
+.history-action-icon-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.history-delete-btn {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.history-delete-btn svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.history-delete-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 46%, var(--line));
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg));
+}
+
+.history-delete-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.global-confirm-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: color-mix(in srgb, var(--text) 18%, transparent);
+}
+
+.global-confirm-card {
+  width: min(420px, 100%);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  box-shadow: var(--shadow-soft);
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.global-confirm-title {
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.global-confirm-message {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--muted);
+  white-space: pre-wrap;
+}
+
+.global-confirm-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.global-confirm-accept-btn {
+  border-color: var(--line-2);
+}
+
+.global-confirm-accept-btn.is-danger {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.global-confirm-accept-btn.is-danger:hover {
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg));
 }
 
 .history-lineage-badge {

@@ -125,9 +125,11 @@ class ResearchHistoryService:
         if payload is None:
             return None
         raw_graph_payload = payload.get("graph_payload") or {}
+        raw_lineage_payload = payload.get("lineage_payload")
         normalized_research_type = self._normalize_research_type(payload.get("research_type"))
         graph_payload: dict[str, Any] = {}
         landscape_graph: dict[str, Any] | None = None
+        lineage_graph: dict[str, Any] | None = None
 
         if isinstance(raw_graph_payload, dict) and isinstance(raw_graph_payload.get("graph"), dict):
             graph_payload = raw_graph_payload.get("graph") or {}
@@ -144,6 +146,9 @@ class ResearchHistoryService:
                 graph=graph,
                 search_record=str(payload.get("search_record") or ""),
             )
+        if isinstance(raw_lineage_payload, dict):
+            lineage_graph = raw_lineage_payload
+
         return ResearchHistoryDetailResponse(
             history_id=str(payload.get("history_id") or ""),
             research_type=normalized_research_type,
@@ -156,6 +161,7 @@ class ResearchHistoryService:
             lineage=self._to_lineage_status(payload.get("lineage")),
             graph=graph,
             landscape_graph=landscape_graph,
+            lineage_graph=lineage_graph,
         )
 
     def record_lineage_status(
@@ -166,6 +172,7 @@ class ResearchHistoryService:
         seed_paper_id: str,
         ancestor_count: int,
         descendant_count: int,
+        lineage_payload: dict[str, Any] | None = None,
     ) -> bool:
         safe_graph_id = str(graph_id or "").strip()
         safe_seed_paper_id = str(seed_paper_id or "").strip()
@@ -179,10 +186,40 @@ class ResearchHistoryService:
                 seed_paper_id=safe_seed_paper_id,
                 ancestor_count=max(0, self._safe_int(ancestor_count, fallback=0)),
                 descendant_count=max(0, self._safe_int(descendant_count, fallback=0)),
+                lineage_payload=lineage_payload if isinstance(lineage_payload, dict) else None,
             )
         except Exception:  # noqa: BLE001
             logger.exception("Failed updating lineage status in research history.")
             return False
+
+    def delete_history(self, *, user: UserProfile, history_id: str) -> bool:
+        safe_history_id = str(history_id or "").strip()
+        if not safe_history_id:
+            return False
+        try:
+            return self.repository.delete_graph_record(user_id=user.id, history_id=safe_history_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed deleting research history record.")
+            return False
+
+    def delete_histories(self, *, user: UserProfile, history_ids: list[str]) -> list[str]:
+        safe_history_ids: list[str] = []
+        seen: set[str] = set()
+        for raw_id in history_ids or []:
+            safe_id = str(raw_id or "").strip()
+            if not safe_id or safe_id in seen:
+                continue
+            seen.add(safe_id)
+            safe_history_ids.append(safe_id)
+
+        if not safe_history_ids:
+            return []
+
+        try:
+            return self.repository.delete_graph_records(user_id=user.id, history_ids=safe_history_ids)
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed batch deleting research history records.")
+            return []
 
     @staticmethod
     def _normalize_research_type(raw_value: str | None) -> str:
@@ -194,12 +231,14 @@ class ResearchHistoryService:
     @staticmethod
     def _normalize_search_range(raw_value: str | None, *, research_type: str | None) -> str:
         value = str(raw_value or "").strip()
+        if value == "不适用":
+            return "-"
         if value:
             return value
         normalized_type = str(research_type or "").strip().lower()
         if normalized_type == "domain":
             return "所有时间"
-        return "不适用"
+        return "-"
 
     @staticmethod
     def _format_domain_search_range(paper_range_years: int | None) -> str:

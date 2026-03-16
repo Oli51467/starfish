@@ -222,6 +222,7 @@ class ResearchHistoryDetailResponse(BaseModel):
     lineage: ResearchHistoryLineageStatus = Field(default_factory=ResearchHistoryLineageStatus)
     graph: KnowledgeGraphResponse
     landscape_graph: dict[str, Any] | None = None
+    lineage_graph: dict[str, Any] | None = None
 
 
 class ResearchHistoryLineageUpdateRequest(BaseModel):
@@ -229,10 +230,25 @@ class ResearchHistoryLineageUpdateRequest(BaseModel):
     seed_paper_id: str = Field(..., min_length=1)
     ancestor_count: int = Field(default=0, ge=0)
     descendant_count: int = Field(default=0, ge=0)
+    lineage_payload: dict[str, Any] | None = None
 
 
 class ResearchHistoryLineageUpdateResponse(BaseModel):
     updated: bool = False
+
+
+class ResearchHistoryDeleteResponse(BaseModel):
+    deleted: bool = False
+
+
+class ResearchHistoryBatchDeleteRequest(BaseModel):
+    history_ids: list[str] = Field(default_factory=list, min_length=1, max_length=100)
+
+
+class ResearchHistoryBatchDeleteResponse(BaseModel):
+    deleted: bool = False
+    deleted_count: int = Field(default=0, ge=0)
+    deleted_ids: list[str] = Field(default_factory=list)
 
 
 class LandscapeGenerateRequest(BaseModel):

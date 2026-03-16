@@ -11,6 +11,30 @@ const routes = [
     component: HomeView
   },
   {
+    path: '/research/domain/graph',
+    name: 'research-domain-graph',
+    component: HomeView,
+    meta: {
+      requiresAuth: true
+    }
+  },
+  {
+    path: '/research/paper/graph',
+    name: 'research-paper-graph',
+    component: HomeView,
+    meta: {
+      requiresAuth: true
+    }
+  },
+  {
+    path: '/research/paper/lineage',
+    name: 'research-paper-lineage',
+    component: HomeView,
+    meta: {
+      requiresAuth: true
+    }
+  },
+  {
     path: '/research-history',
     name: 'research-history',
     component: ResearchHistoryView,

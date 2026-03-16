@@ -246,6 +246,7 @@ class GraphRAGService:
             query=query,
             max_papers=max_papers,
             paper_range_years=paper_range_years,
+            preferred_provider="openalex" if quick_mode else "semantic_scholar",
         )
 
     def _retrieve_papers_from_seed_input_with_trace(
@@ -257,7 +258,9 @@ class GraphRAGService:
         quick_mode: bool = False,
         paper_range_years: int | None = None,
     ) -> dict[str, Any]:
-        safe_value = input_value.strip()
+        safe_value = self._normalize_seed_input_value(input_type=input_type, input_value=input_value)
+        if not safe_value:
+            safe_value = input_value.strip()
         safe_max = max(1, max_papers)
         candidate_limit = min(220, max(safe_max + 36, safe_max * 16))
         normalized_range = self._normalize_paper_range_years(paper_range_years)
@@ -330,20 +333,31 @@ class GraphRAGService:
 
         fetch_start = perf_counter()
         try:
-            if quick_mode:
-                seed_document = self._fetch_seed_document_openalex(
-                    input_type=input_type,
-                    input_value=safe_value,
-                    reference_limit=candidate_limit,
-                    citation_limit=candidate_limit,
-                )
-            else:
-                seed_document = self._fetch_seed_document_semantic(
-                    input_type=input_type,
-                    input_value=safe_value,
-                    reference_limit=candidate_limit,
-                    citation_limit=candidate_limit,
-                )
+            provider_chain = [preferred_seed_provider]
+            backup_provider = "semantic_scholar" if preferred_seed_provider == "openalex" else "openalex"
+            provider_chain.append(backup_provider)
+
+            seed_document: dict[str, Any] = {}
+            last_error: Exception | None = None
+            for provider_name in provider_chain:
+                try:
+                    seed_document = self._fetch_seed_document_by_provider(
+                        provider=provider_name,
+                        input_type=input_type,
+                        input_value=safe_value,
+                        reference_limit=candidate_limit,
+                        citation_limit=candidate_limit,
+                    )
+                    if seed_document.get("seed_paper"):
+                        break
+                except Exception as exc:  # noqa: BLE001
+                    last_error = exc
+                    continue
+
+            if not seed_document.get("seed_paper"):
+                if last_error is not None:
+                    raise last_error
+                raise ValueError(f"seed_paper_not_found: {input_type}:{safe_value}")
             seed_paper = seed_document.get("seed_paper") or {}
         except Exception as exc:  # noqa: BLE001
             logger.warning("seed retrieval failed for input_type=%s, value=%s: %s", input_type, safe_value, exc)
@@ -351,6 +365,7 @@ class GraphRAGService:
                 query=safe_value,
                 max_papers=safe_max,
                 paper_range_years=normalized_range,
+                preferred_provider=preferred_seed_provider,
             )
             fallback_payload_steps = fallback_payload.get("steps") or []
             fallback_payload_steps.insert(
@@ -486,16 +501,42 @@ class GraphRAGService:
             raise OpenAlexClientError(f"openalex_seed_not_found: {input_value}")
         return {"seed_paper": paper}
 
+    def _fetch_seed_document_by_provider(
+        self,
+        *,
+        provider: str,
+        input_type: str,
+        input_value: str,
+        reference_limit: int,
+        citation_limit: int,
+    ) -> dict[str, Any]:
+        normalized_provider = str(provider or "semantic_scholar").strip().lower()
+        if normalized_provider == "openalex":
+            return self._fetch_seed_document_openalex(
+                input_type=input_type,
+                input_value=input_value,
+                reference_limit=reference_limit,
+                citation_limit=citation_limit,
+            )
+        return self._fetch_seed_document_semantic(
+            input_type=input_type,
+            input_value=input_value,
+            reference_limit=reference_limit,
+            citation_limit=citation_limit,
+        )
+
     def _retrieve_papers_from_query_with_trace(
         self,
         query: str,
         max_papers: int,
         paper_range_years: int | None = None,
+        preferred_provider: str = "semantic_scholar",
     ) -> dict[str, Any]:
         safe_query = query.strip()
         safe_max = max(1, max_papers)
         candidate_limit = min(120, max(safe_max + 20, safe_max * 6))
         normalized_range = self._normalize_paper_range_years(paper_range_years)
+        primary_provider = self._normalize_search_provider(preferred_provider)
         steps: list[dict[str, Any]] = []
         web_links = [
             f"https://api.semanticscholar.org/graph/v1/paper/search?query={quote_plus(safe_query)}",
@@ -559,6 +600,7 @@ class GraphRAGService:
             query=safe_query,
             limit=candidate_limit,
             allow_mock=True,
+            preferred_provider=primary_provider,
         )
         provider_used = str(search_result["provider"])
         candidate_papers = search_result["papers"]
@@ -569,13 +611,24 @@ class GraphRAGService:
         range_hint = self._build_year_range_hint(normalized_range, range_filter_stats)
         retrieve_status = str(search_result["status"])
         retrieve_elapsed = float(search_result["elapsed_seconds"])
+        used_fallback = bool(search_result.get("used_fallback", False))
 
-        if provider_used == "semantic_scholar":
-            retrieve_detail = f"外部学术索引返回 {len(candidate_papers)} 条候选论文。{range_hint}"
-        elif provider_used == "openalex":
-            retrieve_detail = f"主检索通道不可用，已自动切换备用通道，返回 {len(candidate_papers)} 条候选论文。{range_hint}"
-        else:
+        if provider_used == "mock":
             retrieve_detail = f"外部检索失败，已降级为 mock 数据（{len(candidate_papers)} 条候选）。{range_hint}"
+        else:
+            provider_labels = {
+                "semantic_scholar": "Semantic Scholar",
+                "openalex": "OpenAlex",
+            }
+            primary_label = provider_labels.get(primary_provider, primary_provider)
+            active_label = provider_labels.get(provider_used, provider_used)
+            if used_fallback and provider_used != primary_provider:
+                retrieve_detail = (
+                    f"主检索通道 {primary_label} 暂不可用，"
+                    f"已自动切换至 {active_label}，返回 {len(candidate_papers)} 条候选论文。{range_hint}"
+                )
+            else:
+                retrieve_detail = f"{active_label} 返回 {len(candidate_papers)} 条候选论文。{range_hint}"
 
         steps.append(
             self._build_retrieval_step(
@@ -619,44 +672,41 @@ class GraphRAGService:
         query: str,
         limit: int,
         allow_mock: bool,
+        preferred_provider: str = "semantic_scholar",
     ) -> dict[str, Any]:
         safe_limit = max(1, min(limit, 60))
+        primary_provider = self._normalize_search_provider(preferred_provider)
+        secondary_provider = "semantic_scholar" if primary_provider == "openalex" else "openalex"
+        provider_chain = [primary_provider, secondary_provider]
+        provider_errors: dict[str, Exception] = {}
 
-        semantic_error: Exception | None = None
-        semantic_start = perf_counter()
-        try:
-            payload = self.semantic.search_papers(query=query, limit=safe_limit)
-            papers = payload.get("papers", [])
-            if papers:
-                return {
-                    "provider": "semantic_scholar",
-                    "status": "done",
-                    "papers": papers,
-                    "elapsed_seconds": perf_counter() - semantic_start,
-                }
-        except SemanticScholarClientError as exc:
-            semantic_error = exc
+        for index, provider_name in enumerate(provider_chain):
+            search_start = perf_counter()
+            try:
+                if provider_name == "openalex":
+                    payload = self.openalex.search_papers(query=query, limit=safe_limit)
+                else:
+                    payload = self.semantic.search_papers(query=query, limit=safe_limit)
+                papers = payload.get("papers", [])
+                if papers:
+                    used_fallback = index > 0
+                    return {
+                        "provider": provider_name,
+                        "status": "fallback" if used_fallback else "done",
+                        "papers": papers,
+                        "elapsed_seconds": perf_counter() - search_start,
+                        "used_fallback": used_fallback,
+                        "primary_provider": primary_provider,
+                    }
+            except (SemanticScholarClientError, OpenAlexClientError) as exc:
+                provider_errors[provider_name] = exc
 
-        openalex_start = perf_counter()
-        try:
-            payload = self.openalex.search_papers(query=query, limit=safe_limit)
-            papers = payload.get("papers", [])
-            if papers:
-                return {
-                    "provider": "openalex",
-                    "status": "fallback",
-                    "papers": papers,
-                    "elapsed_seconds": perf_counter() - openalex_start,
-                }
-        except OpenAlexClientError as exc:
-            if semantic_error is not None:
-                logger.warning(
-                    "Semantic Scholar and OpenAlex both failed: semantic=%s, openalex=%s",
-                    semantic_error,
-                    exc,
-                )
-            else:
-                logger.warning("OpenAlex fallback search failed: %s", exc)
+        if provider_errors:
+            logger.warning(
+                "query search failed on both providers: primary=%s, errors=%s",
+                primary_provider,
+                {key: str(value) for key, value in provider_errors.items()},
+            )
 
         if allow_mock:
             return {
@@ -664,14 +714,50 @@ class GraphRAGService:
                 "status": "fallback",
                 "papers": self._fallback_papers(query=query, max_papers=safe_limit),
                 "elapsed_seconds": 0.0,
+                "used_fallback": True,
+                "primary_provider": primary_provider,
             }
 
         return {
-            "provider": "semantic_scholar",
+            "provider": primary_provider,
             "status": "fallback",
             "papers": [],
             "elapsed_seconds": 0.0,
+            "used_fallback": False,
+            "primary_provider": primary_provider,
         }
+
+    def _normalize_search_provider(self, preferred_provider: str) -> str:
+        normalized = str(preferred_provider or "semantic_scholar").strip().lower()
+        if normalized.startswith("openalex"):
+            return "openalex"
+        return "semantic_scholar"
+
+    def _normalize_seed_input_value(self, *, input_type: str, input_value: str) -> str:
+        value = str(input_value or "").strip()
+        if not value:
+            return ""
+
+        normalized_type = str(input_type or "").strip().lower()
+        if normalized_type == "arxiv_id":
+            normalized = re.sub(r"^arxiv:\s*", "", value, flags=re.IGNORECASE)
+            normalized = re.sub(
+                r"^https?://(?:www\.)?arxiv\.org/(?:abs|pdf)/",
+                "",
+                normalized,
+                flags=re.IGNORECASE,
+            )
+            normalized = re.sub(r"\.pdf$", "", normalized, flags=re.IGNORECASE)
+            normalized = re.sub(r"\s+", "", normalized).strip().strip("/")
+            return normalized
+
+        if normalized_type == "doi":
+            normalized = re.sub(r"^doi:\s*", "", value, flags=re.IGNORECASE)
+            normalized = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", normalized, flags=re.IGNORECASE)
+            normalized = re.sub(r"\s+", "", normalized).strip()
+            return normalized
+
+        return value
 
     def _seed_search_trace(
         self,
@@ -680,7 +766,7 @@ class GraphRAGService:
         input_value: str,
         preferred_provider: str = "semantic_scholar",
     ) -> tuple[str, list[str]]:
-        safe_value = input_value.strip()
+        safe_value = self._normalize_seed_input_value(input_type=input_type, input_value=input_value)
         normalized_provider = str(preferred_provider or "semantic_scholar").strip().lower()
         use_openalex = normalized_provider == "openalex"
         if input_type == "arxiv_id":

@@ -22,7 +22,7 @@
       </div>
     </div>
 
-    <KnowledgeGraphCanvas :graph="activeGraph">
+    <KnowledgeGraphCanvas ref="graphCanvasRef" :graph="activeGraph">
       <template #tools-extra>
         <slot name="tools-extra"></slot>
       </template>
@@ -48,6 +48,7 @@ const props = defineProps({
 });
 
 const activeGraphKey = ref('full');
+const graphCanvasRef = ref(null);
 
 const graphSets = computed(() => buildKnowledgeGraphSets(props.graphData));
 const isPanoramaOnlyMode = computed(() => props.mode === 'panorama_only');
@@ -83,5 +84,20 @@ const activeGraph = computed(() => {
   if (activeGraphKey.value === 'full') return graphSets.value.full;
   if (activeGraphKey.value === 'domain') return graphSets.value.domain;
   return graphSets.value.paper;
+});
+
+async function refreshGraphDisplay() {
+  if (!graphCanvasRef.value?.refreshGraphDisplay) return;
+  await graphCanvasRef.value.refreshGraphDisplay();
+}
+
+async function refreshGraphToMinOverview() {
+  if (!graphCanvasRef.value?.refreshGraphToMinOverview) return;
+  await graphCanvasRef.value.refreshGraphToMinOverview();
+}
+
+defineExpose({
+  refreshGraphDisplay,
+  refreshGraphToMinOverview
 });
 </script>

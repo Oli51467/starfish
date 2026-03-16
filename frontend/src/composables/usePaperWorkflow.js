@@ -51,7 +51,7 @@ function formatSearchRangeLabel(inputType, paperRangeYears) {
     }
     return '所有时间';
   }
-  return '不适用';
+  return '-';
 }
 
 function createRetrievalRunningMessage(inputType) {
@@ -627,7 +627,8 @@ export function usePaperWorkflow({
         graph_id: graphId,
         seed_paper_id: seedPaperId,
         ancestor_count: ancestors,
-        descendant_count: descendants
+        descendant_count: descendants,
+        lineage_payload: payload
       }, token).then((result) => {
         updateLineageLog(historyLogIndex, {
           detail: result?.updated ? '研究历史已更新血缘树状态。' : '未找到可更新的研究历史记录（已跳过）。',

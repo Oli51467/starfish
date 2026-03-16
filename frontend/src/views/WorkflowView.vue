@@ -35,7 +35,11 @@
           <template v-else>
             <LoadingState v-if="lineageLoading && !lineageData" message="正在生成血缘树..." />
             <ErrorBoundary v-else-if="lineageErrorMessage && !lineageData" :message="lineageErrorMessage" />
-            <BloodLineageTree v-else-if="lineageData" :lineage="lineageData">
+            <BloodLineageTree
+              v-else-if="lineageData"
+              :lineage="lineageData"
+              :stretch-timeline="true"
+            >
               <template #tools-extra>
                 <div class="workflow-result-tabbar" role="tablist" aria-label="论文检索结果切换">
                   <div class="workflow-result-tabs">

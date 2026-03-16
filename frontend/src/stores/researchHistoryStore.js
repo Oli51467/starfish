@@ -1,11 +1,18 @@
 import { computed, ref } from 'vue';
 
-import { getResearchHistoryDetail, getResearchHistoryList } from '../api';
+import {
+  batchDeleteResearchHistory,
+  deleteResearchHistory,
+  getResearchHistoryDetail,
+  getResearchHistoryList
+} from '../api';
 
 const records = ref([]);
 const selectedDetail = ref(null);
 const listLoading = ref(false);
 const detailLoading = ref(false);
+const deletingHistoryId = ref('');
+const batchDeleting = ref(false);
 const errorMessage = ref('');
 const page = ref(1);
 const pageSize = ref(10);
@@ -55,6 +62,48 @@ async function fetchHistoryDetail(historyId, { accessToken } = {}) {
   }
 }
 
+async function deleteHistoryRecord(historyId, { accessToken } = {}) {
+  const safeHistoryId = String(historyId || '').trim();
+  if (!safeHistoryId) return false;
+
+  deletingHistoryId.value = safeHistoryId;
+  errorMessage.value = '';
+  try {
+    const payload = await deleteResearchHistory(safeHistoryId, { accessToken });
+    return Boolean(payload?.deleted);
+  } catch (error) {
+    errorMessage.value = error?.message || '删除研究历史失败。';
+    return false;
+  } finally {
+    deletingHistoryId.value = '';
+  }
+}
+
+async function batchDeleteHistoryRecords(historyIds, { accessToken } = {}) {
+  const safeIds = [];
+  const seen = new Set();
+  for (const rawId of Array.isArray(historyIds) ? historyIds : []) {
+    const safeId = String(rawId || '').trim();
+    if (!safeId || seen.has(safeId)) continue;
+    seen.add(safeId);
+    safeIds.push(safeId);
+  }
+  if (!safeIds.length) return [];
+
+  batchDeleting.value = true;
+  errorMessage.value = '';
+  try {
+    const payload = await batchDeleteResearchHistory(safeIds, { accessToken });
+    const deletedIds = Array.isArray(payload?.deleted_ids) ? payload.deleted_ids : [];
+    return deletedIds.map((id) => String(id || '').trim()).filter(Boolean);
+  } catch (error) {
+    errorMessage.value = error?.message || '批量删除研究历史失败。';
+    return [];
+  } finally {
+    batchDeleting.value = false;
+  }
+}
+
 function clearSelectedDetail() {
   selectedDetail.value = null;
 }
@@ -65,6 +114,8 @@ export function useResearchHistoryStore() {
     selectedDetail,
     listLoading,
     detailLoading,
+    deletingHistoryId,
+    batchDeleting,
     errorMessage,
     page,
     pageSize,
@@ -73,6 +124,8 @@ export function useResearchHistoryStore() {
     hasRecords,
     fetchHistoryList,
     fetchHistoryDetail,
+    deleteHistoryRecord,
+    batchDeleteHistoryRecords,
     clearSelectedDetail
   };
 }

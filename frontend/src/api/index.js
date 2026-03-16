@@ -95,6 +95,24 @@ export function getResearchHistoryDetail(historyId, { accessToken = '' } = {}) {
   });
 }
 
+export function deleteResearchHistory(historyId, { accessToken = '' } = {}) {
+  return request(`/api/research-history/${encodeURIComponent(historyId)}`, {
+    method: 'DELETE',
+    headers: buildAuthHeaders(accessToken)
+  });
+}
+
+export function batchDeleteResearchHistory(historyIds, { accessToken = '' } = {}) {
+  const payload = {
+    history_ids: Array.isArray(historyIds) ? historyIds : []
+  };
+  return request('/api/research-history/batch-delete', {
+    method: 'POST',
+    headers: buildAuthHeaders(accessToken, { 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload)
+  });
+}
+
 export function updateResearchHistoryLineageStatus(payload, accessToken = '') {
   return request('/api/research-history/lineage-status', {
     method: 'POST',

@@ -10,7 +10,6 @@
         @pointermove="handleCanvasPointerMove"
         @pointerup="handleCanvasPointerUp"
         @pointercancel="handleCanvasPointerUp"
-        @pointerleave="handleCanvasPointerUp"
       >
         <div class="blood-canvas-head">
           <div class="blood-canvas-head-left">
@@ -65,13 +64,15 @@
         </div>
 
         <div class="blood-time-axis">
-          <div
-            v-for="tick in yearTicks"
-            :key="`tick-${tick.year}`"
-            class="blood-year-line"
-            :style="{ left: `${tick.x}px` }"
-          >
-            <span class="blood-year-label mono">{{ tick.year }}</span>
+          <div class="blood-time-axis-track" :style="timelineViewportStyle">
+            <div
+              v-for="tick in yearTicks"
+              :key="`tick-${tick.year}`"
+              class="blood-year-line"
+              :style="{ left: `${tick.x}px` }"
+            >
+              <span class="blood-year-label mono">{{ tick.year }}</span>
+            </div>
           </div>
         </div>
 
@@ -173,12 +174,16 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 
 const props = defineProps({
   lineage: {
     type: Object,
     required: true
+  },
+  stretchTimeline: {
+    type: Boolean,
+    default: false
   }
 });
 
@@ -207,7 +212,8 @@ const panState = ref({
   startX: 0,
   startY: 0,
   originX: 0,
-  originY: 0
+  originY: 0,
+  metrics: null
 });
 const nodeDragState = ref({
   active: false,
@@ -217,7 +223,8 @@ const nodeDragState = ref({
   startY: 0,
   originOffsetX: 0,
   originOffsetY: 0,
-  moved: false
+  moved: false,
+  metrics: null
 });
 const nodeOffsetMap = ref({});
 const suppressNodeClick = ref({
@@ -226,12 +233,51 @@ const suppressNodeClick = ref({
 });
 let resizeObserver = null;
 
-const VIEWPORT_MIN_SCALE = 0.56;
+const VIEWPORT_DEFAULT_MIN_SCALE = 0.56;
+const VIEWPORT_ABSOLUTE_MIN_SCALE = 0.06;
 const VIEWPORT_MAX_SCALE = 2.6;
+const FULLSCREEN_HOST_SELECTOR = '.workflow-layout, .history-layout';
 const NODE_DRAG_THRESHOLD = 3;
-const WHEEL_ZOOM_SENSITIVITY = 0.00024;
+const WHEEL_ZOOM_SENSITIVITY = Object.freeze({
+  tiny: 0.004,
+  small: 0.0026,
+  medium: 0.0018,
+  large: 0.001,
+  huge: 0.00055,
+  extreme: 0.0003
+});
+const WHEEL_DELTA_LIMIT = 640;
+const WHEEL_MIN_EFFECT_DELTA = 0.05;
+const VIEWPORT_FIT_PADDING = 96;
+const STRETCHED_TIMELINE_SIDE_RATIO = 0.02;
+const STRETCHED_TIMELINE_SIDE_MIN = 10;
+const STRETCHED_TIMELINE_SIDE_MAX = 26;
 const TIMELINE_LEFT_RATIO = 0.08;
 const TIMELINE_RIGHT_RATIO = 0.08;
+const LAYOUT_SPACING = {
+  compact: {
+    centerBandGap: 5,
+    yearRowGap: 74,
+    generationGap: 176,
+    relevanceShift: 50,
+    yearLaneGap: 59,
+    nodeMinGap: 138,
+    labelMinGap: 104,
+    nodeCollisionPadding: 16,
+    maxColumnsPerYear: 1
+  },
+  regular: {
+    centerBandGap: 6,
+    yearRowGap: 110,
+    generationGap: 256,
+    relevanceShift: 74,
+    yearLaneGap: 90,
+    nodeMinGap: 190,
+    labelMinGap: 149,
+    nodeCollisionPadding: 22,
+    maxColumnsPerYear: 1
+  }
+};
 
 const citationConfig = {
   extending: { label: 'Extending', color: 'var(--text)' },
@@ -296,19 +342,33 @@ function resolveTimelineTickStep(span, nodeCount) {
   return 10;
 }
 
+function resolveEffectiveGap(count, desiredGap, topBound, bottomBound, minGap = 10) {
+  if (count <= 1) return Math.max(minGap, desiredGap);
+  const available = Math.max(0, bottomBound - topBound);
+  const theoreticalMax = available / (count - 1);
+  if (!Number.isFinite(theoreticalMax) || theoreticalMax <= 0) return minGap;
+  return clamp(desiredGap, minGap, theoreticalMax);
+}
+
+function centeredBucketOffset(index, total) {
+  if (total <= 1) return 0;
+  return index - (total - 1) / 2;
+}
+
 function spreadNodesVertically(nodes, { minGap, topBound, bottomBound }) {
   if (!Array.isArray(nodes) || nodes.length < 2) return;
+  const effectiveGap = resolveEffectiveGap(nodes.length, minGap, topBound, bottomBound, 8);
   const sorted = [...nodes].sort((a, b) => a.y - b.y);
   sorted[0].y = clamp(sorted[0].y, topBound, bottomBound);
   for (let index = 1; index < sorted.length; index += 1) {
     const previous = sorted[index - 1];
     const current = sorted[index];
-    current.y = Math.max(current.y, previous.y + minGap);
+    current.y = Math.max(current.y, previous.y + effectiveGap);
   }
   for (let index = sorted.length - 2; index >= 0; index -= 1) {
     const next = sorted[index + 1];
     const current = sorted[index];
-    current.y = Math.min(current.y, next.y - minGap);
+    current.y = Math.min(current.y, next.y - effectiveGap);
   }
   for (const node of sorted) {
     node.y = clamp(node.y, topBound, bottomBound);
@@ -317,6 +377,7 @@ function spreadNodesVertically(nodes, { minGap, topBound, bottomBound }) {
 
 function spreadNodeLabels(nodes, { minGap, topBound, bottomBound }) {
   if (!Array.isArray(nodes) || !nodes.length) return;
+  const effectiveGap = resolveEffectiveGap(nodes.length, minGap, topBound, bottomBound, 9);
   const sorted = [...nodes].sort((a, b) => a.y - b.y);
   for (const node of sorted) {
     node.labelY = node.y + node.radius + 15;
@@ -325,17 +386,93 @@ function spreadNodeLabels(nodes, { minGap, topBound, bottomBound }) {
   for (let index = 1; index < sorted.length; index += 1) {
     const previous = sorted[index - 1];
     const current = sorted[index];
-    current.labelY = Math.max(current.labelY, previous.labelY + minGap);
+    current.labelY = Math.max(current.labelY, previous.labelY + effectiveGap);
   }
   for (let index = sorted.length - 2; index >= 0; index -= 1) {
     const next = sorted[index + 1];
     const current = sorted[index];
-    current.labelY = Math.min(current.labelY, next.labelY - minGap);
+    current.labelY = Math.min(current.labelY, next.labelY - effectiveGap);
   }
   for (const node of sorted) {
     const safeLabelY = clamp(node.labelY, topBound, bottomBound);
     node.labelDy = safeLabelY - node.y;
     node.labelY = safeLabelY;
+  }
+}
+
+function spreadSideNodesByGeneration(
+  nodes,
+  {
+    nodeMinGap,
+    topBound,
+    bottomBound
+  }
+) {
+  if (!Array.isArray(nodes) || !nodes.length) return;
+  const generationGroups = new Map();
+  for (const node of nodes) {
+    const key = Number.isFinite(Number(node?.generation)) ? Number(node.generation) : 1;
+    if (!generationGroups.has(key)) {
+      generationGroups.set(key, []);
+    }
+    generationGroups.get(key).push(node);
+  }
+  for (const groupNodes of generationGroups.values()) {
+    spreadNodesVertically(groupNodes, {
+      minGap: nodeMinGap,
+      topBound,
+      bottomBound
+    });
+  }
+}
+
+function clampNodeCenter(value, node, topBound, bottomBound) {
+  const nodeRadius = Number.isFinite(Number(node?.radius)) ? Number(node.radius) : 0;
+  const minY = topBound + nodeRadius + 2;
+  const maxY = bottomBound - nodeRadius - 2;
+  if (minY > maxY) {
+    return (minY + maxY) / 2;
+  }
+  return clamp(value, minY, maxY);
+}
+
+function enforceNodeCircleSeparation(nodes, { topBound, bottomBound, padding }) {
+  if (!Array.isArray(nodes) || nodes.length < 2) return;
+  const sorted = [...nodes].sort((left, right) => left.y - right.y);
+  const collisionPadding = Math.max(0, Number(padding) || 0);
+
+  for (const node of sorted) {
+    node.y = clampNodeCenter(node.y, node, topBound, bottomBound);
+  }
+
+  for (let pass = 0; pass < 2; pass += 1) {
+    for (let index = 1; index < sorted.length; index += 1) {
+      const previous = sorted[index - 1];
+      const current = sorted[index];
+      const requiredGap = Math.max(
+        0,
+        (Number(previous.radius) || 0) + (Number(current.radius) || 0) + collisionPadding
+      );
+      const minY = previous.y + requiredGap;
+      if (current.y < minY) {
+        current.y = minY;
+      }
+      current.y = clampNodeCenter(current.y, current, topBound, bottomBound);
+    }
+
+    for (let index = sorted.length - 2; index >= 0; index -= 1) {
+      const next = sorted[index + 1];
+      const current = sorted[index];
+      const requiredGap = Math.max(
+        0,
+        (Number(next.radius) || 0) + (Number(current.radius) || 0) + collisionPadding
+      );
+      const maxY = next.y - requiredGap;
+      if (current.y > maxY) {
+        current.y = maxY;
+      }
+      current.y = clampNodeCenter(current.y, current, topBound, bottomBound);
+    }
   }
 }
 
@@ -381,7 +518,24 @@ const fullscreenButtonLabel = computed(() => (isFullscreen.value ? '收回' : '�
 
 const canvasViewportTransform = computed(() => {
   const { x, y, scale } = viewport.value;
+  if (props.stretchTimeline) {
+    return `translate(0 ${y}) scale(${scale})`;
+  }
   return `translate(${x} ${y}) scale(${scale})`;
+});
+
+const timelineViewportStyle = computed(() => {
+  if (props.stretchTimeline) {
+    return {
+      transform: 'none',
+      transformOrigin: '0 0'
+    };
+  }
+  const { x, scale } = viewport.value;
+  return {
+    transform: `translateX(${x}px) scaleX(${scale})`,
+    transformOrigin: '0 0'
+  };
 });
 
 const normalizedNodes = computed(() => {
@@ -433,8 +587,17 @@ function resolveNodeYear(node, fallbackYear) {
 
 const timelineMetrics = computed(() => {
   const width = Math.max(320, Number(viewBox.value.width || 0));
-  const leftPadding = Math.round(width * TIMELINE_LEFT_RATIO);
-  const rightPadding = Math.round(width * TIMELINE_RIGHT_RATIO);
+  const stretchedPadding = clamp(
+    Math.round(width * STRETCHED_TIMELINE_SIDE_RATIO),
+    STRETCHED_TIMELINE_SIDE_MIN,
+    STRETCHED_TIMELINE_SIDE_MAX
+  );
+  const leftPadding = props.stretchTimeline
+    ? stretchedPadding
+    : Math.round(width * TIMELINE_LEFT_RATIO);
+  const rightPadding = props.stretchTimeline
+    ? stretchedPadding
+    : Math.round(width * TIMELINE_RIGHT_RATIO);
   const axisWidth = Math.max(120, width - leftPadding - rightPadding);
 
   const fallbackYear = normalizeYear(rootPaper.value?.year) || new Date().getFullYear();
@@ -498,8 +661,8 @@ function relationWeight(type) {
 
 function shortTitle(title) {
   const text = String(title || '').trim();
-  if (text.length <= 30) return text;
-  return `${text.slice(0, 29)}...`;
+  if (text.length <= 24) return text;
+  return `${text.slice(0, 23)}...`;
 }
 
 const layoutNodes = computed(() => {
@@ -507,13 +670,18 @@ const layoutNodes = computed(() => {
   const height = viewBox.value.height;
   const nodes = normalizedNodes.value;
   if (!nodes.length) return [];
+  const stretchScale = props.stretchTimeline
+    ? Math.max(VIEWPORT_ABSOLUTE_MIN_SCALE, Number(viewport.value.scale || 1))
+    : 1;
+  const stretchInverseScale = 1 / stretchScale;
 
   const compact = width <= 768;
+  const spacing = compact ? LAYOUT_SPACING.compact : LAYOUT_SPACING.regular;
   const headHeight = compact ? 30 : 32;
   const axisHeight = compact ? 24 : 28;
-  const layoutTopInset = 12 + headHeight + axisHeight + 18;
-  const layoutBottomInset = compact ? 26 : 30;
-  const minPlotHeight = compact ? 220 : 280;
+  const layoutTopInset = 10 + headHeight + axisHeight + 10;
+  const layoutBottomInset = compact ? 14 : 16;
+  const minPlotHeight = compact ? 260 : 340;
   let topBound = Math.max(36, layoutTopInset);
   let bottomBound = Math.max(topBound + minPlotHeight, height - layoutBottomInset);
   if (bottomBound > height - 8) {
@@ -524,10 +692,10 @@ const layoutNodes = computed(() => {
   }
 
   const centerY = topBound + (bottomBound - topBound) / 2;
-  const bandGap = compact ? 34 : 46;
+  const bandGap = spacing.centerBandGap;
   let ancestorTopBound = topBound;
-  let ancestorBottomBound = Math.max(ancestorTopBound + 72, centerY - bandGap);
-  let descendantTopBound = Math.min(bottomBound - 72, centerY + bandGap);
+  let ancestorBottomBound = Math.max(ancestorTopBound + (compact ? 92 : 120), centerY - bandGap);
+  let descendantTopBound = Math.min(bottomBound - (compact ? 92 : 120), centerY + bandGap);
   const descendantBottomBound = bottomBound;
   if (ancestorBottomBound >= descendantTopBound) {
     ancestorBottomBound = centerY - 22;
@@ -537,13 +705,14 @@ const layoutNodes = computed(() => {
   const root = nodes[0];
   const ancestors = nodes.filter((node) => node.nodeType === 'ancestor');
   const descendants = nodes.filter((node) => node.nodeType === 'descendant');
+  const yearBandWidth = Math.max(18, timelineMetrics.value.axisWidth / Math.max(1, timelineMetrics.value.span));
   const fallbackYear = timelineMetrics.value.fallbackYear;
   const rootYear = resolveNodeYear(root, fallbackYear) || fallbackYear;
 
   const output = [];
   output.push({
     ...root,
-    x: yearToX(rootYear),
+    x: yearToX(rootYear) * stretchInverseScale,
     y: centerY,
     radius: computeRadius(root, true),
     fill: 'var(--text)',
@@ -573,26 +742,72 @@ const layoutNodes = computed(() => {
       return String(left?.title || '').localeCompare(String(right?.title || ''));
     });
 
-    const sideNodes = sideSorted.map((item, index) => {
+    const yearCounts = new Map();
+    for (const item of sideSorted) {
+      const itemYear = resolveNodeYear(item, fallbackYear) || fallbackYear;
+      yearCounts.set(itemYear, (yearCounts.get(itemYear) || 0) + 1);
+    }
+    const orderedYears = [...yearCounts.keys()].sort((left, right) => left - right);
+    const yearOrder = new Map();
+    orderedYears.forEach((year, index) => {
+      yearOrder.set(year, index);
+    });
+    const totalYearBuckets = Math.max(1, orderedYears.length);
+    const laneGapX = Math.min(compact ? 16 : 22, Math.max(9, yearBandWidth * 0.22));
+    const maxHorizontalSpread = Math.max(12, yearBandWidth * 0.36);
+    const computedMaxColumnsByWidth = Math.max(
+      1,
+      Math.floor((maxHorizontalSpread * 2 + laneGapX) / laneGapX)
+    );
+    const maxColumnsPerYear = Math.max(
+      1,
+      Math.min(spacing.maxColumnsPerYear, computedMaxColumnsByWidth)
+    );
+    const yearLayouts = new Map();
+    for (const [year, count] of yearCounts.entries()) {
+      const columns = Math.max(1, Math.min(count, maxColumnsPerYear));
+      const rows = Math.max(1, Math.ceil(count / columns));
+      yearLayouts.set(year, {
+        columns,
+        rows,
+        index: 0
+      });
+    }
+
+    const sideNodes = sideSorted.map((item) => {
       const relationType = normalizeCitationType(item?.ctype || item?.relation_type);
       const relationRelevance = relationWeight(relationType);
       const generation = normalizeGeneration(item?.hop || item?.generation || 1);
       const color = citationConfig[relationType]?.color || citationConfig.mentioning.color;
       const nodeYear = resolveNodeYear(item, fallbackYear);
       const year = Number.isFinite(nodeYear) ? nodeYear : fallbackYear;
-      const verticalBaseGap = compact ? 58 : 70;
-      const relevanceShift = (1 - relationRelevance) * (compact ? 16 : 24);
-      const indexWave = ((index % 2 === 0 ? -1 : 1) * Math.floor(index / 2)) * (compact ? 10 : 14);
+      const yearLayout = yearLayouts.get(year) || { columns: 1, rows: 1, index: 0 };
+      const slot = yearLayout.index;
+      yearLayout.index += 1;
+      const colIndex = slot % yearLayout.columns;
+      const rowIndex = Math.floor(slot / yearLayout.columns);
+      const xSpreadOffset = clamp(
+        centeredBucketOffset(colIndex, yearLayout.columns) * laneGapX,
+        -maxHorizontalSpread,
+        maxHorizontalSpread
+      );
+      const yearBucketOffset = centeredBucketOffset(
+        yearOrder.get(year) ?? 0,
+        totalYearBuckets
+      ) * spacing.yearLaneGap;
+      const ySpreadOffset = centeredBucketOffset(rowIndex, yearLayout.rows) * spacing.yearRowGap;
+      const verticalBaseGap = spacing.generationGap;
+      const relevanceShift = (1 - relationRelevance) * spacing.relevanceShift;
       const baseY = nodeType === 'ancestor'
-        ? centerY - generation * verticalBaseGap - relevanceShift + indexWave
-        : centerY + generation * verticalBaseGap + relevanceShift + indexWave;
+        ? centerY - generation * verticalBaseGap - relevanceShift + ySpreadOffset + yearBucketOffset
+        : centerY + generation * verticalBaseGap + relevanceShift + ySpreadOffset + yearBucketOffset;
 
       return {
         ...item,
         relation_type: relationType,
         generation,
         citation_count: normalizeCitationCount(item?.citation_count || item?.citationCount),
-        x: yearToX(year),
+        x: (yearToX(year) + xSpreadOffset) * stretchInverseScale,
         y: baseY,
         radius: computeRadius(item),
         fill: 'var(--bg)',
@@ -608,28 +823,50 @@ const layoutNodes = computed(() => {
     });
 
     if (nodeType === 'ancestor') {
-      spreadNodesVertically(sideNodes, {
-        minGap: compact ? 34 : 40,
-        topBound: ancestorTopBound,
-        bottomBound: ancestorBottomBound
+      const overflowExpansion = Math.max(
+        spacing.generationGap,
+        spacing.nodeMinGap * Math.max(2, Math.ceil(sideNodes.length / 2))
+      );
+      const expandedTopBound = ancestorTopBound - overflowExpansion;
+      const expandedBottomBound = ancestorBottomBound + overflowExpansion;
+      spreadSideNodesByGeneration(sideNodes, {
+        nodeMinGap: spacing.nodeMinGap,
+        topBound: expandedTopBound,
+        bottomBound: expandedBottomBound
+      });
+      enforceNodeCircleSeparation(sideNodes, {
+        topBound: expandedTopBound,
+        bottomBound: expandedBottomBound,
+        padding: spacing.nodeCollisionPadding
       });
       spreadNodeLabels(sideNodes, {
-        minGap: compact ? 16 : 18,
-        topBound: ancestorTopBound + 14,
-        bottomBound: ancestorBottomBound + 26
+        minGap: spacing.labelMinGap,
+        topBound: expandedTopBound + 14,
+        bottomBound: expandedBottomBound + 26
       });
       return sideNodes;
     }
 
-    spreadNodesVertically(sideNodes, {
-      minGap: compact ? 34 : 40,
-      topBound: descendantTopBound,
-      bottomBound: descendantBottomBound
+    const overflowExpansion = Math.max(
+      spacing.generationGap,
+      spacing.nodeMinGap * Math.max(2, Math.ceil(sideNodes.length / 2))
+    );
+    const expandedTopBound = descendantTopBound - overflowExpansion;
+    const expandedBottomBound = descendantBottomBound + overflowExpansion;
+    spreadSideNodesByGeneration(sideNodes, {
+      nodeMinGap: spacing.nodeMinGap,
+      topBound: expandedTopBound,
+      bottomBound: expandedBottomBound
+    });
+    enforceNodeCircleSeparation(sideNodes, {
+      topBound: expandedTopBound,
+      bottomBound: expandedBottomBound,
+      padding: spacing.nodeCollisionPadding
     });
     spreadNodeLabels(sideNodes, {
-      minGap: compact ? 16 : 18,
-      topBound: descendantTopBound + 14,
-      bottomBound: descendantBottomBound - 8
+      minGap: spacing.labelMinGap,
+      topBound: expandedTopBound + 14,
+      bottomBound: expandedBottomBound - 8
     });
     return sideNodes;
   };
@@ -639,9 +876,11 @@ const layoutNodes = computed(() => {
 
   for (const node of output) {
     const offset = getNodeOffset(node.id);
-    if (!offset.x && !offset.y) continue;
-    node.x += offset.x;
-    node.y += offset.y;
+    const safeOffsetX = props.stretchTimeline ? 0 : offset.x;
+    const safeOffsetY = offset.y;
+    if (!safeOffsetX && !safeOffsetY) continue;
+    node.x += safeOffsetX;
+    node.y += safeOffsetY;
   }
 
   return output;
@@ -695,6 +934,70 @@ const layoutEdges = computed(() => {
   return result;
 });
 
+const layoutContentBounds = computed(() => {
+  const nodes = layoutNodes.value;
+  if (!Array.isArray(nodes) || !nodes.length) {
+    return null;
+  }
+
+  let minX = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+
+  for (const node of nodes) {
+    const radius = Math.max(8, Number(node?.radius || 0));
+    const labelDy = Number.isFinite(Number(node?.labelDy)) ? Number(node.labelDy) : 0;
+    const title = String(node?.shortTitle || node?.title || '');
+    const labelHalfWidth = clamp(14 + title.length * 3.2, 48, 142);
+
+    const nodeMinX = node.x - Math.max(radius + 8, labelHalfWidth);
+    const nodeMaxX = node.x + Math.max(radius + 8, labelHalfWidth);
+    const nodeMinY = Math.min(node.y - radius - 10, node.y + labelDy - 12);
+    const nodeMaxY = Math.max(node.y + radius + 10, node.y + labelDy + 6);
+
+    minX = Math.min(minX, nodeMinX);
+    maxX = Math.max(maxX, nodeMaxX);
+    minY = Math.min(minY, nodeMinY);
+    maxY = Math.max(maxY, nodeMaxY);
+  }
+
+  if (!Number.isFinite(minX) || !Number.isFinite(maxX) || !Number.isFinite(minY) || !Number.isFinite(maxY)) {
+    return null;
+  }
+
+  return {
+    minX,
+    maxX,
+    minY,
+    maxY,
+    width: Math.max(1, maxX - minX),
+    height: Math.max(1, maxY - minY)
+  };
+});
+
+const viewportScaleRange = computed(() => {
+  let minScale = VIEWPORT_DEFAULT_MIN_SCALE;
+  const bounds = layoutContentBounds.value;
+
+  if (bounds) {
+    const safeWidth = Math.max(160, Number(viewBox.value.width || 0) - VIEWPORT_FIT_PADDING * 2);
+    const safeHeight = Math.max(160, Number(viewBox.value.height || 0) - VIEWPORT_FIT_PADDING * 2);
+    const fitScaleX = safeWidth / bounds.width;
+    const fitScaleY = safeHeight / bounds.height;
+    const fitScale = props.stretchTimeline ? fitScaleY : Math.min(fitScaleX, fitScaleY);
+    if (Number.isFinite(fitScale) && fitScale > 0) {
+      minScale = Math.min(VIEWPORT_DEFAULT_MIN_SCALE, fitScale * 0.9);
+    }
+  }
+
+  minScale = clamp(minScale, VIEWPORT_ABSOLUTE_MIN_SCALE, VIEWPORT_MAX_SCALE);
+  return {
+    min: minScale,
+    max: VIEWPORT_MAX_SCALE
+  };
+});
+
 const detailMeta = computed(() => {
   if (!selectedNode.value) return '';
   const selected = selectedNode.value;
@@ -721,15 +1024,60 @@ function bezierPath(x1, y1, x2, y2) {
   return `M${x1},${y1} C${c1x},${c1y} ${c2x},${c2y} ${x2},${y2}`;
 }
 
-function getPointerCoordinates(event) {
-  if (!canvasRef.value) return { x: 0, y: 0 };
+function resolveCanvasMetrics() {
+  if (!canvasRef.value) {
+    return {
+      left: 0,
+      top: 0,
+      xRatio: 1,
+      yRatio: 1
+    };
+  }
   const rect = canvasRef.value.getBoundingClientRect();
-  const xRatio = rect.width > 0 ? viewBox.value.width / rect.width : 1;
-  const yRatio = rect.height > 0 ? viewBox.value.height / rect.height : 1;
   return {
-    x: (event.clientX - rect.left) * xRatio,
-    y: (event.clientY - rect.top) * yRatio
+    left: rect.left,
+    top: rect.top,
+    xRatio: rect.width > 0 ? viewBox.value.width / rect.width : 1,
+    yRatio: rect.height > 0 ? viewBox.value.height / rect.height : 1
   };
+}
+
+function getPointerCoordinates(event, metrics = null) {
+  const safeMetrics = metrics || resolveCanvasMetrics();
+  return {
+    x: (event.clientX - safeMetrics.left) * safeMetrics.xRatio,
+    y: (event.clientY - safeMetrics.top) * safeMetrics.yRatio
+  };
+}
+
+function normalizeWheelDelta(event) {
+  let delta = Number(event.deltaY || 0);
+  if (!Number.isFinite(delta)) return 0;
+  if (event.deltaMode === 1) {
+    delta *= 16;
+  } else if (event.deltaMode === 2) {
+    delta *= Math.max(220, viewBox.value.height);
+  }
+  return delta;
+}
+
+function resolveWheelZoomSensitivity(absDelta, event) {
+  let sensitivity = WHEEL_ZOOM_SENSITIVITY.extreme;
+  if (absDelta <= 4) {
+    sensitivity = WHEEL_ZOOM_SENSITIVITY.tiny;
+  } else if (absDelta <= 12) {
+    sensitivity = WHEEL_ZOOM_SENSITIVITY.small;
+  } else if (absDelta <= 28) {
+    sensitivity = WHEEL_ZOOM_SENSITIVITY.medium;
+  } else if (absDelta <= 60) {
+    sensitivity = WHEEL_ZOOM_SENSITIVITY.large;
+  } else if (absDelta <= 120) {
+    sensitivity = WHEEL_ZOOM_SENSITIVITY.huge;
+  }
+  if (event.ctrlKey || event.metaKey) {
+    sensitivity *= 1.25;
+  }
+  return sensitivity;
 }
 
 function getNodeDragOffset(nodeId) {
@@ -753,7 +1101,57 @@ function setNodeDragOffset(nodeId, nextOffset) {
 }
 
 function normalizeScale(value) {
-  return clamp(value, VIEWPORT_MIN_SCALE, VIEWPORT_MAX_SCALE);
+  const limits = viewportScaleRange.value;
+  return clamp(value, limits.min, limits.max);
+}
+
+function buildCenteredViewport(scaleValue) {
+  const nextScale = normalizeScale(scaleValue);
+  const bounds = layoutContentBounds.value;
+  if (!bounds) {
+    return {
+      x: 0,
+      y: 0,
+      scale: nextScale
+    };
+  }
+  if (props.stretchTimeline) {
+    return {
+      x: 0,
+      y: (viewBox.value.height - bounds.height * nextScale) / 2 - bounds.minY * nextScale,
+      scale: nextScale
+    };
+  }
+  return {
+    x: (viewBox.value.width - bounds.width * nextScale) / 2 - bounds.minX * nextScale,
+    y: (viewBox.value.height - bounds.height * nextScale) / 2 - bounds.minY * nextScale,
+    scale: nextScale
+  };
+}
+
+function clampViewportScaleAroundCenter() {
+  const current = viewport.value;
+  const nextScale = normalizeScale(current.scale);
+  if (props.stretchTimeline && current.x !== 0) {
+    current.x = 0;
+  }
+  if (Math.abs(nextScale - current.scale) < 0.0001) return;
+  if (props.stretchTimeline) {
+    const anchorY = viewBox.value.height / 2;
+    const ratio = nextScale / current.scale;
+    current.scale = nextScale;
+    current.x = 0;
+    current.y = anchorY - (anchorY - current.y) * ratio;
+    return;
+  }
+  const anchor = {
+    x: viewBox.value.width / 2,
+    y: viewBox.value.height / 2
+  };
+  const ratio = nextScale / current.scale;
+  current.scale = nextScale;
+  current.x = anchor.x - (anchor.x - current.x) * ratio;
+  current.y = anchor.y - (anchor.y - current.y) * ratio;
 }
 
 function clearPanState() {
@@ -763,7 +1161,8 @@ function clearPanState() {
     startX: 0,
     startY: 0,
     originX: 0,
-    originY: 0
+    originY: 0,
+    metrics: null
   };
 }
 
@@ -776,7 +1175,8 @@ function clearNodeDragState() {
     startY: 0,
     originOffsetX: 0,
     originOffsetY: 0,
-    moved: false
+    moved: false,
+    metrics: null
   };
 }
 
@@ -795,39 +1195,47 @@ function releasePointerCapture(pointerId) {
 function handleCanvasWheel(event) {
   const pointer = getPointerCoordinates(event);
   const currentScale = viewport.value.scale;
-  const wheelDelta = Number(event.deltaY || 0);
+  const currentY = viewport.value.y;
+  const currentX = viewport.value.x;
+  const wheelDelta = normalizeWheelDelta(event);
   if (!Number.isFinite(wheelDelta) || wheelDelta === 0) return;
-  const boundedDelta = clamp(wheelDelta, -220, 220);
-  const scaleFactor = Math.exp(-boundedDelta * WHEEL_ZOOM_SENSITIVITY);
+  const boundedDelta = clamp(wheelDelta, -WHEEL_DELTA_LIMIT, WHEEL_DELTA_LIMIT);
+  if (Math.abs(boundedDelta) < WHEEL_MIN_EFFECT_DELTA) return;
+  const sensitivity = resolveWheelZoomSensitivity(Math.abs(boundedDelta), event);
+  const scaleFactor = Math.exp(-boundedDelta * sensitivity);
   const nextScale = normalizeScale(currentScale * scaleFactor);
   if (Math.abs(nextScale - currentScale) < 0.0001) return;
   const ratio = nextScale / currentScale;
-
-  viewport.value = {
-    scale: nextScale,
-    x: pointer.x - (pointer.x - viewport.value.x) * ratio,
-    y: pointer.y - (pointer.y - viewport.value.y) * ratio
-  };
+  viewport.value.scale = nextScale;
+  if (props.stretchTimeline) {
+    viewport.value.x = 0;
+    viewport.value.y = pointer.y - (pointer.y - currentY) * ratio;
+    return;
+  }
+  viewport.value.x = pointer.x - (pointer.x - currentX) * ratio;
+  viewport.value.y = pointer.y - (pointer.y - currentY) * ratio;
 }
 
 function handleCanvasPointerDown(event) {
   if (nodeDragState.value.active) return;
   if (event.pointerType === 'mouse' && event.button !== 0) return;
-  const pointer = getPointerCoordinates(event);
+  const metrics = resolveCanvasMetrics();
+  const pointer = getPointerCoordinates(event, metrics);
   panState.value = {
     active: true,
     pointerId: event.pointerId,
     startX: pointer.x,
     startY: pointer.y,
-    originX: viewport.value.x,
-    originY: viewport.value.y
+    originX: props.stretchTimeline ? 0 : viewport.value.x,
+    originY: viewport.value.y,
+    metrics
   };
   canvasRef.value?.setPointerCapture?.(event.pointerId);
 }
 
 function handleCanvasPointerMove(event) {
   if (nodeDragState.value.active && event.pointerId === nodeDragState.value.pointerId) {
-    const pointer = getPointerCoordinates(event);
+    const pointer = getPointerCoordinates(event, nodeDragState.value.metrics);
     const deltaX = (pointer.x - nodeDragState.value.startX) / viewport.value.scale;
     const deltaY = (pointer.y - nodeDragState.value.startY) / viewport.value.scale;
     const moved = Math.abs(deltaX) > NODE_DRAG_THRESHOLD || Math.abs(deltaY) > NODE_DRAG_THRESHOLD;
@@ -843,12 +1251,11 @@ function handleCanvasPointerMove(event) {
   }
 
   if (!panState.value.active || event.pointerId !== panState.value.pointerId) return;
-  const pointer = getPointerCoordinates(event);
-  viewport.value = {
-    ...viewport.value,
-    x: panState.value.originX + (pointer.x - panState.value.startX),
-    y: panState.value.originY + (pointer.y - panState.value.startY)
-  };
+  const pointer = getPointerCoordinates(event, panState.value.metrics);
+  viewport.value.x = props.stretchTimeline
+    ? 0
+    : panState.value.originX + (pointer.x - panState.value.startX);
+  viewport.value.y = panState.value.originY + (pointer.y - panState.value.startY);
 }
 
 function handleCanvasPointerUp(event) {
@@ -874,7 +1281,8 @@ function startNodeDrag(event, node) {
   if (event.pointerType === 'mouse' && event.button !== 0) return;
   const nodeId = String(node?.id || '').trim();
   if (!nodeId) return;
-  const pointer = getPointerCoordinates(event);
+  const metrics = resolveCanvasMetrics();
+  const pointer = getPointerCoordinates(event, metrics);
   const originOffset = getNodeDragOffset(nodeId);
   nodeDragState.value = {
     active: true,
@@ -884,7 +1292,8 @@ function startNodeDrag(event, node) {
     startY: pointer.y,
     originOffsetX: originOffset.x,
     originOffsetY: originOffset.y,
-    moved: false
+    moved: false,
+    metrics
   };
   clearPanState();
   canvasRef.value?.setPointerCapture?.(event.pointerId);
@@ -928,7 +1337,7 @@ function hideTooltip() {
 
 function refreshViewportSize() {
   const viewportWidth = window.innerWidth || 1280;
-  let minWidth = 760;
+  let minWidth = props.stretchTimeline ? 320 : 760;
   let minHeight = 420;
   if (viewportWidth <= 768) {
     minWidth = 260;
@@ -940,10 +1349,18 @@ function refreshViewportSize() {
   const width = Math.max(minWidth, Math.floor(canvasRef.value?.clientWidth || 920));
   const height = Math.max(minHeight, Math.floor(canvasRef.value?.clientHeight || 560));
   viewBox.value = { width, height };
+  clampViewportScaleAroundCenter();
+  if (props.stretchTimeline && viewport.value.x !== 0) {
+    viewport.value.x = 0;
+  }
+}
+
+function resolveFullscreenHost() {
+  return canvasRef.value?.closest?.(FULLSCREEN_HOST_SELECTOR) || null;
 }
 
 function updateFullscreenState() {
-  const layout = canvasRef.value?.closest?.('.workflow-layout');
+  const layout = resolveFullscreenHost();
   if (!layout) {
     isFullscreen.value = false;
     return;
@@ -952,7 +1369,7 @@ function updateFullscreenState() {
 }
 
 async function toggleFullscreen() {
-  const layout = canvasRef.value?.closest?.('.workflow-layout');
+  const layout = resolveFullscreenHost();
   if (!layout) return;
   const nextState = !layout.classList.contains('is-lineage-fullscreen');
   layout.classList.toggle('is-lineage-fullscreen', nextState);
@@ -963,6 +1380,7 @@ async function toggleFullscreen() {
 
 onMounted(() => {
   refreshViewportSize();
+  viewport.value = buildCenteredViewport(viewport.value.scale);
   resizeObserver = new ResizeObserver(() => {
     refreshViewportSize();
   });
@@ -972,11 +1390,25 @@ onMounted(() => {
   updateFullscreenState();
 });
 
+watch(
+  () => props.lineage,
+  async () => {
+    selectedNode.value = null;
+    nodeOffsetMap.value = {};
+    clearPanState();
+    clearNodeDragState();
+    await nextTick();
+    refreshViewportSize();
+    viewport.value = buildCenteredViewport(1);
+  },
+  { deep: true }
+);
+
 onBeforeUnmount(() => {
   if (resizeObserver) {
     resizeObserver.disconnect();
   }
-  const layout = canvasRef.value?.closest?.('.workflow-layout');
+  const layout = resolveFullscreenHost();
   if (layout && layout.classList.contains('is-lineage-fullscreen')) {
     layout.classList.remove('is-lineage-fullscreen');
   }
@@ -1070,6 +1502,12 @@ onBeforeUnmount(() => {
   height: 30px;
   pointer-events: none;
   z-index: 5;
+}
+
+.blood-time-axis-track {
+  position: absolute;
+  inset: 0;
+  transform-origin: 0 0;
 }
 
 .blood-year-line {

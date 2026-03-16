@@ -33,6 +33,7 @@
 
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 
 import AppHeader from '../components/layout/AppHeader.vue';
 import { useAuthStore } from '../stores/authStore';
@@ -57,20 +58,184 @@ const paperResultView = ref('graph');
 const paperLineageEnabled = ref(false);
 const isDomainWorkflow = computed(() => workflowSeed.value.input_type === 'domain');
 const { isAuthenticated, loadSession } = useAuthStore();
+const router = useRouter();
+const route = useRoute();
+const WORKFLOW_SEED_STORAGE_KEY = 'starfish:workflow-seed';
 
-function enterWorkflow(payload) {
-  if (!isAuthenticated.value) return;
+const WORKFLOW_ROUTE_NAMES = new Set([
+  'research-domain-graph',
+  'research-paper-graph',
+  'research-paper-lineage'
+]);
 
-  workflowSeed.value = { ...payload };
-  const isDomain = payload.input_type === 'domain';
+function normalizeText(value) {
+  return String(value || '').trim();
+}
+
+function parseBooleanLike(value) {
+  if (typeof value === 'boolean') return value;
+  const normalized = normalizeText(value).toLowerCase();
+  return ['1', 'true', 'yes', 'y', 'on'].includes(normalized);
+}
+
+function parseOptionalPositiveInteger(value) {
+  const parsed = Number.parseInt(normalizeText(value), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return parsed;
+}
+
+function normalizeWorkflowSeed(payload = {}) {
+  const normalizedInputType = normalizeText(payload.input_type).toLowerCase();
+  const inputType = normalizedInputType === 'domain'
+    ? 'domain'
+    : (normalizedInputType === 'doi' ? 'doi' : 'arxiv_id');
+  const inputValue = normalizeText(payload.input_value);
+  return {
+    input_type: inputType,
+    input_value: inputValue,
+    paper_range_years: inputType === 'domain'
+      ? parseOptionalPositiveInteger(payload.paper_range_years)
+      : null,
+    quick_mode: parseBooleanLike(payload.quick_mode),
+    depth: parseOptionalPositiveInteger(payload.depth) || 2
+  };
+}
+
+function persistWorkflowSeed(seed) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.setItem(WORKFLOW_SEED_STORAGE_KEY, JSON.stringify(seed || {}));
+  } catch {
+    // ignore storage write failures
+  }
+}
+
+function restoreWorkflowSeed() {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.sessionStorage.getItem(WORKFLOW_SEED_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    const normalized = normalizeWorkflowSeed(parsed || {});
+    if (!normalized.input_value) return null;
+    return normalized;
+  } catch {
+    return null;
+  }
+}
+
+function clearPersistedWorkflowSeed() {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.removeItem(WORKFLOW_SEED_STORAGE_KEY);
+  } catch {
+    // ignore storage remove failures
+  }
+}
+
+function applyHeaderForSeed(seed) {
+  const isDomain = seed.input_type === 'domain';
   headerStep.value = {
     index: 1,
     total: isDomain ? 4 : 3,
     title: isDomain ? '领域调研' : '论文检索'
   };
+}
+
+function resolveWorkflowRouteName() {
+  if (!workflowActive.value) return 'home';
+  if (workflowSeed.value.input_type === 'domain') return 'research-domain-graph';
+  return paperResultView.value === 'lineage'
+    ? 'research-paper-lineage'
+    : 'research-paper-graph';
+}
+
+let syncingRoute = false;
+
+async function syncRouteFromWorkflow({ replace = true } = {}) {
+  const targetName = resolveWorkflowRouteName();
+  if (String(route.name || '') === targetName) {
+    return;
+  }
+  syncingRoute = true;
+  try {
+    if (replace) {
+      await router.replace({ name: targetName });
+    } else {
+      await router.push({ name: targetName });
+    }
+  } finally {
+    syncingRoute = false;
+  }
+}
+
+function resetWorkflowState() {
+  workflowActive.value = false;
+  paperResultView.value = 'graph';
+  paperLineageEnabled.value = false;
+}
+
+function isSeedCompatibleWithRoute(seed, routeName) {
+  if (!seed) return false;
+  if (routeName === 'research-domain-graph') {
+    return seed.input_type === 'domain';
+  }
+  if (routeName === 'research-paper-graph' || routeName === 'research-paper-lineage') {
+    return seed.input_type !== 'domain';
+  }
+  return true;
+}
+
+async function applyRouteToWorkflow() {
+  if (syncingRoute) return;
+  const routeName = String(route.name || '');
+
+  if (routeName === 'home') {
+    if (workflowActive.value) {
+      resetWorkflowState();
+    }
+    return;
+  }
+
+  if (!WORKFLOW_ROUTE_NAMES.has(routeName)) return;
+
+  if (!isAuthenticated.value) {
+    resetWorkflowState();
+    clearPersistedWorkflowSeed();
+    await router.replace({ name: 'home' });
+    return;
+  }
+
+  const seed = restoreWorkflowSeed();
+  if (!seed || !isSeedCompatibleWithRoute(seed, routeName)) {
+    resetWorkflowState();
+    clearPersistedWorkflowSeed();
+    await router.replace({ name: 'home' });
+    return;
+  }
+
+  workflowSeed.value = seed;
+  applyHeaderForSeed(seed);
+  workflowActive.value = true;
+
+  if (routeName === 'research-paper-lineage') {
+    paperResultView.value = 'lineage';
+  } else {
+    paperResultView.value = 'graph';
+  }
+}
+
+async function enterWorkflow(payload) {
+  if (!isAuthenticated.value) return;
+
+  workflowSeed.value = normalizeWorkflowSeed(payload);
+  if (!workflowSeed.value.input_value) return;
+  persistWorkflowSeed(workflowSeed.value);
+  applyHeaderForSeed(workflowSeed.value);
   paperResultView.value = 'graph';
   paperLineageEnabled.value = false;
   workflowActive.value = true;
+  await syncRouteFromWorkflow({ replace: false });
 }
 
 function updateHeaderStep(payload) {
@@ -81,37 +246,57 @@ function updateHeaderStep(payload) {
   };
 }
 
-function exitWorkflow() {
-  workflowActive.value = false;
-  paperResultView.value = 'graph';
-  paperLineageEnabled.value = false;
+async function exitWorkflow() {
+  resetWorkflowState();
+  clearPersistedWorkflowSeed();
+  await syncRouteFromWorkflow({ replace: false });
 }
 
-function handleWorkflowResultViewChange(nextView) {
+async function handleWorkflowResultViewChange(nextView) {
   const normalized = String(nextView || '').trim().toLowerCase();
   if (normalized === 'lineage' && !paperLineageEnabled.value) {
     paperResultView.value = 'graph';
+    await syncRouteFromWorkflow();
     return;
   }
   paperResultView.value = normalized === 'lineage' ? 'lineage' : 'graph';
+  await syncRouteFromWorkflow();
 }
 
-function handleLineageAvailabilityChange(enabled) {
+async function handleLineageAvailabilityChange(enabled) {
   paperLineageEnabled.value = Boolean(enabled);
   if (!paperLineageEnabled.value && paperResultView.value === 'lineage') {
     paperResultView.value = 'graph';
+    await syncRouteFromWorkflow();
   }
 }
 
 watch(isAuthenticated, (next) => {
   if (!next && workflowActive.value) {
-    workflowActive.value = false;
-    paperResultView.value = 'graph';
-    paperLineageEnabled.value = false;
+    resetWorkflowState();
+    clearPersistedWorkflowSeed();
+    void syncRouteFromWorkflow();
   }
 });
 
-onMounted(() => {
-  void loadSession();
+watch(
+  () => workflowSeed.value,
+  (nextSeed) => {
+    if (!workflowActive.value) return;
+    persistWorkflowSeed(nextSeed);
+  },
+  { deep: true }
+);
+
+watch(
+  () => route.fullPath,
+  () => {
+    void applyRouteToWorkflow();
+  }
+);
+
+onMounted(async () => {
+  await loadSession();
+  await applyRouteToWorkflow();
 });
 </script>

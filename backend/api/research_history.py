@@ -4,6 +4,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from api.dependencies import get_current_user_profile
 from models.schemas import (
+    ResearchHistoryBatchDeleteRequest,
+    ResearchHistoryBatchDeleteResponse,
+    ResearchHistoryDeleteResponse,
     ResearchHistoryDetailResponse,
     ResearchHistoryLineageUpdateRequest,
     ResearchHistoryLineageUpdateResponse,
@@ -40,8 +43,23 @@ def update_research_history_lineage_status(
         seed_paper_id=request.seed_paper_id,
         ancestor_count=request.ancestor_count,
         descendant_count=request.descendant_count,
+        lineage_payload=request.lineage_payload,
     )
     return ResearchHistoryLineageUpdateResponse(updated=updated)
+
+
+@router.post("/batch-delete", response_model=ResearchHistoryBatchDeleteResponse)
+def batch_delete_research_history(
+    request: ResearchHistoryBatchDeleteRequest,
+    user: UserProfile = Depends(get_current_user_profile),
+    history_service: ResearchHistoryService = Depends(get_research_history_service),
+) -> ResearchHistoryBatchDeleteResponse:
+    deleted_ids = history_service.delete_histories(user=user, history_ids=request.history_ids)
+    return ResearchHistoryBatchDeleteResponse(
+        deleted=bool(deleted_ids),
+        deleted_count=len(deleted_ids),
+        deleted_ids=deleted_ids,
+    )
 
 
 @router.get("/{history_id}", response_model=ResearchHistoryDetailResponse)
@@ -54,3 +72,15 @@ def get_research_history_detail(
     if payload is None:
         raise HTTPException(status_code=404, detail="research_history_not_found")
     return payload
+
+
+@router.delete("/{history_id}", response_model=ResearchHistoryDeleteResponse)
+def delete_research_history(
+    history_id: str,
+    user: UserProfile = Depends(get_current_user_profile),
+    history_service: ResearchHistoryService = Depends(get_research_history_service),
+) -> ResearchHistoryDeleteResponse:
+    deleted = history_service.delete_history(user=user, history_id=history_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="research_history_not_found")
+    return ResearchHistoryDeleteResponse(deleted=True)

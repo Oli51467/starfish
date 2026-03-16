@@ -136,6 +136,7 @@ class ResearchHistoryRepository:
                        search_range,
                        search_time,
                        graph_payload,
+                       lineage_payload,
                        lineage_ready,
                        lineage_ancestor_count,
                        lineage_descendant_count,
@@ -169,6 +170,7 @@ class ResearchHistoryRepository:
                 "seed_paper_id": str(row.get("lineage_seed_paper_id") or ""),
                 "updated_at": row.get("lineage_updated_at"),
             },
+            "lineage_payload": row.get("lineage_payload") if isinstance(row.get("lineage_payload"), dict) else None,
             "graph_payload": payload,
         }
 
@@ -180,6 +182,7 @@ class ResearchHistoryRepository:
         seed_paper_id: str,
         ancestor_count: int,
         descendant_count: int,
+        lineage_payload: dict[str, Any] | None = None,
     ) -> bool:
         self._ensure_table()
         safe_user_id = str(user_id or "").strip()
@@ -197,6 +200,8 @@ class ResearchHistoryRepository:
         except (TypeError, ValueError):
             safe_descendant_count = 0
 
+        safe_lineage_payload = lineage_payload if isinstance(lineage_payload, dict) else None
+
         with self._connect() as conn, conn.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 """
@@ -212,6 +217,7 @@ class ResearchHistoryRepository:
                     lineage_ancestor_count = %s,
                     lineage_descendant_count = %s,
                     lineage_seed_paper_id = %s,
+                    lineage_payload = COALESCE(%s::jsonb, lineage_payload),
                     lineage_updated_at = NOW()
                 WHERE r.ctid IN (SELECT ctid FROM target)
                 RETURNING history_id
@@ -222,10 +228,66 @@ class ResearchHistoryRepository:
                     safe_ancestor_count,
                     safe_descendant_count,
                     safe_seed_paper_id,
+                    Json(safe_lineage_payload) if safe_lineage_payload is not None else None,
                 ),
             )
             updated = cursor.fetchone()
         return bool(updated and str(updated.get("history_id") or "").strip())
+
+    def delete_graph_record(self, *, user_id: str, history_id: str) -> bool:
+        self._ensure_table()
+        safe_user_id = str(user_id or "").strip()
+        safe_history_id = str(history_id or "").strip()
+        if not safe_user_id or not safe_history_id:
+            return False
+
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                DELETE FROM research_history_records
+                WHERE user_id = %s AND history_id = %s
+                RETURNING history_id
+                """,
+                (safe_user_id, safe_history_id),
+            )
+            deleted = cursor.fetchone()
+        return bool(deleted and str(deleted.get("history_id") or "").strip())
+
+    def delete_graph_records(self, *, user_id: str, history_ids: list[str]) -> list[str]:
+        self._ensure_table()
+        safe_user_id = str(user_id or "").strip()
+        if not safe_user_id:
+            return []
+
+        sanitized_ids: list[str] = []
+        seen: set[str] = set()
+        for raw_id in history_ids or []:
+            safe_id = str(raw_id or "").strip()
+            if not safe_id or safe_id in seen:
+                continue
+            seen.add(safe_id)
+            sanitized_ids.append(safe_id)
+
+        if not sanitized_ids:
+            return []
+
+        placeholders = ", ".join(["%s"] * len(sanitized_ids))
+        query = f"""
+            DELETE FROM research_history_records
+            WHERE user_id = %s AND history_id IN ({placeholders})
+            RETURNING history_id
+        """
+
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(query, (safe_user_id, *sanitized_ids))
+            rows = cursor.fetchall() or []
+
+        deleted_set = {
+            str(row.get("history_id") or "").strip()
+            for row in rows
+            if str(row.get("history_id") or "").strip()
+        }
+        return [history_id for history_id in sanitized_ids if history_id in deleted_set]
 
     def _ensure_table(self) -> None:
         if self._table_ready:
@@ -250,6 +312,7 @@ class ResearchHistoryRepository:
                         lineage_ancestor_count INTEGER NOT NULL DEFAULT 0,
                         lineage_descendant_count INTEGER NOT NULL DEFAULT 0,
                         lineage_seed_paper_id TEXT NOT NULL DEFAULT '',
+                        lineage_payload JSONB,
                         lineage_updated_at TIMESTAMPTZ,
                         search_time TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     )
@@ -289,6 +352,12 @@ class ResearchHistoryRepository:
                     """
                     ALTER TABLE research_history_records
                     ADD COLUMN IF NOT EXISTS lineage_updated_at TIMESTAMPTZ
+                    """
+                )
+                cursor.execute(
+                    """
+                    ALTER TABLE research_history_records
+                    ADD COLUMN IF NOT EXISTS lineage_payload JSONB
                     """
                 )
                 cursor.execute(

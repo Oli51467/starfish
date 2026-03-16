@@ -19,9 +19,54 @@
                   <tr>
                     <th>研究类型</th>
                     <th>搜索记录</th>
-                    <th>搜索范围</th>
-                    <th>血缘树</th>
                     <th>搜索时间</th>
+                    <th class="history-actions-head">
+                      <div v-if="batchSelectMode" class="history-batch-tools">
+                        <button
+                          class="history-action-icon-btn"
+                          type="button"
+                          title="取消多选"
+                          aria-label="取消多选"
+                          :disabled="batchDeleting"
+                          @click.stop="cancelBatchSelectMode"
+                          @mousedown.stop
+                        >
+                          <svg viewBox="0 0 16 16" aria-hidden="true">
+                            <path d="M4 4l8 8" />
+                            <path d="M12 4L4 12" />
+                          </svg>
+                        </button>
+                        <button
+                          class="history-action-icon-btn is-danger"
+                          type="button"
+                          title="删除所选"
+                          aria-label="删除所选"
+                          :disabled="selectedCount === 0 || batchDeleting || deletingHistoryId !== '' || listLoading"
+                          @click.stop="deleteSelectedRecords"
+                          @mousedown.stop
+                        >
+                          <svg viewBox="0 0 16 16" aria-hidden="true">
+                            <path d="M3.5 4.5h9" />
+                            <path d="M6.2 4.5v-1a1 1 0 0 1 1-1h1.6a1 1 0 0 1 1 1v1" />
+                            <path d="M5.2 6.1v5.3" />
+                            <path d="M8 6.1v5.3" />
+                            <path d="M10.8 6.1v5.3" />
+                            <path d="M4.4 4.5l.5 7a1 1 0 0 0 1 .9h4.2a1 1 0 0 0 1-.9l.5-7" />
+                          </svg>
+                        </button>
+                      </div>
+                      <input
+                        v-else
+                        class="history-check-input"
+                        type="checkbox"
+                        :checked="false"
+                        aria-label="进入多选删除"
+                        title="进入多选删除"
+                        @click.stop
+                        @mousedown.stop
+                        @change="enableBatchSelectMode($event.target.checked)"
+                      />
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -39,13 +84,42 @@
                   >
                     <td>{{ mapResearchType(item.research_type) }}</td>
                     <td class="history-record-cell" :title="item.search_record">{{ item.search_record }}</td>
-                    <td>{{ mapSearchRange(item.search_range, item.research_type) }}</td>
-                    <td>
-                      <span class="history-lineage-badge mono" :class="mapLineageStatusClass(item)">
-                        {{ mapLineageStatusLabel(item) }}
-                      </span>
-                    </td>
                     <td>{{ formatDateTime(item.search_time) }}</td>
+                    <td class="history-actions-cell" @click.stop @mousedown.stop>
+                      <div class="history-action-slot">
+                        <input
+                          v-if="batchSelectMode"
+                          class="history-check-input"
+                          type="checkbox"
+                          :checked="isSelected(item.history_id)"
+                          :aria-label="`选择 ${item.search_record}`"
+                          @click.stop
+                          @mousedown.stop
+                          @change="toggleRowSelection(item.history_id, $event.target.checked)"
+                        />
+                        <button
+                          v-else
+                          class="history-delete-btn"
+                          type="button"
+                          :disabled="deletingHistoryId === item.history_id || batchDeleting"
+                          :aria-label="`删除 ${item.search_record}`"
+                          title="删除"
+                          @click.stop="deleteRecord(item.history_id)"
+                          @mousedown.stop
+                          @keydown.enter.stop.prevent
+                          @keydown.space.stop.prevent
+                        >
+                          <svg viewBox="0 0 16 16" aria-hidden="true">
+                            <path d="M3.5 4.5h9" />
+                            <path d="M6.2 4.5v-1a1 1 0 0 1 1-1h1.6a1 1 0 0 1 1 1v1" />
+                            <path d="M5.2 6.1v5.3" />
+                            <path d="M8 6.1v5.3" />
+                            <path d="M10.8 6.1v5.3" />
+                            <path d="M4.4 4.5l.5 7a1 1 0 0 0 1 .9h4.2a1 1 0 0 0 1-.9l.5-7" />
+                          </svg>
+                        </button>
+                      </div>
+                    </td>
                   </tr>
                 </tbody>
               </table>
@@ -71,8 +145,46 @@
         <article class="panel history-detail-panel">
           <LoadingState v-if="detailLoading" message="正在加载图谱详情..." />
           <p v-else-if="!selectedDetail" class="muted history-empty">请选择一条记录查看知识图谱。</p>
-          <KnowledgeGraphCanvas v-else-if="domainGraphData" :graph="domainGraphData" :show-tools="true" />
-          <KnowledgeGraphView v-else :graph-data="selectedDetail.graph" mode="panorama_only" />
+          <div v-else class="history-detail-content">
+            <div v-if="showDetailTabs" class="history-detail-tabbar" role="tablist" aria-label="历史详情视图切换">
+              <div class="history-detail-tabs">
+                <button
+                  class="history-detail-tab mono"
+                  :class="{ 'is-active': activeDetailTab === 'graph' }"
+                  type="button"
+                  role="tab"
+                  :aria-selected="activeDetailTab === 'graph'"
+                  @click="activeDetailTab = 'graph'"
+                >
+                  知识图谱
+                </button>
+                <button
+                  class="history-detail-tab mono"
+                  :class="{ 'is-active': activeDetailTab === 'lineage' }"
+                  type="button"
+                  role="tab"
+                  :aria-selected="activeDetailTab === 'lineage'"
+                  @click="activeDetailTab = 'lineage'"
+                >
+                  血缘树
+                </button>
+              </div>
+            </div>
+            <div class="history-detail-stage">
+              <BloodLineageTree
+                v-if="activeDetailTab === 'lineage' && historyLineageData"
+                :lineage="historyLineageData"
+                :stretch-timeline="true"
+              />
+              <KnowledgeGraphCanvas v-else-if="domainGraphData" :graph="domainGraphData" :show-tools="true" />
+              <KnowledgeGraphView
+                v-else
+                ref="historyGraphViewRef"
+                :graph-data="selectedDetail.graph"
+                mode="panorama_only"
+              />
+            </div>
+          </div>
         </article>
       </section>
     </main>
@@ -80,36 +192,55 @@
 </template>
 
 <script setup>
-import { computed, onMounted } from 'vue';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 
 import AppHeader from '../components/layout/AppHeader.vue';
 import ErrorBoundary from '../components/common/ErrorBoundary.vue';
+import BloodLineageTree from '../components/lineage/BloodLineageTree.vue';
 import KnowledgeGraphCanvas from '../components/graph/KnowledgeGraphCanvas.vue';
 import KnowledgeGraphView from '../components/graph/KnowledgeGraphView.vue';
 import { adaptDomainGraphFromHistoryGraph } from '../components/history/historyGraphAdapter';
 import LoadingState from '../components/common/LoadingState.vue';
+import { useGlobalConfirmDialog } from '../composables/useGlobalConfirmDialog';
 import { useAuthStore } from '../stores/authStore';
 import { useResearchHistoryStore } from '../stores/researchHistoryStore';
 
 const router = useRouter();
 const { accessToken, isAuthenticated, loadSession } = useAuthStore();
+const { askForConfirm } = useGlobalConfirmDialog();
 const {
   records,
   selectedDetail,
   listLoading,
   detailLoading,
+  deletingHistoryId,
+  batchDeleting,
   errorMessage,
   page,
+  pageSize,
   total,
   totalPages,
   hasRecords,
   fetchHistoryList,
   fetchHistoryDetail,
+  deleteHistoryRecord,
+  batchDeleteHistoryRecords,
   clearSelectedDetail
 } = useResearchHistoryStore();
 
+const activeDetailTab = ref('graph');
+const historyGraphViewRef = ref(null);
+const selectedHistoryIds = ref([]);
+const batchSelectMode = ref(false);
 const activeHistoryId = computed(() => String(selectedDetail.value?.history_id || '').trim());
+const selectedHistoryIdSet = computed(() => new Set(selectedHistoryIds.value));
+const selectedCount = computed(() => selectedHistoryIds.value.length);
+const currentPageHistoryIds = computed(() => {
+  return records.value
+    .map((item) => String(item?.history_id || '').trim())
+    .filter(Boolean);
+});
 const domainGraphData = computed(() => {
   const detail = selectedDetail.value;
   if (!detail || String(detail.research_type || '').toLowerCase() !== 'domain') {
@@ -122,6 +253,14 @@ const domainGraphData = computed(() => {
 
   return adaptDomainGraphFromHistoryGraph(detail.graph, detail.search_record);
 });
+const historyLineageData = computed(() => {
+  const raw = selectedDetail.value?.lineage_graph;
+  if (!raw || typeof raw !== 'object') return null;
+  const root = raw.root || raw.root_paper;
+  if (!root || typeof root !== 'object') return null;
+  return raw;
+});
+const showDetailTabs = computed(() => Boolean(historyLineageData.value));
 
 function goHome() {
   router.push({ name: 'home' });
@@ -135,44 +274,139 @@ function mapResearchType(type) {
   return '未知类型';
 }
 
-function mapSearchRange(searchRange, researchType) {
-  const value = String(searchRange || '').trim();
-  if (value) return value;
-  return String(researchType || '').toLowerCase() === 'domain' ? '所有时间' : '不适用';
-}
-
-function mapLineageStatusLabel(item) {
-  const researchType = String(item?.research_type || '').trim().toLowerCase();
-  if (researchType === 'domain') return '不适用';
-  const lineage = item?.lineage || {};
-  if (!lineage?.generated) return '未生成';
-  const ancestors = Number(lineage?.ancestor_count || 0);
-  const descendants = Number(lineage?.descendant_count || 0);
-  return `已生成 ${Math.max(0, Math.round(ancestors))}/${Math.max(0, Math.round(descendants))}`;
-}
-
-function mapLineageStatusClass(item) {
-  const researchType = String(item?.research_type || '').trim().toLowerCase();
-  if (researchType === 'domain') return 'is-na';
-  return item?.lineage?.generated ? 'is-done' : 'is-pending';
-}
-
 function formatDateTime(rawValue) {
   const date = new Date(rawValue);
   if (Number.isNaN(date.getTime())) return '-';
   return date.toLocaleString('zh-CN', { hour12: false });
 }
 
+function isSelected(historyId) {
+  const safeHistoryId = String(historyId || '').trim();
+  if (!safeHistoryId) return false;
+  return selectedHistoryIdSet.value.has(safeHistoryId);
+}
+
+function toggleRowSelection(historyId, checked) {
+  const safeHistoryId = String(historyId || '').trim();
+  if (!safeHistoryId) return;
+
+  const nextSet = new Set(selectedHistoryIds.value);
+  if (checked) {
+    nextSet.add(safeHistoryId);
+  } else {
+    nextSet.delete(safeHistoryId);
+  }
+  selectedHistoryIds.value = Array.from(nextSet);
+}
+
+function enableBatchSelectMode(checked) {
+  if (!checked) return;
+  batchSelectMode.value = true;
+  selectedHistoryIds.value = [...currentPageHistoryIds.value];
+}
+
+function cancelBatchSelectMode() {
+  batchSelectMode.value = false;
+  selectedHistoryIds.value = [];
+}
+
+function syncSelectionWithCurrentPage() {
+  const visibleSet = new Set(currentPageHistoryIds.value);
+  selectedHistoryIds.value = selectedHistoryIds.value.filter((historyId) => visibleSet.has(historyId));
+}
+
 async function openDetail(historyId) {
   await fetchHistoryDetail(historyId, { accessToken: accessToken.value });
 }
 
+async function reloadHistoryAfterDelete({ deletedIds = [] } = {}) {
+  const deletedSet = new Set(
+    (Array.isArray(deletedIds) ? deletedIds : [])
+      .map((historyId) => String(historyId || '').trim())
+      .filter(Boolean)
+  );
+  const shouldReloadActive = deletedSet.has(activeHistoryId.value);
+
+  await fetchHistoryList({ accessToken: accessToken.value, nextPage: page.value, nextPageSize: pageSize.value });
+  if (!records.value.length && page.value > 1) {
+    await fetchHistoryList({ accessToken: accessToken.value, nextPage: page.value - 1, nextPageSize: pageSize.value });
+  }
+
+  syncSelectionWithCurrentPage();
+
+  if (!records.value.length) {
+    clearSelectedDetail();
+    return;
+  }
+
+  const hasActive = records.value.some((item) => item.history_id === activeHistoryId.value);
+  if (shouldReloadActive || !hasActive) {
+    await openDetail(records.value[0].history_id);
+  }
+}
+
+async function deleteRecord(historyId) {
+  const safeHistoryId = String(historyId || '').trim();
+  if (!safeHistoryId) return;
+  const target = records.value.find((item) => item.history_id === safeHistoryId);
+  const targetLabel = String(target?.search_record || '该记录').trim() || '该记录';
+  const confirmed = await askForConfirm({
+    title: '删除研究历史',
+    message: `确定删除「${targetLabel}」吗？删除后不可恢复。`,
+    confirmText: '删除',
+    cancelText: '取消',
+    danger: true
+  });
+  if (!confirmed) return;
+
+  const deleted = await deleteHistoryRecord(safeHistoryId, { accessToken: accessToken.value });
+  if (!deleted) return;
+  selectedHistoryIds.value = selectedHistoryIds.value.filter((id) => id !== safeHistoryId);
+  await reloadHistoryAfterDelete({ deletedIds: [safeHistoryId] });
+}
+
+async function deleteSelectedRecords() {
+  if (!batchSelectMode.value) return;
+  const targetIds = [...selectedHistoryIds.value];
+  if (!targetIds.length) return;
+
+  const confirmed = await askForConfirm({
+    title: '批量删除研究历史',
+    message: `确定批量删除已选中的 ${targetIds.length} 条记录吗？删除后不可恢复。`,
+    confirmText: '删除所选',
+    cancelText: '取消',
+    danger: true
+  });
+  if (!confirmed) return;
+
+  const deletedIds = await batchDeleteHistoryRecords(targetIds, { accessToken: accessToken.value });
+  if (!deletedIds.length) return;
+
+  const deletedIdSet = new Set(deletedIds);
+  selectedHistoryIds.value = selectedHistoryIds.value.filter((historyId) => !deletedIdSet.has(historyId));
+  await reloadHistoryAfterDelete({ deletedIds });
+  cancelBatchSelectMode();
+}
+
 async function changePage(nextPage) {
   await fetchHistoryList({ accessToken: accessToken.value, nextPage });
+  syncSelectionWithCurrentPage();
   clearSelectedDetail();
   if (records.value.length > 0) {
     await openDetail(records.value[0].history_id);
   }
+}
+
+async function autoCenterPaperHistoryGraph() {
+  const detail = selectedDetail.value;
+  if (!detail) return;
+  const researchType = String(detail.research_type || '').trim().toLowerCase();
+  if (researchType === 'domain') return;
+  if (activeDetailTab.value !== 'graph') return;
+  await nextTick();
+  await nextTick();
+  if (!historyGraphViewRef.value?.refreshGraphDisplay) return;
+  await historyGraphViewRef.value.refreshGraphDisplay();
 }
 
 onMounted(async () => {
@@ -185,5 +419,32 @@ onMounted(async () => {
   if (records.value.length > 0) {
     await openDetail(records.value[0].history_id);
   }
+  syncSelectionWithCurrentPage();
 });
+
+watch(
+  () => selectedDetail.value?.history_id,
+  async () => {
+    activeDetailTab.value = 'graph';
+    await autoCenterPaperHistoryGraph();
+  }
+);
+
+watch(
+  () => records.value,
+  () => {
+    syncSelectionWithCurrentPage();
+    if (records.value.length === 0) {
+      cancelBatchSelectMode();
+    }
+  }
+);
+
+watch(
+  () => activeDetailTab.value,
+  async (nextTab) => {
+    if (nextTab !== 'graph') return;
+    await autoCenterPaperHistoryGraph();
+  }
+);
 </script>
