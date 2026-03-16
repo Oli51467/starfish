@@ -12,24 +12,22 @@
         @pointercancel="handleCanvasPointerUp"
       >
         <div class="blood-canvas-head">
-          <div class="blood-canvas-head-left">
-            <div class="blood-stats-bar">
-              <span class="blood-stat-pill">
-                <span class="blood-stat-dot"></span>
-                {{ ancestorCount }} ancestors
-              </span>
-              <span class="blood-stat-pill">
-                <span class="blood-stat-dot"></span>
-                {{ descendantCount }} descendants
-              </span>
-              <span v-if="contradictingCount > 0" class="blood-stat-pill">
-                <span class="blood-stat-dot is-danger"></span>
-                {{ contradictingCount }} contradicting
-              </span>
-            </div>
-          </div>
-
           <div class="blood-canvas-head-right">
+            <button
+              class="btn graph-refresh-btn blood-canvas-refresh"
+              type="button"
+              aria-label="刷新血缘树"
+              title="刷新血缘树"
+              @pointerdown.stop
+              @pointermove.stop
+              @pointerup.stop
+              @click="refreshLineageDisplay"
+            >
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M13.5 8a5.5 5.5 0 1 1-1.16-3.4" />
+                <path d="M13.5 3.5v3.1h-3.1" />
+              </svg>
+            </button>
             <button
               class="btn graph-fullscreen-btn blood-canvas-fullscreen"
               type="button"
@@ -76,7 +74,7 @@
           </div>
         </div>
 
-        <svg class="blood-svg" :viewBox="`0 0 ${viewBox.width} ${viewBox.height}`">
+        <svg :key="`lineage-svg-${renderNonce}`" class="blood-svg" :viewBox="`0 0 ${viewBox.width} ${viewBox.height}`">
           <defs>
             <marker
               v-for="marker in citationMarkers"
@@ -190,6 +188,7 @@ const props = defineProps({
 const canvasRef = ref(null);
 const isFullscreen = ref(false);
 const selectedNode = ref(null);
+const renderNonce = ref(0);
 const viewBox = ref({
   width: 920,
   height: 560
@@ -249,11 +248,17 @@ const WHEEL_ZOOM_SENSITIVITY = Object.freeze({
 const WHEEL_DELTA_LIMIT = 640;
 const WHEEL_MIN_EFFECT_DELTA = 0.05;
 const VIEWPORT_FIT_PADDING = 96;
-const STRETCHED_TIMELINE_SIDE_RATIO = 0.02;
-const STRETCHED_TIMELINE_SIDE_MIN = 10;
-const STRETCHED_TIMELINE_SIDE_MAX = 26;
-const TIMELINE_LEFT_RATIO = 0.08;
-const TIMELINE_RIGHT_RATIO = 0.08;
+const STRETCHED_TIMELINE_SIDE_RATIO = 0.08;
+const STRETCHED_TIMELINE_SIDE_MIN = 52;
+const STRETCHED_TIMELINE_SIDE_MAX = 128;
+const YEAR_MIN_BOUND = 1950;
+const YEAR_MAX_FUTURE_OFFSET = 2;
+const SPARSE_TIMELINE_DENSITY_THRESHOLD = 0.6;
+const SPARSE_TIMELINE_MIN_SPAN = 6;
+const DESCENDANT_LABEL_GAP_BOOST = 1.36;
+const DESCENDANT_LABEL_BOTTOM_EXTRA = 52;
+const TIMELINE_LEFT_RATIO = 0.12;
+const TIMELINE_RIGHT_RATIO = 0.12;
 const LAYOUT_SPACING = {
   compact: {
     centerBandGap: 5,
@@ -327,6 +332,26 @@ function normalizeYear(value) {
   const parsed = Number(matched[0]);
   if (!Number.isFinite(parsed)) return null;
   return parsed;
+}
+
+function resolveRawNodeYear(node) {
+  return normalizeYear(
+    node?.year
+    ?? node?.published_year
+    ?? node?.publication_year
+    ?? node?.published_at
+    ?? node?.publication_date
+  );
+}
+
+function resolveMedianYear(years) {
+  if (!Array.isArray(years) || !years.length) return null;
+  const sorted = [...years].sort((left, right) => left - right);
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 1) {
+    return sorted[mid];
+  }
+  return Math.round((sorted[mid - 1] + sorted[mid]) / 2);
 }
 
 function clamp(value, minValue, maxValue) {
@@ -491,24 +516,6 @@ const rootPaper = computed(() => {
   return props.lineage?.root || props.lineage?.root_paper || {};
 });
 
-const ancestorCount = computed(() => {
-  return Array.isArray(props.lineage?.ancestors) ? props.lineage.ancestors.length : 0;
-});
-
-const descendantCount = computed(() => {
-  return Array.isArray(props.lineage?.descendants) ? props.lineage.descendants.length : 0;
-});
-
-const contradictingCount = computed(() => {
-  const fromStats = Number(props.lineage?.stats?.type_distribution?.contradicting);
-  if (Number.isFinite(fromStats) && fromStats >= 0) {
-    return Math.round(fromStats);
-  }
-  const ancestors = Array.isArray(props.lineage?.ancestors) ? props.lineage.ancestors : [];
-  const descendants = Array.isArray(props.lineage?.descendants) ? props.lineage.descendants : [];
-  return [...ancestors, ...descendants].filter((item) => normalizeCitationType(item?.ctype || item?.relation_type) === 'contradicting').length;
-});
-
 const isCanvasDragging = computed(() => {
   return Boolean(panState.value.active || nodeDragState.value.active);
 });
@@ -573,16 +580,92 @@ const normalizedNodes = computed(() => {
   return [rootNode, ...ancestorNodes, ...descendantNodes];
 });
 
+const nodeYearContext = computed(() => {
+  const nodes = normalizedNodes.value;
+  const currentYear = new Date().getFullYear();
+  const statsRange = Array.isArray(props.lineage?.stats?.year_range) ? props.lineage.stats.year_range : [];
+  const statsMinYear = normalizeYear(statsRange?.[0]);
+  const statsMaxYear = normalizeYear(statsRange?.[1]);
+  const rawRootYear = resolveRawNodeYear(rootPaper.value);
+  const knownYears = nodes
+    .map((node) => resolveRawNodeYear(node))
+    .filter((year) => Number.isFinite(year))
+    .map((year) => clamp(Math.round(year), YEAR_MIN_BOUND, currentYear + YEAR_MAX_FUTURE_OFFSET));
+
+  let baseYear = Number.isFinite(rawRootYear)
+    ? rawRootYear
+    : resolveMedianYear(knownYears);
+  if (!Number.isFinite(baseYear)) {
+    if (Number.isFinite(statsMinYear) && Number.isFinite(statsMaxYear)) {
+      baseYear = Math.round((statsMinYear + statsMaxYear) / 2);
+    } else if (Number.isFinite(statsMinYear)) {
+      baseYear = statsMinYear;
+    } else if (Number.isFinite(statsMaxYear)) {
+      baseYear = statsMaxYear;
+    } else {
+      baseYear = currentYear;
+    }
+  }
+  baseYear = clamp(Math.round(baseYear), YEAR_MIN_BOUND, currentYear + YEAR_MAX_FUTURE_OFFSET);
+
+  const minKnownYear = knownYears.length ? Math.min(...knownYears) : null;
+  const maxKnownYear = knownYears.length ? Math.max(...knownYears) : null;
+  const knownSpan = Number.isFinite(minKnownYear) && Number.isFinite(maxKnownYear)
+    ? Math.max(1, maxKnownYear - minKnownYear)
+    : 1;
+  const knownPadding = Math.max(1, Math.min(4, Math.ceil(knownSpan / 8)));
+  const inferredMinBound = Number.isFinite(minKnownYear) ? minKnownYear - knownPadding : baseYear - 12;
+  const inferredMaxBound = Number.isFinite(maxKnownYear) ? maxKnownYear + knownPadding : baseYear + 12;
+  const yearByNodeId = new Map();
+  const resolvedYears = [];
+
+  for (const node of nodes) {
+    const nodeId = resolvePaperId(node) || String(node?.id || '').trim();
+    const rawYear = resolveRawNodeYear(node);
+    let resolvedYear = rawYear;
+    if (!Number.isFinite(resolvedYear)) {
+      const generation = Math.max(1, normalizeGeneration(node?.hop ?? node?.generation ?? 1));
+      if (node?.nodeType === 'ancestor') {
+        resolvedYear = baseYear - generation;
+      } else if (node?.nodeType === 'descendant') {
+        resolvedYear = baseYear + generation;
+      } else {
+        resolvedYear = baseYear;
+      }
+    }
+    resolvedYear = clamp(Math.round(resolvedYear), inferredMinBound, inferredMaxBound);
+    resolvedYear = clamp(resolvedYear, YEAR_MIN_BOUND, currentYear + YEAR_MAX_FUTURE_OFFSET);
+    resolvedYears.push(resolvedYear);
+    if (nodeId) {
+      yearByNodeId.set(nodeId, resolvedYear);
+    }
+    if (node?.paper_id) {
+      yearByNodeId.set(String(node.paper_id), resolvedYear);
+    }
+    if (node?.id) {
+      yearByNodeId.set(String(node.id), resolvedYear);
+    }
+  }
+
+  const uniqueYears = [...new Set(resolvedYears)].sort((left, right) => left - right);
+
+  return {
+    baseYear,
+    yearByNodeId,
+    resolvedYears,
+    uniqueYears
+  };
+});
+
 function resolveNodeYear(node, fallbackYear) {
-  const resolved = normalizeYear(
-    node?.year
-    ?? node?.published_year
-    ?? node?.publication_year
-    ?? node?.published_at
-    ?? node?.publication_date
-  );
-  if (Number.isFinite(resolved)) return resolved;
-  return Number.isFinite(fallbackYear) ? fallbackYear : null;
+  const nodeId = resolvePaperId(node) || String(node?.id || '').trim();
+  if (nodeId && nodeYearContext.value.yearByNodeId.has(nodeId)) {
+    return nodeYearContext.value.yearByNodeId.get(nodeId);
+  }
+  const rawYear = resolveRawNodeYear(node);
+  if (Number.isFinite(rawYear)) return rawYear;
+  if (Number.isFinite(fallbackYear)) return Math.round(fallbackYear);
+  return nodeYearContext.value.baseYear;
 }
 
 const timelineMetrics = computed(() => {
@@ -600,35 +683,57 @@ const timelineMetrics = computed(() => {
     : Math.round(width * TIMELINE_RIGHT_RATIO);
   const axisWidth = Math.max(120, width - leftPadding - rightPadding);
 
-  const fallbackYear = normalizeYear(rootPaper.value?.year) || new Date().getFullYear();
-  const years = normalizedNodes.value
-    .map((node) => resolveNodeYear(node, fallbackYear))
-    .filter((year) => Number.isFinite(year));
-
-  const minRaw = years.length ? Math.min(...years) : fallbackYear;
-  const maxRaw = years.length ? Math.max(...years) : fallbackYear;
+  const context = nodeYearContext.value;
+  const years = context.uniqueYears.length ? context.uniqueYears : [context.baseYear];
+  const minRaw = years.length ? years[0] : context.baseYear;
+  const maxRaw = years.length ? years[years.length - 1] : context.baseYear;
   const rawSpan = Math.max(1, maxRaw - minRaw);
-  const step = resolveTimelineTickStep(rawSpan, Math.max(1, years.length));
-  let minYear = Math.floor(minRaw / step) * step;
-  let maxYear = Math.ceil(maxRaw / step) * step;
-  if (minYear === maxYear) {
-    maxYear = minYear + step;
+  const density = years.length / Math.max(1, rawSpan + 1);
+  const useSparseAxis = (
+    years.length >= 2
+    && rawSpan >= SPARSE_TIMELINE_MIN_SPAN
+    && density <= SPARSE_TIMELINE_DENSITY_THRESHOLD
+  );
+
+  let axisYears = [];
+  if (useSparseAxis) {
+    axisYears = [...years];
+  } else {
+    const step = resolveTimelineTickStep(rawSpan, Math.max(1, years.length));
+    let minYear = Math.floor(minRaw / step) * step;
+    let maxYear = Math.ceil(maxRaw / step) * step;
+    if (minYear === maxYear) {
+      maxYear = minYear + step;
+    }
+    for (let year = minYear; year <= maxYear; year += step) {
+      axisYears.push(year);
+    }
   }
-  const span = Math.max(1, maxYear - minYear);
-  const ticks = [];
-  for (let year = minYear; year <= maxYear; year += step) {
-    const ratio = (year - minYear) / span;
-    const x = leftPadding + ratio * axisWidth;
-    ticks.push({ year, x });
+
+  if (!axisYears.length) {
+    axisYears = [context.baseYear - 1, context.baseYear, context.baseYear + 1];
+  } else if (axisYears.length === 1) {
+    axisYears = [axisYears[0] - 1, axisYears[0], axisYears[0] + 1];
   }
+
+  const intervalCount = Math.max(1, axisYears.length - 1);
+  const ticks = axisYears.map((year, index) => {
+    const ratio = index / intervalCount;
+    return {
+      year,
+      x: leftPadding + ratio * axisWidth
+    };
+  });
 
   return {
-    minYear,
-    maxYear,
-    span,
+    minYear: axisYears[0],
+    maxYear: axisYears[axisYears.length - 1],
+    span: Math.max(1, axisYears[axisYears.length - 1] - axisYears[0]),
+    intervalCount,
+    axisYears,
     leftPadding,
     axisWidth,
-    fallbackYear,
+    fallbackYear: context.baseYear,
     ticks
   };
 });
@@ -637,10 +742,36 @@ const yearTicks = computed(() => timelineMetrics.value.ticks);
 
 function yearToX(yearValue) {
   const metrics = timelineMetrics.value;
+  const axisYears = metrics.axisYears;
+  const ticks = metrics.ticks;
   const year = Number.isFinite(Number(yearValue)) ? Number(yearValue) : metrics.fallbackYear;
-  const safeYear = clamp(year, metrics.minYear, metrics.maxYear);
-  const ratio = (safeYear - metrics.minYear) / metrics.span;
-  return metrics.leftPadding + ratio * metrics.axisWidth;
+  if (!axisYears.length || !ticks.length) {
+    return metrics.leftPadding;
+  }
+  if (axisYears.length === 1) {
+    return ticks[0].x;
+  }
+  if (year <= axisYears[0]) {
+    return ticks[0].x;
+  }
+  const lastIndex = axisYears.length - 1;
+  if (year >= axisYears[lastIndex]) {
+    return ticks[lastIndex].x;
+  }
+  for (let index = 0; index < lastIndex; index += 1) {
+    const leftYear = axisYears[index];
+    const rightYear = axisYears[index + 1];
+    if (year > rightYear) continue;
+    const leftX = ticks[index].x;
+    const rightX = ticks[index + 1].x;
+    const segmentSpan = rightYear - leftYear;
+    if (!Number.isFinite(segmentSpan) || segmentSpan <= 0) {
+      return leftX;
+    }
+    const ratio = clamp((year - leftYear) / segmentSpan, 0, 1);
+    return leftX + (rightX - leftX) * ratio;
+  }
+  return ticks[lastIndex].x;
 }
 
 function computeRadius(node, isRoot = false) {
@@ -705,7 +836,7 @@ const layoutNodes = computed(() => {
   const root = nodes[0];
   const ancestors = nodes.filter((node) => node.nodeType === 'ancestor');
   const descendants = nodes.filter((node) => node.nodeType === 'descendant');
-  const yearBandWidth = Math.max(18, timelineMetrics.value.axisWidth / Math.max(1, timelineMetrics.value.span));
+  const yearBandWidth = Math.max(18, timelineMetrics.value.axisWidth / Math.max(1, timelineMetrics.value.intervalCount));
   const fallbackYear = timelineMetrics.value.fallbackYear;
   const rootYear = resolveNodeYear(root, fallbackYear) || fallbackYear;
 
@@ -863,10 +994,11 @@ const layoutNodes = computed(() => {
       bottomBound: expandedBottomBound,
       padding: spacing.nodeCollisionPadding
     });
+    const descendantLabelGap = Math.round(spacing.labelMinGap * DESCENDANT_LABEL_GAP_BOOST);
     spreadNodeLabels(sideNodes, {
-      minGap: spacing.labelMinGap,
+      minGap: descendantLabelGap,
       topBound: expandedTopBound + 14,
-      bottomBound: expandedBottomBound - 8
+      bottomBound: expandedBottomBound + DESCENDANT_LABEL_BOTTOM_EXTRA
     });
     return sideNodes;
   };
@@ -1335,6 +1467,31 @@ function hideTooltip() {
   tooltip.value.visible = false;
 }
 
+async function resetLineageViewport({ targetScale = 1, forceRerender = false } = {}) {
+  selectedNode.value = null;
+  nodeOffsetMap.value = {};
+  hideTooltip();
+  clearPanState();
+  clearNodeDragState();
+  await nextTick();
+  refreshViewportSize();
+  viewport.value = buildCenteredViewport(targetScale);
+  if (forceRerender) {
+    renderNonce.value += 1;
+  }
+}
+
+async function refreshLineageDisplay() {
+  await resetLineageViewport({ targetScale: 1, forceRerender: true });
+}
+
+async function refreshLineageToMinOverview() {
+  await resetLineageViewport({
+    targetScale: viewportScaleRange.value.min,
+    forceRerender: true
+  });
+}
+
 function refreshViewportSize() {
   const viewportWidth = window.innerWidth || 1280;
   let minWidth = props.stretchTimeline ? 320 : 760;
@@ -1378,9 +1535,8 @@ async function toggleFullscreen() {
   refreshViewportSize();
 }
 
-onMounted(() => {
-  refreshViewportSize();
-  viewport.value = buildCenteredViewport(viewport.value.scale);
+onMounted(async () => {
+  await resetLineageViewport({ targetScale: viewport.value.scale });
   resizeObserver = new ResizeObserver(() => {
     refreshViewportSize();
   });
@@ -1393,13 +1549,7 @@ onMounted(() => {
 watch(
   () => props.lineage,
   async () => {
-    selectedNode.value = null;
-    nodeOffsetMap.value = {};
-    clearPanState();
-    clearNodeDragState();
-    await nextTick();
-    refreshViewportSize();
-    viewport.value = buildCenteredViewport(1);
+    await resetLineageViewport({ targetScale: 1, forceRerender: true });
   },
   { deep: true }
 );
@@ -1415,6 +1565,11 @@ onBeforeUnmount(() => {
   clearPanState();
   clearNodeDragState();
   isFullscreen.value = false;
+});
+
+defineExpose({
+  refreshLineageDisplay,
+  refreshLineageToMinOverview
 });
 </script>
 
@@ -1459,14 +1614,12 @@ onBeforeUnmount(() => {
   top: var(--blood-head-offset);
   height: var(--blood-head-height);
   z-index: 7;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
+  justify-content: flex-end;
   align-items: center;
-  gap: 10px;
   pointer-events: none;
 }
 
-.blood-canvas-head-left,
 .blood-canvas-head-right {
   display: inline-flex;
   align-items: center;
@@ -1474,10 +1627,10 @@ onBeforeUnmount(() => {
 }
 
 .blood-canvas-head-right {
-  justify-content: flex-end;
   gap: 8px;
 }
 
+.blood-canvas-refresh,
 .blood-canvas-fullscreen {
   flex-shrink: 0;
   pointer-events: auto;
@@ -1527,36 +1680,6 @@ onBeforeUnmount(() => {
   color: var(--muted);
 }
 
-.blood-stats-bar {
-  display: inline-flex;
-  gap: 6px;
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 6px 8px;
-}
-
-.blood-stat-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  color: var(--muted);
-  padding: 2px 8px;
-  border-radius: 999px;
-}
-
-.blood-stat-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 999px;
-  background: var(--line-2);
-}
-
-.blood-stat-dot.is-danger {
-  background: var(--accent);
-}
-
 .blood-legend {
   position: absolute;
   left: 12px;
@@ -1564,9 +1687,10 @@ onBeforeUnmount(() => {
   background: var(--bg);
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
-  padding: 10px 12px;
+  padding: 10px;
   display: grid;
-  gap: 4px;
+  gap: 6px;
+  width: min(340px, calc(100% - 24px));
 }
 
 .blood-legend-title {
@@ -1574,7 +1698,7 @@ onBeforeUnmount(() => {
   color: var(--muted);
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  margin-bottom: 2px;
+  margin: 0;
 }
 
 .blood-legend-row {
@@ -1729,10 +1853,8 @@ onBeforeUnmount(() => {
     width: var(--blood-detail-width);
   }
 
-  .blood-stats-bar {
-    max-width: calc(100% - 24px);
-    overflow-x: auto;
-    white-space: nowrap;
+  .blood-legend {
+    width: min(300px, calc(100% - 24px));
   }
 }
 

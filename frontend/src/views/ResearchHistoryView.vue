@@ -173,6 +173,7 @@
             <div class="history-detail-stage">
               <BloodLineageTree
                 v-if="activeDetailTab === 'lineage' && historyLineageData"
+                ref="historyLineageViewRef"
                 :lineage="historyLineageData"
                 :stretch-timeline="true"
               />
@@ -231,6 +232,7 @@ const {
 
 const activeDetailTab = ref('graph');
 const historyGraphViewRef = ref(null);
+const historyLineageViewRef = ref(null);
 const selectedHistoryIds = ref([]);
 const batchSelectMode = ref(false);
 const activeHistoryId = computed(() => String(selectedDetail.value?.history_id || '').trim());
@@ -317,6 +319,8 @@ function syncSelectionWithCurrentPage() {
 
 async function openDetail(historyId) {
   await fetchHistoryDetail(historyId, { accessToken: accessToken.value });
+  await autoCenterPaperHistoryGraph();
+  await autoCenterPaperHistoryLineage();
 }
 
 async function reloadHistoryAfterDelete({ deletedIds = [] } = {}) {
@@ -409,6 +413,19 @@ async function autoCenterPaperHistoryGraph() {
   await historyGraphViewRef.value.refreshGraphDisplay();
 }
 
+async function autoCenterPaperHistoryLineage() {
+  const detail = selectedDetail.value;
+  if (!detail || !historyLineageData.value) return;
+  if (activeDetailTab.value !== 'lineage') return;
+  await nextTick();
+  await nextTick();
+  if (historyLineageViewRef.value?.refreshLineageToMinOverview) {
+    await historyLineageViewRef.value.refreshLineageToMinOverview();
+    return;
+  }
+  await historyLineageViewRef.value?.refreshLineageDisplay?.();
+}
+
 onMounted(async () => {
   await loadSession();
   if (!isAuthenticated.value) {
@@ -427,6 +444,7 @@ watch(
   async () => {
     activeDetailTab.value = 'graph';
     await autoCenterPaperHistoryGraph();
+    await autoCenterPaperHistoryLineage();
   }
 );
 
@@ -443,8 +461,13 @@ watch(
 watch(
   () => activeDetailTab.value,
   async (nextTab) => {
-    if (nextTab !== 'graph') return;
-    await autoCenterPaperHistoryGraph();
+    if (nextTab === 'graph') {
+      await autoCenterPaperHistoryGraph();
+      return;
+    }
+    if (nextTab === 'lineage') {
+      await autoCenterPaperHistoryLineage();
+    }
   }
 );
 </script>

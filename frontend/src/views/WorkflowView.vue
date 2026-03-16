@@ -5,7 +5,12 @@
         <div class="workflow-result-stage">
           <template v-if="activeViewKey === 'graph'">
             <ErrorBoundary v-if="errorMessage && !graphData" :message="errorMessage" />
-            <KnowledgeGraphView v-else-if="graphData" :graph-data="graphData" mode="panorama_only">
+            <KnowledgeGraphView
+              v-else-if="graphData"
+              ref="workflowGraphViewRef"
+              :graph-data="graphData"
+              mode="panorama_only"
+            >
               <template #tools-extra>
                 <div class="workflow-result-tabbar" role="tablist" aria-label="论文检索结果切换">
                   <div class="workflow-result-tabs">
@@ -37,6 +42,7 @@
             <ErrorBoundary v-else-if="lineageErrorMessage && !lineageData" :message="lineageErrorMessage" />
             <BloodLineageTree
               v-else-if="lineageData"
+              ref="workflowLineageViewRef"
               :lineage="lineageData"
               :stretch-timeline="true"
             >
@@ -73,7 +79,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted } from 'vue';
+import { computed, nextTick, onMounted, ref } from 'vue';
 
 import ErrorBoundary from '../components/common/ErrorBoundary.vue';
 import LoadingState from '../components/common/LoadingState.vue';
@@ -96,6 +102,8 @@ const props = defineProps({
 
 const emit = defineEmits(['step-change', 'back', 'result-view-change', 'lineage-availability-change']);
 const { accessToken } = useAuthStore();
+const workflowGraphViewRef = ref(null);
+const workflowLineageViewRef = ref(null);
 
 const {
   steps,
@@ -133,9 +141,23 @@ const resultTabs = computed(() => ([
   }
 ]));
 
-function activateResultTab(tab) {
+async function activateResultTab(tab) {
   if (!tab || tab.disabled) return;
   activeViewKey.value = tab.key;
+  if (tab.key === 'lineage') {
+    await nextTick();
+    await nextTick();
+    if (workflowLineageViewRef.value?.refreshLineageToMinOverview) {
+      await workflowLineageViewRef.value.refreshLineageToMinOverview();
+      return;
+    }
+    await workflowLineageViewRef.value?.refreshLineageDisplay?.();
+    return;
+  }
+  if (tab.key !== 'graph') return;
+  await nextTick();
+  await nextTick();
+  await workflowGraphViewRef.value?.refreshGraphDisplay?.();
 }
 
 onMounted(async () => {
