@@ -16,6 +16,8 @@
               {{ stepBadgeText(step.status) }}
             </span>
           </div>
+          <p class="workflow-step-desc">{{ step.description }}</p>
+          <p v-if="step.message" class="workflow-step-message mono">{{ step.message }}</p>
 
           <section v-if="step.logs && step.logs.length" class="workflow-retrieval-trace">
             <article
@@ -31,7 +33,6 @@
                 </span>
               </div>
               <p class="workflow-trace-detail">{{ log.detail }}</p>
-              <p v-if="log.metaText" class="workflow-trace-meta mono">{{ log.metaText }}</p>
             </article>
           </section>
 

@@ -115,7 +115,7 @@
                 @mouseenter="showTooltip($event, node)"
                 @mouseleave="hideTooltip"
                 @click="openDetail(node)"
-                @pointerdown.stop.prevent="startNodeDrag($event, node)"
+                @pointerdown.stop="startNodeDrag($event, node)"
               >
                 <circle
                   v-if="node.nodeType === 'root'"
@@ -163,8 +163,42 @@
         </header>
         <div v-if="selectedNode" class="blood-detail-body">
           <p class="blood-detail-meta mono">{{ detailMeta }}</p>
-          <p class="blood-detail-text">{{ selectedNode.relation_description || selectedNode.abstract || '暂无摘要信息。' }}</p>
-          <p class="blood-detail-text muted">{{ selectedNode.paper_id || selectedNode.id }}</p>
+          <div class="blood-detail-tags">
+            <span class="blood-detail-tag">{{ selectedNodeInfo.nodeRoleLabel }}</span>
+            <span v-if="selectedNodeInfo.relationLabel" class="blood-detail-tag">{{ selectedNodeInfo.relationLabel }}</span>
+          </div>
+
+          <div class="blood-detail-grid">
+            <article
+              v-for="item in selectedNodeInfo.metaItems"
+              :key="item.label"
+              class="blood-detail-grid-item"
+            >
+              <p class="blood-detail-grid-label mono">{{ item.label }}</p>
+              <p class="blood-detail-grid-value">{{ item.value }}</p>
+            </article>
+          </div>
+
+          <section v-if="selectedNodeInfo.relationDescription" class="blood-detail-section">
+            <p class="blood-detail-section-title mono">关系说明</p>
+            <p class="blood-detail-text">{{ selectedNodeInfo.relationDescription }}</p>
+          </section>
+
+          <section class="blood-detail-section">
+            <p class="blood-detail-section-title mono">摘要</p>
+            <p class="blood-detail-text">{{ selectedNodeInfo.abstractText }}</p>
+          </section>
+
+          <a
+            v-if="selectedNodeInfo.url"
+            class="blood-detail-link mono"
+            :href="selectedNodeInfo.url"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            查看原文
+          </a>
+          <p class="blood-detail-id mono">{{ selectedNodeInfo.paperId }}</p>
         </div>
       </aside>
     </div>
@@ -218,6 +252,7 @@ const nodeDragState = ref({
   active: false,
   pointerId: null,
   nodeId: '',
+  node: null,
   startX: 0,
   startY: 0,
   originOffsetX: 0,
@@ -285,11 +320,11 @@ const LAYOUT_SPACING = {
 };
 
 const citationConfig = {
-  extending: { label: 'Extending', color: 'var(--text)' },
+  extending: { label: 'Extending', color: 'var(--info)' },
   supporting: { label: 'Supporting', color: 'var(--success)' },
   contradicting: { label: 'Contradicting', color: 'var(--accent)' },
-  migrating: { label: 'Migrating', color: 'var(--muted)' },
-  mentioning: { label: 'Mentioning', color: 'var(--line-2)' }
+  migrating: { label: 'Migrating', color: 'var(--violet)' },
+  mentioning: { label: 'Mentioning', color: 'var(--muted)' }
 };
 
 const citationMarkers = Object.entries(citationConfig).map(([key, value]) => ({
@@ -297,9 +332,26 @@ const citationMarkers = Object.entries(citationConfig).map(([key, value]) => ({
   label: value.label,
   color: value.color
 }));
+const citationTypeLabelZh = Object.freeze({
+  extending: '扩展',
+  supporting: '支持',
+  contradicting: '反驳',
+  migrating: '迁移',
+  mentioning: '提及'
+});
+const nodeRoleLabelZh = Object.freeze({
+  root: '核心论文',
+  ancestor: '祖先论文',
+  descendant: '后代论文'
+});
 
 function resolvePaperId(node) {
   return String(node?.paper_id || node?.paperId || node?.id || '').trim();
+}
+
+function textOrFallback(value, fallback = '-') {
+  const text = String(value ?? '').trim();
+  return text || fallback;
 }
 
 function normalizeCitationType(value) {
@@ -320,6 +372,72 @@ function normalizeCitationCount(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) return 0;
   return Math.round(parsed);
+}
+
+function resolveCitationTypeLabel(type) {
+  const normalized = normalizeCitationType(type);
+  return citationTypeLabelZh[normalized] || citationConfig[normalized]?.label || citationTypeLabelZh.mentioning;
+}
+
+function resolveNodeRoleLabel(node) {
+  const key = String(node?.nodeType || '').trim().toLowerCase();
+  return nodeRoleLabelZh[key] || nodeRoleLabelZh.descendant;
+}
+
+function resolveNodeYearText(node) {
+  const raw = resolveNodeYear(node, timelineMetrics.value.fallbackYear);
+  if (!Number.isFinite(raw)) return '-';
+  return String(Math.round(raw));
+}
+
+function resolveNodePublicationDate(node) {
+  const raw = textOrFallback(
+    node?.publication_date
+    ?? node?.published_at
+    ?? node?.date
+    ?? node?.published_date,
+    ''
+  );
+  if (!raw) return '';
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return raw;
+  return parsed.toISOString().slice(0, 10);
+}
+
+function resolveNodeVenue(node) {
+  return textOrFallback(
+    node?.venue
+    ?? node?.journal
+    ?? node?.conference
+    ?? node?.source
+    ?? node?.publisher,
+    '-'
+  );
+}
+
+function resolveNodeAuthors(node) {
+  const rawAuthors = node?.authors;
+  if (Array.isArray(rawAuthors)) {
+    const normalized = rawAuthors.map((item) => String(item || '').trim()).filter(Boolean);
+    if (!normalized.length) return '-';
+    if (normalized.length <= 4) return normalized.join(', ');
+    return `${normalized.slice(0, 4).join(', ')} 等`;
+  }
+  return textOrFallback(rawAuthors, '-');
+}
+
+function resolveNodeUrl(node) {
+  const raw = textOrFallback(
+    node?.url
+    ?? node?.paper_url
+    ?? node?.pdf_url
+    ?? node?.link
+    ?? node?.source_url,
+    ''
+  );
+  if (!raw) return '';
+  if (/^https?:\/\//i.test(raw)) return raw;
+  return '';
 }
 
 function normalizeYear(value) {
@@ -1039,8 +1157,8 @@ const layoutEdges = computed(() => {
         id: `edge-explicit-${index}-${sourceNode.id}-${targetNode.id}`,
         citationType,
         color,
-        strokeWidth: citationType === 'mentioning' ? 1 : 1.6,
-        opacity: citationType === 'mentioning' ? 0.36 : 0.66,
+        strokeWidth: citationType === 'mentioning' ? 1.35 : 1.6,
+        opacity: citationType === 'mentioning' ? 0.62 : 0.66,
         path: bezierPath(sourceNode.x, sourceNode.y, targetNode.x, targetNode.y)
       });
     });
@@ -1058,8 +1176,8 @@ const layoutEdges = computed(() => {
       id: `edge-${sourceNode.id}-${targetNode.id}`,
       citationType,
       color,
-      strokeWidth: citationType === 'mentioning' ? 1 : 1.6,
-      opacity: citationType === 'mentioning' ? 0.36 : 0.66,
+      strokeWidth: citationType === 'mentioning' ? 1.35 : 1.6,
+      opacity: citationType === 'mentioning' ? 0.62 : 0.66,
       path: bezierPath(sourceNode.x, sourceNode.y, targetNode.x, targetNode.y)
     });
   }
@@ -1133,10 +1251,57 @@ const viewportScaleRange = computed(() => {
 const detailMeta = computed(() => {
   if (!selectedNode.value) return '';
   const selected = selectedNode.value;
-  const year = selected?.year || '--';
+  const year = resolveNodeYearText(selected);
   const cite = formatCitation(normalizeCitationCount(selected?.citation_count || selected?.citationCount));
-  const typeLabel = citationConfig[normalizeCitationType(selected?.ctype || selected?.relation_type)]?.label || 'Mentioning';
-  return `${year} · ${cite} 引用 · ${typeLabel}`;
+  if (String(selected?.nodeType || '').toLowerCase() === 'root') {
+    return `${year} · ${cite} 引 · ${resolveNodeRoleLabel(selected)}`;
+  }
+  return `${year} · ${cite} 引 · ${resolveCitationTypeLabel(selected?.ctype || selected?.relation_type)}`;
+});
+
+const selectedNodeInfo = computed(() => {
+  const selected = selectedNode.value;
+  if (!selected) {
+    return {
+      nodeRoleLabel: nodeRoleLabelZh.root,
+      relationLabel: '',
+      abstractText: '暂无摘要信息。',
+      relationDescription: '',
+      paperId: '-',
+      url: '',
+      metaItems: []
+    };
+  }
+
+  const publicationDate = resolveNodePublicationDate(selected);
+  const yearText = resolveNodeYearText(selected);
+  const citationCount = formatCitation(normalizeCitationCount(selected?.citation_count || selected?.citationCount));
+  const venue = resolveNodeVenue(selected);
+  const authors = resolveNodeAuthors(selected);
+  const relationLabel = String(selected?.nodeType || '').toLowerCase() === 'root'
+    ? ''
+    : resolveCitationTypeLabel(selected?.ctype || selected?.relation_type);
+  const relationDescription = textOrFallback(selected?.relation_description, '');
+  const abstractText = textOrFallback(selected?.abstract, '暂无摘要信息。');
+  const paperId = resolvePaperId(selected) || textOrFallback(selected?.id, '-');
+  const metaItems = [
+    { label: '论文 ID', value: paperId },
+    { label: '发表年份', value: yearText },
+    { label: '发表日期', value: publicationDate || '-' },
+    { label: '引用次数', value: citationCount },
+    { label: '期刊/会议', value: venue },
+    { label: '作者', value: authors }
+  ];
+
+  return {
+    nodeRoleLabel: resolveNodeRoleLabel(selected),
+    relationLabel,
+    relationDescription,
+    abstractText,
+    paperId,
+    url: resolveNodeUrl(selected),
+    metaItems
+  };
 });
 
 function formatCitation(value) {
@@ -1144,6 +1309,17 @@ function formatCitation(value) {
   if (!Number.isFinite(count) || count <= 0) return '0';
   if (count >= 1000) return `${Math.round(count / 1000)}k`;
   return String(Math.round(count));
+}
+
+function buildNodeTooltipMeta(node) {
+  const year = resolveNodeYearText(node);
+  const cite = formatCitation(normalizeCitationCount(node?.citation_count || node?.citationCount));
+  const role = resolveNodeRoleLabel(node);
+  if (String(node?.nodeType || '').toLowerCase() === 'root') {
+    return `${role} · ${year} · ${cite} 引`;
+  }
+  const relation = resolveCitationTypeLabel(node?.ctype || node?.relation_type);
+  return `${role} · ${year} · ${cite} 引 · ${relation}`;
 }
 
 function bezierPath(x1, y1, x2, y2) {
@@ -1303,6 +1479,7 @@ function clearNodeDragState() {
     active: false,
     pointerId: null,
     nodeId: '',
+    node: null,
     startX: 0,
     startY: 0,
     originOffsetX: 0,
@@ -1392,12 +1569,15 @@ function handleCanvasPointerMove(event) {
 
 function handleCanvasPointerUp(event) {
   if (nodeDragState.value.active && event.pointerId === nodeDragState.value.pointerId) {
+    const nodeToOpen = nodeDragState.value.node;
     releasePointerCapture(nodeDragState.value.pointerId);
     if (nodeDragState.value.moved) {
       suppressNodeClick.value = {
         nodeId: nodeDragState.value.nodeId,
         expiresAt: Date.now() + 280
       };
+    } else if (nodeToOpen) {
+      openDetail(nodeToOpen);
     }
     clearNodeDragState();
     return;
@@ -1420,6 +1600,7 @@ function startNodeDrag(event, node) {
     active: true,
     pointerId: event.pointerId,
     nodeId,
+    node,
     startX: pointer.x,
     startY: pointer.y,
     originOffsetX: originOffset.x,
@@ -1459,7 +1640,7 @@ function showTooltip(event, node) {
     x,
     y,
     title: String(node?.title || '未命名论文'),
-    meta: `${node?.year || '--'} · ${formatCitation(node?.citation_count)} 引`
+    meta: buildNodeTooltipMeta(node)
   };
 }
 
@@ -1809,7 +1990,7 @@ defineExpose({
 .blood-detail-body {
   padding: 12px;
   display: grid;
-  gap: 10px;
+  gap: 12px;
 }
 
 .blood-detail-meta {
@@ -1818,11 +1999,100 @@ defineExpose({
   color: var(--muted);
 }
 
+.blood-detail-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.blood-detail-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.blood-detail-grid {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  padding: 8px;
+  display: grid;
+  gap: 6px;
+}
+
+.blood-detail-grid-item {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+}
+
+.blood-detail-grid-label {
+  margin: 0;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.blood-detail-grid-value {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.blood-detail-section {
+  display: grid;
+  gap: 6px;
+}
+
+.blood-detail-section-title {
+  margin: 0;
+  font-size: 10px;
+  color: var(--muted);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .blood-detail-text {
   margin: 0;
   font-size: 12px;
   line-height: 1.65;
   color: var(--text);
+  word-break: break-word;
+}
+
+.blood-detail-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  max-width: 100%;
+  height: 30px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-sm);
+  padding: 0 10px;
+  color: var(--text);
+  text-decoration: none;
+  transition: background-color 0.2s ease;
+}
+
+.blood-detail-link:hover {
+  background: var(--panel);
+}
+
+.blood-detail-id {
+  margin: 0;
+  font-size: 10px;
+  color: var(--muted);
+  word-break: break-all;
 }
 
 .blood-detail-text.muted {

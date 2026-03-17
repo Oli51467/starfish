@@ -51,22 +51,22 @@ const STEP_DEFINITION = {
   research: {
     key: 'research',
     title: '领域调研',
-    description: '生成领域骨架并识别核心子方向。'
+    description: '梳理领域主线并识别关键子方向。'
   },
   retrieve: {
     key: 'retrieve',
     title: '论文检索',
-    description: '并行检索并校验真实论文数据。'
+    description: '补充各子方向的代表论文并完成筛选。'
   },
   summarize: {
     key: 'summarize',
     title: '深度总结',
-    description: '基于真实数据生成 1000+ 字趋势洞察。'
+    description: '提炼趋势、机会与风险。'
   },
   graph: {
     key: 'graph',
     title: '图谱生成',
-    description: '实时构建并刷新知识图谱，同时写入图数据库。'
+    description: '生成可交互知识图谱并完成结果整理。'
   }
 };
 
@@ -188,6 +188,71 @@ function formatBeijingTime(rawTimestamp) {
   return beijingTimeFormatter.format(parsed);
 }
 
+function normalizeLandscapeMessage(stepKey, rawMessage, { running = false } = {}) {
+  const key = String(stepKey || '').trim().toLowerCase();
+  const message = String(rawMessage || '').trim();
+  const messageLower = message.toLowerCase();
+
+  if (key === 'research') {
+    if (messageLower.includes('缓存')) {
+      return running ? '正在复用历史分析结果并校验一致性...' : '已复用历史分析结果并完成一致性校验。';
+    }
+    if (messageLower.includes('完成') || messageLower.includes('骨架')) {
+      return '领域主线与子方向已整理完成。';
+    }
+    return running ? '正在梳理领域主线与子方向...' : '已完成领域主线梳理。';
+  }
+
+  if (key === 'retrieve') {
+    if (messageLower.includes('回放') || messageLower.includes('复用') || messageLower.includes('缓存')) {
+      return running ? '正在复用历史检索结果...' : '已复用历史检索结果。';
+    }
+    if (messageLower.includes('完成') || messageLower.includes('排序')) {
+      return '子方向论文收集完成，已整理优先级。';
+    }
+    return running ? '正在补充各子方向的代表论文...' : '已完成论文补充。';
+  }
+
+  if (key === 'summarize') {
+    if (messageLower.includes('关闭')) {
+      return '已跳过深度总结，继续进入图谱生成。';
+    }
+    if (messageLower.includes('完成')) {
+      return '趋势与机会总结已完成。';
+    }
+    return running ? '正在生成趋势、机会与风险总结...' : '已完成趋势总结。';
+  }
+
+  if (key === 'graph') {
+    if (messageLower.includes('任务完成')) {
+      return '研究流程已完成。';
+    }
+    if (
+      messageLower.includes('写入完成')
+      || messageLower.includes('保存完成')
+      || messageLower.includes('结果已保存')
+      || messageLower.includes('跳过图数据库重复写入')
+    ) {
+      return '图谱结果已保存。';
+    }
+    if (messageLower.includes('写入') || messageLower.includes('保存')) {
+      return running ? '正在保存图谱结果...' : '图谱结果已保存。';
+    }
+    if (messageLower.includes('校验')) {
+      return running ? '正在校验图谱结构...' : '图谱结构校验完成。';
+    }
+    if (messageLower.includes('构建') || messageLower.includes('刷新知识图谱')) {
+      return running ? '正在构建可交互知识图谱...' : '知识图谱已生成。';
+    }
+    if (messageLower.includes('完成')) {
+      return '知识图谱已生成。';
+    }
+    return running ? '正在构建可交互知识图谱...' : '知识图谱已构建完成。';
+  }
+
+  return message || (running ? '处理中...' : '已完成。');
+}
+
 function normalizeStepLogs(taskLogs) {
   const grouped = {
     research: [],
@@ -200,20 +265,17 @@ function normalizeStepLogs(taskLogs) {
   for (const item of taskLogs) {
     const key = String(item?.step_key || '').trim();
     if (!Object.prototype.hasOwnProperty.call(grouped, key)) continue;
-    if (key === 'graph') continue;
-    const meta = item?.meta && typeof item.meta === 'object' ? item.meta : {};
-    const metaText = Object.entries(meta)
-      .filter(([k]) => !['provider', 'provider_used'].includes(String(k).toLowerCase()))
-      .map(([k, v]) => `${k}: ${v}`)
-      .slice(0, 4)
-      .join(' · ');
-    grouped[key].push({
+    const nextLog = {
       title: formatBeijingTime(item?.timestamp),
-      detail: String(item?.message || '').trim(),
+      detail: normalizeLandscapeMessage(key, item?.message, { running: toLogStatus(item?.level) === 'doing' }),
       status: toLogStatus(item?.level),
       statusText: toLogStatusText(item?.level),
-      metaText
-    });
+      metaText: ''
+    };
+    const bucket = grouped[key];
+    const last = bucket[bucket.length - 1];
+    if (last && last.detail === nextLog.detail && last.status === nextLog.status) continue;
+    bucket.push(nextLog);
   }
   return grouped;
 }
@@ -270,8 +332,9 @@ function applyTaskState(task) {
   const currentIndex = stepIndexFromKey(stepKey);
 
   const message = String(task?.message || '').trim();
+  const userMessage = normalizeLandscapeMessage(stepKey, message, { running: status !== 'completed' && status !== 'failed' });
   if (message) {
-    loadingMessage.value = message;
+    loadingMessage.value = userMessage;
   }
   if (task?.preview_graph && Array.isArray(task.preview_graph.nodes) && task.preview_graph.nodes.length > 0) {
     graphData.value = task.preview_graph;
@@ -296,7 +359,7 @@ function applyTaskState(task) {
       } else {
         step.status = 'pending';
       }
-      step.message = step.index === currentIndex ? message || '步骤失败' : step.message;
+      step.message = step.index === currentIndex ? userMessage || '步骤失败' : step.message;
       continue;
     }
 
@@ -307,7 +370,7 @@ function applyTaskState(task) {
     }
     if (step.index === currentIndex) {
       step.status = 'running';
-      step.message = message || step.message;
+      step.message = userMessage || step.message;
       continue;
     }
     step.status = 'pending';

@@ -22,19 +22,39 @@ function toStatusText(status) {
   return '准备中';
 }
 
-function normalizeTraceStep(step) {
-  const count = Number(step?.count);
-  const elapsedMs = Number(step?.elapsed_ms);
-  const status = String(step?.status || '').toLowerCase() === 'fallback' ? 'fallback' : 'done';
-  const metaParts = [];
-  if (Number.isFinite(count) && count > 0) metaParts.push(`数量 ${count}`);
-  if (Number.isFinite(elapsedMs) && elapsedMs > 0) metaParts.push(`耗时 ${Math.round(elapsedMs)}ms`);
+function resolveRetrievalCopyMap(inputType) {
+  if (inputType === 'arxiv_id' || inputType === 'doi') {
+    return {
+      search_web: { title: '定位目标论文', detail: '已确认目标论文及其上下文。' },
+      retrieve: { title: '扩展关联论文', detail: '已补充目标论文的引用与被引关系。' },
+      filter: { title: '筛选核心论文', detail: '已筛选高相关论文。' }
+    };
+  }
   return {
-    title: String(step?.title || ''),
-    detail: String(step?.detail || ''),
+    search_web: { title: '明确研究范围', detail: '已完成检索范围确认。' },
+    retrieve: { title: '收集候选论文', detail: '已补充候选论文集合。' },
+    filter: { title: '筛选核心论文', detail: '已筛选高相关论文。' }
+  };
+}
+
+function normalizeTraceStep(step, inputType = 'domain') {
+  const phase = String(step?.phase || '').trim().toLowerCase();
+  const status = String(step?.status || '').toLowerCase() === 'fallback' ? 'fallback' : 'done';
+  const count = Number(step?.count);
+  const phaseCopy = resolveRetrievalCopyMap(inputType)[phase] || resolveRetrievalCopyMap(inputType).filter;
+  const detail = status === 'fallback'
+    ? '该阶段遇到波动，已自动切换备用路径继续。'
+    : (
+      Number.isFinite(count) && count > 0 && phase !== 'search_web'
+        ? `已处理 ${Math.round(count)} 条相关信息。`
+        : phaseCopy.detail
+    );
+  return {
+    title: phaseCopy.title,
+    detail,
     status,
     statusText: toStatusText(status),
-    metaText: metaParts.join(' · ')
+    metaText: ''
   };
 }
 
@@ -55,26 +75,25 @@ function formatSearchRangeLabel(inputType, paperRangeYears) {
 }
 
 function createRetrievalRunningMessage(inputType) {
-  if (inputType === 'arxiv_id') return '正在解析 arXiv ID，定位种子论文并扩展引用网络...';
-  if (inputType === 'doi') return '正在解析 DOI，定位种子论文并扩展引用网络...';
-  return '正在执行网页检索、候选抓取与筛选...';
+  if (inputType === 'arxiv_id' || inputType === 'doi') return '正在围绕目标论文扩展相关研究...';
+  return '正在检索该方向的代表性论文...';
 }
 
 function createRunningRetrievalLogs(inputType) {
   const sourceDetail = inputType === 'domain'
-    ? '正在构造检索请求并访问学术数据源...'
-    : '正在定位种子论文并拉取引用/被引关系...';
+    ? '正在确认检索方向并收集候选论文...'
+    : '正在定位目标论文并扩展关联研究...';
   return [
     {
-      title: inputType === 'domain' ? 'LLM 检索规划与网页搜索' : '种子论文定位与请求构造',
+      title: inputType === 'domain' ? '研究方向确认' : '目标论文定位',
       detail: sourceDetail,
       status: 'doing',
       statusText: toStatusText('doing'),
       metaText: ''
     },
     {
-      title: '候选论文评分与筛选',
-      detail: '等待候选结果返回后执行评分筛选。',
+      title: '候选论文筛选',
+      detail: '等待候选结果返回后继续。',
       status: 'pending',
       statusText: toStatusText('pending'),
       metaText: ''
@@ -87,15 +106,76 @@ function createFallbackRetrievalLogs(retrieval) {
   const candidateCount = Number(retrieval?.candidate_count || 0);
   return [
     {
-      title: 'LLM 检索规划与网页搜索',
+      title: '候选论文收集',
       detail: '候选论文收集已完成。',
       status: 'done',
       statusText: toStatusText('done'),
       metaText: ''
     },
     {
-      title: '候选论文评分与筛选',
+      title: '候选论文筛选',
       detail: `已从 ${candidateCount} 个候选中筛选 ${selectedCount} 篇论文。`,
+      status: 'done',
+      statusText: toStatusText('done'),
+      metaText: ''
+    }
+  ];
+}
+
+function normalizeBuildTraceStep(step) {
+  const phase = String(step?.phase || '').trim().toLowerCase();
+  const status = String(step?.status || '').toLowerCase() === 'fallback' ? 'fallback' : 'done';
+  if (phase === 'store_graph') {
+    return {
+      title: '整理并保存图谱',
+      detail: status === 'fallback' ? '图谱保存阶段出现波动，已保留当前结果。' : '图谱结构已整理完成。',
+      status,
+      statusText: toStatusText(status),
+      metaText: ''
+    };
+  }
+  return {
+    title: '抽取主题关系',
+    detail: status === 'fallback' ? '关系整理阶段出现波动，已继续后续流程。' : '论文与主题关系已完成整理。',
+    status,
+    statusText: toStatusText(status),
+    metaText: ''
+  };
+}
+
+function createRunningBuildLogs() {
+  return [
+    {
+      title: '组织论文关系',
+      detail: '正在整理论文之间的关联结构...',
+      status: 'doing',
+      statusText: toStatusText('doing'),
+      metaText: ''
+    },
+    {
+      title: '生成图谱视图',
+      detail: '等待结构整理完成后生成图谱。',
+      status: 'pending',
+      statusText: toStatusText('pending'),
+      metaText: ''
+    }
+  ];
+}
+
+function createFallbackBuildLogs(result) {
+  const paperCount = Number(result?.paper_count || 0);
+  const entityCount = Number(result?.entity_count || 0);
+  return [
+    {
+      title: '组织论文关系',
+      detail: '已完成论文关系整理。',
+      status: 'done',
+      statusText: toStatusText('done'),
+      metaText: ''
+    },
+    {
+      title: '生成图谱视图',
+      detail: `已构建图谱内容（论文 ${paperCount}，主题 ${entityCount}）。`,
       status: 'done',
       statusText: toStatusText('done'),
       metaText: ''
@@ -256,8 +336,8 @@ export function usePaperWorkflow({
     {
       index: 1,
       key: 'retrieve',
-      title: '论文检索',
-      description: '检索与当前输入相关的论文集合。',
+      title: '收集论文',
+      description: '围绕输入主题收集并筛选高相关论文。',
       status: 'pending',
       message: '',
       logs: []
@@ -265,8 +345,8 @@ export function usePaperWorkflow({
     {
       index: 2,
       key: 'graph',
-      title: '知识图谱构建',
-      description: '构建图谱并完成实体关系抽取。',
+      title: '生成知识图谱',
+      description: '将论文关系组织成可交互知识图谱。',
       status: 'pending',
       message: '',
       logs: []
@@ -275,7 +355,7 @@ export function usePaperWorkflow({
       index: 3,
       key: 'lineage',
       title: '生成血缘树',
-      description: '定位种子论文并基于引用关系生成祖先与后代脉络。',
+      description: '围绕核心论文展开祖先与后代演化脉络。',
       status: 'pending',
       message: '',
       logs: [],
@@ -375,7 +455,8 @@ export function usePaperWorkflow({
   }
 
   async function playRetrievalTrace(rawSteps) {
-    const items = Array.isArray(rawSteps) ? rawSteps.map(normalizeTraceStep) : [];
+    const inputType = String(seedRef.value?.input_type || 'domain').trim().toLowerCase();
+    const items = Array.isArray(rawSteps) ? rawSteps.map((item) => normalizeTraceStep(item, inputType)) : [];
     if (!items.length) return;
     const evolving = [];
     for (const item of items) {
@@ -391,8 +472,21 @@ export function usePaperWorkflow({
     }
   }
 
-  function createRunningBuildLogs() {
-    return [];
+  async function playBuildTrace(rawSteps) {
+    const items = Array.isArray(rawSteps) ? rawSteps.map(normalizeBuildTraceStep) : [];
+    if (!items.length) return;
+    const evolving = [];
+    for (const item of items) {
+      evolving.push({
+        ...item,
+        status: 'doing',
+        statusText: toStatusText('doing')
+      });
+      setStepLogs('graph', [...evolving]);
+      await sleep(240);
+      evolving[evolving.length - 1] = item;
+      setStepLogs('graph', [...evolving]);
+    }
   }
 
   function resetSteps() {
@@ -441,10 +535,10 @@ export function usePaperWorkflow({
       if (!Array.isArray(retrieval.steps) || !retrieval.steps.length) {
         setStepLogs('retrieve', createFallbackRetrievalLogs(retrieval));
       }
-      setStepStatus(1, 'done', `${retrieval.selected_count} 篇论文已筛选（候选 ${retrieval.candidate_count}）。`);
+      setStepStatus(1, 'done', `已筛选 ${retrieval.selected_count} 篇核心论文。`);
       graphData.value = buildRetrievalPreviewGraph(retrievalQuery, retrieval.papers || []);
 
-      setStepStatus(2, 'running', '正在建图并抽取实体关系...');
+      setStepStatus(2, 'running', '正在生成知识图谱...');
       setStepLogs('graph', createRunningBuildLogs());
       const result = await buildKnowledgeGraph({
         query: retrievalQuery,
@@ -457,23 +551,24 @@ export function usePaperWorkflow({
       }, accessTokenRef.value || '');
 
       let resolvedGraph = result;
-      let storageHint = '已使用实时结果。';
       if (result.stored_in_neo4j) {
         try {
           resolvedGraph = await getKnowledgeGraph(result.graph_id);
-          storageHint = '已写入并从 Neo4j 回读。';
         } catch {
-          storageHint = '已写入 Neo4j，回读失败，已使用实时结果。';
+          // keep real-time result when persisted copy cannot be loaded
         }
       }
 
-      setStepLogs('graph', []);
+      await playBuildTrace(result.build_steps || []);
+      if (!Array.isArray(result.build_steps) || !result.build_steps.length) {
+        setStepLogs('graph', createFallbackBuildLogs(result));
+      }
       graphData.value = resolvedGraph;
       const panoramaStats = extractPanoramaStats(resolvedGraph || result || {});
       setStepStatus(
         2,
         'done',
-        `全景图谱展示 ${panoramaStats.paperCount} 个论文节点、${panoramaStats.edgeCount} 条论文关联边。${storageHint}`
+        `知识图谱已生成，包含 ${panoramaStats.paperCount} 个论文节点、${panoramaStats.edgeCount} 条关联边。`
       );
 
       const seedPaper = resolveLineageSeed({
@@ -483,11 +578,11 @@ export function usePaperWorkflow({
         graphResult: resolvedGraph || result
       });
       lineageSeed.value = seedPaper;
-      setStepStatus(3, 'action_required', `已定位种子论文：${seedPaper.title || seedPaper.paperId || '未命名种子论文'}。`);
+      setStepStatus(3, 'action_required', `已找到核心论文：${seedPaper.title || seedPaper.paperId || '未命名论文'}。`);
       setStepLogs('lineage', [
         {
-          title: '种子论文锁定',
-          detail: `已识别种子论文 ${seedPaper.paperId || 'unknown'}，可进入血缘树生成。`,
+          title: '核心论文确认',
+          detail: '已确认本次血缘树的核心论文，可继续生成。',
           status: 'done',
           statusText: toStatusText('done'),
           metaText: ''
@@ -556,18 +651,13 @@ export function usePaperWorkflow({
 
     setStepStatus(3, 'running', '正在生成血缘树...');
     pushLineageLog({
-      title: '种子论文确认',
-      detail: `已锁定种子论文 ${seedPaperId}。`,
-      status: 'done'
-    });
-    pushLineageLog({
-      title: '请求参数准备',
-      detail: '祖先深度 2，后代深度 2，强制刷新缓存。',
+      title: '核心论文确认',
+      detail: '已确认核心论文，开始构建血缘脉络。',
       status: 'done'
     });
     const requestLogIndex = pushLineageLog({
-      title: '引用网络构建',
-      detail: `正在查询 ${seedPaperId} 的祖先与后代关系。`,
+      title: '扩展引用脉络',
+      detail: '正在扩展祖先与后代论文关系...',
       status: 'doing'
     });
     setLineageStepAction({
@@ -575,7 +665,6 @@ export function usePaperWorkflow({
       disabled: true
     });
 
-    const requestStartedAt = Date.now();
     const payload = await loadLineage(seedPaperId, {
       ancestorDepth: 2,
       descendantDepth: 2,
@@ -586,7 +675,7 @@ export function usePaperWorkflow({
       updateLineageLog(requestLogIndex, {
         detail: lineageErrorMessage.value || '生成血缘树失败。',
         status: 'fallback',
-        metaText: `耗时 ${Math.max(1, Date.now() - requestStartedAt)}ms`
+        metaText: ''
       });
       pushLineageLog({
         title: '执行中断',
@@ -607,11 +696,11 @@ export function usePaperWorkflow({
     updateLineageLog(requestLogIndex, {
       detail: `引用网络构建完成，祖先 ${ancestors} 篇，后代 ${descendants} 篇。`,
       status: 'done',
-      metaText: `耗时 ${Math.max(1, Date.now() - requestStartedAt)}ms`
+      metaText: ''
     });
     pushLineageLog({
-      title: '视图渲染',
-      detail: '血缘树画布已渲染，已自动切换到血缘树视图。',
+      title: '结果渲染',
+      detail: '血缘树已渲染并自动切换到血缘树视图。',
       status: 'done'
     });
 
@@ -619,7 +708,7 @@ export function usePaperWorkflow({
     const token = String(accessTokenRef.value || '').trim();
     const historyLogIndex = pushLineageLog({
       title: '研究历史同步',
-      detail: graphId && token ? '正在同步血缘树状态到研究历史...' : '当前会话未绑定可写入的研究历史记录。',
+      detail: graphId && token ? '正在同步本次血缘树到研究历史...' : '当前会话未写入研究历史（不影响当前结果）。',
       status: graphId && token ? 'doing' : 'fallback'
     });
     if (graphId && token) {
@@ -631,12 +720,12 @@ export function usePaperWorkflow({
         lineage_payload: payload
       }, token).then((result) => {
         updateLineageLog(historyLogIndex, {
-          detail: result?.updated ? '研究历史已更新血缘树状态。' : '未找到可更新的研究历史记录（已跳过）。',
+          detail: result?.updated ? '研究历史已更新。' : '未找到可更新的研究历史记录（已跳过）。',
           status: result?.updated ? 'done' : 'fallback'
         });
       }).catch(() => {
         updateLineageLog(historyLogIndex, {
-          detail: '研究历史状态更新失败（已跳过，不影响当前结果）。',
+          detail: '研究历史更新失败（已跳过，不影响当前结果）。',
           status: 'fallback'
         });
         // keep lineage generation non-blocking even if history status update fails
@@ -648,7 +737,7 @@ export function usePaperWorkflow({
       detail: `血缘树构建完成，祖先 ${ancestors} 篇，后代 ${descendants} 篇。`,
       status: 'done'
     });
-    setStepStatus(3, 'done', `血缘树已生成：祖先 ${ancestors}，后代 ${descendants}。`);
+    setStepStatus(3, 'done', `血缘树已生成，关联论文 ${ancestors + descendants} 篇。`);
     setLineageStepAction(null);
   }
 

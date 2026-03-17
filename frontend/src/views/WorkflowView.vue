@@ -79,7 +79,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, ref } from 'vue';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
 
 import ErrorBoundary from '../components/common/ErrorBoundary.vue';
 import LoadingState from '../components/common/LoadingState.vue';
@@ -163,6 +163,20 @@ async function activateResultTab(tab) {
 onMounted(async () => {
   await runWorkflow();
 });
+
+watch(
+  () => [activeViewKey.value, Boolean(lineageData.value)],
+  async ([viewKey, hasLineage]) => {
+    if (viewKey !== 'lineage' || !hasLineage) return;
+    await nextTick();
+    await nextTick();
+    if (workflowLineageViewRef.value?.refreshLineageToMinOverview) {
+      await workflowLineageViewRef.value.refreshLineageToMinOverview();
+      return;
+    }
+    await workflowLineageViewRef.value?.refreshLineageDisplay?.();
+  }
+);
 </script>
 
 <style scoped>
