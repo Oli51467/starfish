@@ -122,7 +122,7 @@ class MapResponse(BaseModel):
 
 class KnowledgeGraphBuildRequest(BaseModel):
     query: str = Field(..., min_length=2)
-    max_papers: int = Field(default=12, ge=3, le=30)
+    max_papers: int = Field(default=24, ge=3, le=30)
     max_entities_per_paper: int = Field(default=6, ge=2, le=12)
     prefetched_papers: list["RetrievedPaper"] = Field(default_factory=list)
     research_type: ResearchType = "unknown"
@@ -132,7 +132,7 @@ class KnowledgeGraphBuildRequest(BaseModel):
 
 class KnowledgeGraphRetrieveRequest(BaseModel):
     query: str = Field(..., min_length=2)
-    max_papers: int = Field(default=12, ge=3, le=30)
+    max_papers: int = Field(default=24, ge=3, le=30)
     input_type: KnowledgeGraphRetrieveInputType = "domain"
     quick_mode: bool = False
     paper_range_years: int | None = Field(default=None, ge=1, le=30)
@@ -147,6 +147,14 @@ class RetrievalTraceStep(BaseModel):
     count: int = Field(default=0, ge=0)
     links: list[str] = Field(default_factory=list)
     elapsed_ms: int = Field(default=0, ge=0)
+
+
+class RetrievalProviderStat(BaseModel):
+    provider: str
+    status: Literal["done", "fallback"] = "done"
+    count: int = Field(default=0, ge=0)
+    elapsed_ms: int = Field(default=0, ge=0)
+    error: str = ""
 
 
 class BuildTraceStep(BaseModel):
@@ -173,7 +181,9 @@ class RetrievedPaper(BaseModel):
 
 class KnowledgeGraphRetrievalResponse(BaseModel):
     query: str
-    provider: Literal["semantic_scholar", "openalex", "mock"]
+    provider: Literal["semantic_scholar", "openalex", "arxiv", "mock"]
+    providers_used: list[str] = Field(default_factory=list)
+    provider_stats: list[RetrievalProviderStat] = Field(default_factory=list)
     candidate_count: int = Field(default=0, ge=0)
     selected_count: int = Field(default=0, ge=0)
     papers: list[RetrievedPaper] = Field(default_factory=list)
@@ -404,6 +414,7 @@ class LineagePaper(BaseModel):
     title: str
     authors: list[str] = Field(default_factory=list)
     year: int | None = None
+    publication_date: str | None = None
     citation_count: int = Field(default=0, ge=0)
     venue: str | None = None
     abstract: str | None = None

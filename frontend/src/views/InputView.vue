@@ -197,10 +197,10 @@ const props = defineProps({
 const emit = defineEmits(['start-analysis']);
 
 const workflowSteps = [
-  { key: 'retrieval', title: '知识检索', detail: '聚合论文、数据与背景资料，形成可用语料。' },
-  { key: 'graph', title: '图谱构建', detail: '抽取实体关系并连接上下文，生成结构化知识网络。' },
-  { key: 'explore', title: '领域地图探索', detail: '识别主干主题、空白区域与关键分叉方向。' },
-  { key: 'suggestion', title: '生成研究建议', detail: '输出可执行的选题建议与后续推进路径。' }
+  { key: 'nlp', title: '自然语言处理', detail: '理解研究问题，识别主题、约束与检索意图。' },
+  { key: 'retrieval', title: '信息检索', detail: '检索相关论文、引用线索与关键背景资料。' },
+  { key: 'graph', title: '知识图谱构建', detail: '抽取论文、概念与关系，生成结构化知识图谱。' },
+  { key: 'explore', title: '领域分支探索', detail: '沿主题脉络继续延展，发现可深入的研究分支。' }
 ];
 
 const paperRangeOptions = [

@@ -232,19 +232,150 @@ def _coerce_raw_paper(raw: dict[str, Any]) -> dict[str, Any]:
     if not paper_id or not title:
         return {}
 
+    abstract = (
+        str(raw.get("abstract") or "").strip()
+        or str(raw.get("summary") or "").strip()
+        or str(raw.get("description") or "").strip()
+    ) or None
+    publication_date = (
+        str(raw.get("publication_date") or "").strip()
+        or str(raw.get("publicationDate") or "").strip()
+        or str(raw.get("published_at") or "").strip()
+        or str(raw.get("published_date") or "").strip()
+        or None
+    )
+
     return {
         "paper_id": paper_id,
         "title": title,
         "authors": _normalize_authors(raw),
         "year": _safe_int(raw.get("year"), default=0) or None,
+        "publication_date": publication_date,
         "citation_count": max(0, _safe_int(raw.get("citation_count") or raw.get("citationCount"), default=0)),
         "venue": str(raw.get("venue") or "").strip() or None,
-        "abstract": str(raw.get("abstract") or "").strip() or None,
+        "abstract": abstract,
         "arxiv_id": _extract_arxiv_id(raw),
         "doi": _extract_doi(raw),
         "ctype": _normalize_citation_type(raw.get("ctype") or raw.get("relation_type") or "mentioning"),
         "hop": max(1, _safe_int(raw.get("hop"), default=1)),
     }
+
+
+def _paper_has_abstract(raw: dict[str, Any] | None) -> bool:
+    if not isinstance(raw, dict):
+        return False
+    return bool(str(raw.get("abstract") or "").strip())
+
+
+def _paper_has_publication_date(raw: dict[str, Any] | None) -> bool:
+    if not isinstance(raw, dict):
+        return False
+    return bool(str(raw.get("publication_date") or "").strip())
+
+
+def _paper_has_authors(raw: dict[str, Any] | None) -> bool:
+    if not isinstance(raw, dict):
+        return False
+    authors = raw.get("authors") or []
+    if isinstance(authors, str):
+        return bool(authors.strip())
+    if isinstance(authors, list):
+        return any(bool(str(item or "").strip()) for item in authors)
+    return False
+
+
+def _coverage_by(papers: list[dict[str, Any]], checker: Any) -> float:
+    if not papers:
+        return 0.0
+    count = sum(1 for paper in papers if checker(paper))
+    return count / max(1, len(papers))
+
+
+def _needs_metadata_enrichment(
+    root: dict[str, Any],
+    ancestors: list[dict[str, Any]],
+    descendants: list[dict[str, Any]],
+) -> bool:
+    if not _paper_has_abstract(root):
+        return True
+    if not _paper_has_publication_date(root):
+        return True
+    if not _paper_has_authors(root):
+        return True
+    related = [*ancestors, *descendants]
+    if not related:
+        return False
+    # Keep refreshing when related-paper metadata coverage is very low.
+    return (
+        _coverage_by(related, _paper_has_abstract) < 0.25
+        or _coverage_by(related, _paper_has_publication_date) < 0.25
+        or _coverage_by(related, _paper_has_authors) < 0.25
+    )
+
+
+def _merge_raw_paper(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    if not base:
+        return dict(incoming)
+    if not incoming:
+        return dict(base)
+
+    merged = dict(base)
+    base_abstract = str(base.get("abstract") or "").strip()
+    incoming_abstract = str(incoming.get("abstract") or "").strip()
+    base_publication_date = str(base.get("publication_date") or "").strip()
+    incoming_publication_date = str(incoming.get("publication_date") or "").strip()
+    base_authors = _normalize_authors(base)
+    incoming_authors = _normalize_authors(incoming)
+
+    if not str(merged.get("title") or "").strip() and str(incoming.get("title") or "").strip():
+        merged["title"] = incoming.get("title")
+    if not merged.get("year") and incoming.get("year"):
+        merged["year"] = incoming.get("year")
+    if len(incoming_publication_date) > len(base_publication_date):
+        merged["publication_date"] = incoming_publication_date
+    if not merged.get("venue") and incoming.get("venue"):
+        merged["venue"] = incoming.get("venue")
+    if len(incoming_authors) > len(base_authors):
+        merged["authors"] = incoming_authors
+    if len(incoming_abstract) > len(base_abstract):
+        merged["abstract"] = incoming_abstract
+    merged["citation_count"] = max(
+        _safe_int(base.get("citation_count"), default=0),
+        _safe_int(incoming.get("citation_count"), default=0),
+    )
+
+    for key in ("arxiv_id", "doi", "ctype", "hop", "relation_type", "relation_description"):
+        if not merged.get(key) and incoming.get(key):
+            merged[key] = incoming.get(key)
+    return merged
+
+
+def _merge_raw_paper_lists(
+    base_items: list[dict[str, Any]],
+    incoming_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    index_map: dict[str, int] = {}
+
+    for item in base_items:
+        paper_id = str(item.get("paper_id") or "").strip()
+        if not paper_id:
+            continue
+        index_map[paper_id] = len(merged)
+        merged.append(dict(item))
+
+    for item in incoming_items:
+        paper_id = str(item.get("paper_id") or "").strip()
+        if not paper_id:
+            continue
+        target_index = index_map.get(paper_id)
+        if target_index is None:
+            index_map[paper_id] = len(merged)
+            merged.append(dict(item))
+            continue
+        merged[target_index] = _merge_raw_paper(merged[target_index], item)
+
+    return merged
 
 
 async def fetch_lineage_from_semantic(
@@ -735,6 +866,7 @@ def _to_lineage_paper(raw: dict[str, Any], *, node_type: str) -> LineagePaper:
         title=str(raw.get("title") or "Unknown Paper"),
         authors=_normalize_authors(raw),
         year=raw.get("year"),
+        publication_date=str(raw.get("publication_date") or "").strip() or None,
         citation_count=max(0, _safe_int(raw.get("citation_count"), default=0)),
         venue=raw.get("venue"),
         abstract=raw.get("abstract"),
@@ -892,6 +1024,7 @@ async def build_lineage(
         not root_raw
         or len(ancestor_raw) < target_ancestor_count
         or len(descendant_raw) < target_descendant_count
+        or _needs_metadata_enrichment(root_raw, ancestor_raw, descendant_raw)
     )
 
     semantic_result: dict[str, Any] | None = None
@@ -931,18 +1064,29 @@ async def build_lineage(
 
             semantic_root = _coerce_raw_paper(semantic_result.get("root") or {})
             if semantic_root:
-                root_raw = semantic_root
-            if len(ancestor_raw) < target_ancestor_count:
-                ancestor_raw = [_coerce_raw_paper(item) for item in (semantic_result.get("ancestors") or [])]
-                ancestor_raw = [item for item in ancestor_raw if item]
-            if len(descendant_raw) < target_descendant_count:
-                descendant_raw = [_coerce_raw_paper(item) for item in (semantic_result.get("descendants") or [])]
-                descendant_raw = [item for item in descendant_raw if item]
+                root_raw = _merge_raw_paper(root_raw, semantic_root) if root_raw else semantic_root
+
+            semantic_ancestors = [_coerce_raw_paper(item) for item in (semantic_result.get("ancestors") or [])]
+            semantic_ancestors = [item for item in semantic_ancestors if item]
+            if semantic_ancestors:
+                if len(ancestor_raw) < target_ancestor_count:
+                    ancestor_raw = semantic_ancestors
+                else:
+                    ancestor_raw = _merge_raw_paper_lists(ancestor_raw, semantic_ancestors)
+
+            semantic_descendants = [_coerce_raw_paper(item) for item in (semantic_result.get("descendants") or [])]
+            semantic_descendants = [item for item in semantic_descendants if item]
+            if semantic_descendants:
+                if len(descendant_raw) < target_descendant_count:
+                    descendant_raw = semantic_descendants
+                else:
+                    descendant_raw = _merge_raw_paper_lists(descendant_raw, semantic_descendants)
 
             if (
                 root_raw
                 and len(ancestor_raw) >= target_ancestor_count
                 and len(descendant_raw) >= target_descendant_count
+                and not _needs_metadata_enrichment(root_raw, ancestor_raw, descendant_raw)
             ):
                 break
 
@@ -950,6 +1094,7 @@ async def build_lineage(
         not root_raw
         or len(ancestor_raw) < target_ancestor_count
         or len(descendant_raw) < target_descendant_count
+        or _needs_metadata_enrichment(root_raw, ancestor_raw, descendant_raw)
     )
     openalex_error: Exception | None = None
     if needs_openalex:
@@ -971,23 +1116,30 @@ async def build_lineage(
                 continue
 
             openalex_root = _coerce_raw_paper(openalex_result.get("root") or {})
-            if openalex_root and not root_raw:
-                root_raw = openalex_root
-            if len(ancestor_raw) < target_ancestor_count:
-                openalex_ancestors = [_coerce_raw_paper(item) for item in (openalex_result.get("ancestors") or [])]
-                openalex_ancestors = [item for item in openalex_ancestors if item]
-                if openalex_ancestors:
+            if openalex_root:
+                root_raw = _merge_raw_paper(root_raw, openalex_root) if root_raw else openalex_root
+
+            openalex_ancestors = [_coerce_raw_paper(item) for item in (openalex_result.get("ancestors") or [])]
+            openalex_ancestors = [item for item in openalex_ancestors if item]
+            if openalex_ancestors:
+                if len(ancestor_raw) < target_ancestor_count:
                     ancestor_raw = openalex_ancestors
-            if len(descendant_raw) < target_descendant_count:
-                openalex_descendants = [_coerce_raw_paper(item) for item in (openalex_result.get("descendants") or [])]
-                openalex_descendants = [item for item in openalex_descendants if item]
-                if openalex_descendants:
+                else:
+                    ancestor_raw = _merge_raw_paper_lists(ancestor_raw, openalex_ancestors)
+
+            openalex_descendants = [_coerce_raw_paper(item) for item in (openalex_result.get("descendants") or [])]
+            openalex_descendants = [item for item in openalex_descendants if item]
+            if openalex_descendants:
+                if len(descendant_raw) < target_descendant_count:
                     descendant_raw = openalex_descendants
+                else:
+                    descendant_raw = _merge_raw_paper_lists(descendant_raw, openalex_descendants)
 
             if (
                 root_raw
                 and len(ancestor_raw) >= target_ancestor_count
                 and len(descendant_raw) >= target_descendant_count
+                and not _needs_metadata_enrichment(root_raw, ancestor_raw, descendant_raw)
             ):
                 break
 

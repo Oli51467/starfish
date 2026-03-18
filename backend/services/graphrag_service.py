@@ -32,6 +32,7 @@ from models.schemas import (
     RetrievalTraceStep,
 )
 from repositories.neo4j_repository import Neo4jRepository, get_neo4j_repository
+from services.retrieval.multi_source_retriever import MultiSourceRetriever
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,10 @@ class GraphRAGService:
     def __init__(self, neo4j_repo: Neo4jRepository | None = None) -> None:
         self.semantic = SemanticScholarClient()
         self.openalex = OpenAlexClient()
+        self.retriever = MultiSourceRetriever(
+            semantic_client=self.semantic,
+            openalex_client=self.openalex,
+        )
         self.neo4j_repo = neo4j_repo or get_neo4j_repository()
         self.settings = get_settings()
         self._embedding_client = None
@@ -201,6 +206,8 @@ class GraphRAGService:
         return KnowledgeGraphRetrievalResponse(
             query=resolved_query,
             provider=str(retrieval_payload["provider"]),
+            providers_used=[str(item) for item in (retrieval_payload.get("providers_used") or []) if str(item).strip()],
+            provider_stats=list(retrieval_payload.get("provider_stats") or []),
             candidate_count=int(retrieval_payload["candidate_count"]),
             selected_count=len(papers),
             papers=papers,
@@ -326,39 +333,34 @@ class GraphRAGService:
             return {
                 "query": safe_value,
                 "provider": "mock",
+                "providers_used": [],
+                "provider_stats": [],
                 "candidate_count": len(candidates),
                 "selected_papers": selected_papers,
                 "steps": steps,
             }
 
         fetch_start = perf_counter()
+        seed_lookup: dict[str, Any] = {}
+        seed_provider_stats: list[dict[str, Any]] = []
+        seed_providers_used: list[str] = []
         try:
-            provider_chain = [preferred_seed_provider]
-            backup_provider = "semantic_scholar" if preferred_seed_provider == "openalex" else "openalex"
-            provider_chain.append(backup_provider)
-
-            seed_document: dict[str, Any] = {}
-            last_error: Exception | None = None
-            for provider_name in provider_chain:
-                try:
-                    seed_document = self._fetch_seed_document_by_provider(
-                        provider=provider_name,
-                        input_type=input_type,
-                        input_value=safe_value,
-                        reference_limit=candidate_limit,
-                        citation_limit=candidate_limit,
-                    )
-                    if seed_document.get("seed_paper"):
-                        break
-                except Exception as exc:  # noqa: BLE001
-                    last_error = exc
-                    continue
-
-            if not seed_document.get("seed_paper"):
-                if last_error is not None:
-                    raise last_error
+            seed_lookup = self.retriever.fetch_seed_paper(
+                input_type=input_type,
+                input_value=safe_value,
+                reference_limit=candidate_limit,
+                citation_limit=candidate_limit,
+                preferred_provider=preferred_seed_provider,
+            )
+            seed_provider_stats = list(seed_lookup.get("source_stats") or [])
+            seed_providers_used = [
+                str(item).strip()
+                for item in (seed_lookup.get("providers_used") or [])
+                if str(item).strip()
+            ]
+            seed_paper = dict(seed_lookup.get("seed_paper") or {})
+            if not seed_paper:
                 raise ValueError(f"seed_paper_not_found: {input_type}:{safe_value}")
-            seed_paper = seed_document.get("seed_paper") or {}
         except Exception as exc:  # noqa: BLE001
             logger.warning("seed retrieval failed for input_type=%s, value=%s: %s", input_type, safe_value, exc)
             fallback_payload = self._retrieve_papers_from_query_with_trace(
@@ -381,17 +383,52 @@ class GraphRAGService:
                     elapsed_seconds=0.0,
                 ),
             )
+            fallback_payload["provider_stats"] = self._merge_source_stats(
+                seed_provider_stats,
+                list(fallback_payload.get("provider_stats") or []),
+            )
+            fallback_payload["providers_used"] = self._merge_provider_list(
+                seed_providers_used,
+                list(fallback_payload.get("providers_used") or []),
+            )
             fallback_payload["steps"] = fallback_payload_steps
             return fallback_payload
 
         seed_title = str(seed_paper.get("title") or "").strip() or safe_value
         seed_paper_id = str(seed_paper.get("paper_id") or "").strip()
         inferred_provider = self._infer_seed_provider(seed_paper)
-        provider_used = inferred_provider if inferred_provider in {"semantic_scholar", "openalex"} else preferred_seed_provider
+        provider_used = inferred_provider if inferred_provider in {"semantic_scholar", "openalex", "arxiv"} else preferred_seed_provider
 
         candidates = self._collect_seed_candidates(seed_paper, candidate_limit=candidate_limit)
         related_references = len(seed_paper.get("references") or [])
         related_citations = len(seed_paper.get("citations") or [])
+        expansion_added = 0
+        sparse_threshold = max(3, min(8, safe_max // 2))
+        if len(candidates) <= sparse_threshold:
+            expansion_limit = min(candidate_limit, max(safe_max * 5, 36))
+            expansion_payload = self.retriever.search_papers(
+                query=seed_title,
+                limit=expansion_limit,
+                preferred_provider=preferred_seed_provider,
+            )
+            expansion_papers = list(expansion_payload.get("papers") or [])
+            if expansion_papers:
+                expanded = self._merge_candidate_lists(
+                    primary=candidates,
+                    secondary=expansion_papers,
+                    limit=candidate_limit,
+                )
+                expansion_added = max(0, len(expanded) - len(candidates))
+                candidates = expanded
+            seed_provider_stats = self._merge_source_stats(
+                seed_provider_stats,
+                list(expansion_payload.get("source_stats") or []),
+            )
+            seed_providers_used = self._merge_provider_list(
+                seed_providers_used,
+                list(expansion_payload.get("providers_used") or []),
+            )
+
         if not candidates:
             provider_used = "mock"
             candidates = self._fallback_papers(query=seed_title, max_papers=candidate_limit)
@@ -403,17 +440,20 @@ class GraphRAGService:
         )
         range_hint = self._build_year_range_hint(normalized_range, range_filter_stats)
 
-        retrieve_status = "done" if provider_used in {"semantic_scholar", "openalex"} else "fallback"
+        retrieve_status = "done" if provider_used in {"semantic_scholar", "openalex", "arxiv"} else "fallback"
+        trace_provider = "+".join(seed_providers_used) if seed_providers_used else provider_used
         steps.append(
             self._build_retrieval_step(
                 phase="retrieve",
                 title="候选论文聚合",
                 detail=(
                     f"已定位种子论文《{seed_title}》，聚合参考文献 {related_references} 篇、"
-                    f"被引文献 {related_citations} 篇。{range_hint}"
+                    f"被引文献 {related_citations} 篇。"
+                    f"{' 已补充相关论文 ' + str(expansion_added) + ' 篇。' if expansion_added > 0 else ''}"
+                    f"{range_hint}"
                 ),
                 status=retrieve_status,
-                provider=provider_used,
+                provider=trace_provider,
                 count=len(candidates),
                 links=[],
                 elapsed_seconds=perf_counter() - fetch_start,
@@ -435,7 +475,7 @@ class GraphRAGService:
                     f"输入 {filter_stats['input']} 条，去重后 {filter_stats['deduped']} 条，"
                     f"按相关度/引用数/新近性筛选保留 {filter_stats['selected']} 条。"
                 ),
-                provider=provider_used,
+                provider=trace_provider,
                 count=len(selected_papers),
                 links=[],
                 elapsed_seconds=filter_stats["elapsed_seconds"],
@@ -444,10 +484,58 @@ class GraphRAGService:
         return {
             "query": seed_title or safe_value,
             "provider": provider_used,
+            "providers_used": seed_providers_used,
+            "provider_stats": seed_provider_stats,
             "candidate_count": len(candidates),
             "selected_papers": selected_papers,
             "steps": steps,
         }
+
+    @staticmethod
+    def _merge_provider_list(primary: list[str], secondary: list[str]) -> list[str]:
+        merged: list[str] = []
+        for raw in [*(primary or []), *(secondary or [])]:
+            value = str(raw or "").strip()
+            if not value or value in merged:
+                continue
+            merged.append(value)
+        return merged
+
+    @staticmethod
+    def _merge_source_stats(
+        primary: list[dict[str, Any]],
+        secondary: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        merged: dict[str, dict[str, Any]] = {}
+        for item in [*(primary or []), *(secondary or [])]:
+            provider = str(item.get("provider") or "").strip()
+            if not provider:
+                continue
+            status = "done" if str(item.get("status") or "").strip().lower() == "done" else "fallback"
+            count = GraphRAGService._safe_int(item.get("count"))
+            elapsed_ms = GraphRAGService._safe_int(item.get("elapsed_ms"))
+            error = str(item.get("error") or "").strip()
+
+            current = merged.get(provider)
+            if current is None:
+                merged[provider] = {
+                    "provider": provider,
+                    "status": status,
+                    "count": count,
+                    "elapsed_ms": elapsed_ms,
+                    "error": "" if status == "done" else error,
+                }
+                continue
+
+            current["status"] = "done" if "done" in {current.get("status"), status} else "fallback"
+            current["count"] = max(GraphRAGService._safe_int(current.get("count")), count)
+            current["elapsed_ms"] = max(GraphRAGService._safe_int(current.get("elapsed_ms")), elapsed_ms)
+            if current["status"] == "done":
+                current["error"] = ""
+            elif not str(current.get("error") or "").strip() and error:
+                current["error"] = error
+
+        return list(merged.values())
 
     def _fetch_seed_document_semantic(
         self,
@@ -591,52 +679,60 @@ class GraphRAGService:
             return {
                 "query": safe_query,
                 "provider": "mock",
+                "providers_used": [],
+                "provider_stats": [],
                 "candidate_count": len(candidates),
                 "selected_papers": selected_papers,
                 "steps": steps,
             }
 
-        search_result = self._search_candidates_for_query(
+        search_result = self.retriever.search_papers(
             query=safe_query,
             limit=candidate_limit,
-            allow_mock=True,
             preferred_provider=primary_provider,
         )
-        provider_used = str(search_result["provider"])
-        candidate_papers = search_result["papers"]
+        provider_used = str(search_result.get("provider") or "mock")
+        providers_used = [
+            str(item).strip()
+            for item in (search_result.get("providers_used") or [])
+            if str(item).strip()
+        ]
+        provider_stats = list(search_result.get("source_stats") or [])
+        candidate_papers = list(search_result.get("papers") or [])
+        if not candidate_papers:
+            provider_used = "mock"
+            candidate_papers = self._fallback_papers(query=safe_query, max_papers=candidate_limit)
+
         candidate_papers, range_filter_stats = self._apply_paper_year_range(
             candidate_papers,
             paper_range_years=normalized_range,
         )
         range_hint = self._build_year_range_hint(normalized_range, range_filter_stats)
-        retrieve_status = str(search_result["status"])
-        retrieve_elapsed = float(search_result["elapsed_seconds"])
+        retrieve_status = "done" if provider_used != "mock" else "fallback"
+        retrieve_elapsed = float(search_result.get("elapsed_seconds") or 0.0)
         used_fallback = bool(search_result.get("used_fallback", False))
 
         if provider_used == "mock":
             retrieve_detail = f"外部检索失败，已降级为 mock 数据（{len(candidate_papers)} 条候选）。{range_hint}"
         else:
-            provider_labels = {
-                "semantic_scholar": "Semantic Scholar",
-                "openalex": "OpenAlex",
-            }
-            primary_label = provider_labels.get(primary_provider, primary_provider)
-            active_label = provider_labels.get(provider_used, provider_used)
-            if used_fallback and provider_used != primary_provider:
+            if len(providers_used) > 1:
+                retrieve_detail = f"并行检索已完成，多个学术索引共返回 {len(candidate_papers)} 条候选论文。{range_hint}"
+            elif used_fallback and provider_used != primary_provider:
                 retrieve_detail = (
-                    f"主检索通道 {primary_label} 暂不可用，"
-                    f"已自动切换至 {active_label}，返回 {len(candidate_papers)} 条候选论文。{range_hint}"
+                    f"主检索通道暂不可用，"
+                    f"已自动切换备用通道，返回 {len(candidate_papers)} 条候选论文。{range_hint}"
                 )
             else:
-                retrieve_detail = f"{active_label} 返回 {len(candidate_papers)} 条候选论文。{range_hint}"
+                retrieve_detail = f"检索通道返回 {len(candidate_papers)} 条候选论文。{range_hint}"
 
+        trace_provider = "+".join(providers_used) if providers_used else provider_used
         steps.append(
             self._build_retrieval_step(
                 phase="retrieve",
                 title="候选论文检索",
                 detail=retrieve_detail,
                 status=retrieve_status,
-                provider=provider_used,
+                provider=trace_provider,
                 count=len(candidate_papers),
                 links=[],
                 elapsed_seconds=retrieve_elapsed,
@@ -652,7 +748,7 @@ class GraphRAGService:
                     f"输入 {filter_stats['input']} 条，去重后 {filter_stats['deduped']} 条，"
                     f"按相关度/引用数/新近性筛选保留 {filter_stats['selected']} 条。"
                 ),
-                provider=provider_used,
+                provider=trace_provider,
                 count=len(selected_papers),
                 links=[],
                 elapsed_seconds=filter_stats["elapsed_seconds"],
@@ -661,6 +757,8 @@ class GraphRAGService:
         return {
             "query": safe_query,
             "provider": provider_used,
+            "providers_used": providers_used,
+            "provider_stats": provider_stats,
             "candidate_count": len(candidate_papers),
             "selected_papers": selected_papers,
             "steps": steps,
@@ -772,9 +870,7 @@ class GraphRAGService:
         if input_type == "arxiv_id":
             return (
                 (
-                    "正在解析 arXiv ID，使用 OpenAlex 定位种子论文并拉取引用/被引关系。"
-                    if use_openalex
-                    else "正在解析 arXiv ID，使用 Semantic Scholar 定位种子论文并拉取引用/被引关系。"
+                    "正在解析 arXiv ID，并行定位种子论文及其关联研究。"
                 ),
                 [f"https://api.openalex.org/works/arXiv:{quote_plus(safe_value)}"]
                 if use_openalex
@@ -783,9 +879,7 @@ class GraphRAGService:
         if input_type == "doi":
             return (
                 (
-                    "正在解析 DOI，使用 OpenAlex 定位种子论文并拉取引用/被引关系。"
-                    if use_openalex
-                    else "正在解析 DOI，使用 Semantic Scholar 定位种子论文并拉取引用/被引关系。"
+                    "正在解析 DOI，并行定位种子论文及其关联研究。"
                 ),
                 [f"https://api.openalex.org/works?search={quote_plus(safe_value)}"]
                 if use_openalex
@@ -964,7 +1058,9 @@ class GraphRAGService:
             return "mock"
         if paper_id.startswith("openalex:"):
             return "openalex"
-        if paper_id.startswith(("doi:", "arxiv:", "title:", "pdf:")):
+        if paper_id.startswith("arxiv:"):
+            return "arxiv"
+        if paper_id.startswith(("doi:", "title:", "pdf:")):
             return "mock"
         return "semantic_scholar"
 
@@ -1306,6 +1402,8 @@ class GraphRAGService:
             return "semantic_scholar"
         if "openalex" in normalized:
             return "openalex"
+        if "arxiv" in normalized:
+            return "arxiv"
         return "mock"
 
     @staticmethod

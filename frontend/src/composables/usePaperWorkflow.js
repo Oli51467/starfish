@@ -527,7 +527,7 @@ export function usePaperWorkflow({
         input_type: inputType,
         quick_mode: quickMode,
         paper_range_years: paperRangeYears,
-        max_papers: 12
+        max_papers: 24
       });
 
       const retrievalQuery = String(retrieval?.query || seed.input_value).trim() || seed.input_value;
@@ -542,7 +542,7 @@ export function usePaperWorkflow({
       setStepLogs('graph', createRunningBuildLogs());
       const result = await buildKnowledgeGraph({
         query: retrievalQuery,
-        max_papers: 12,
+        max_papers: 24,
         max_entities_per_paper: 6,
         prefetched_papers: retrieval.papers || [],
         research_type: inputType || 'unknown',

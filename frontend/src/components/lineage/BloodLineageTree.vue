@@ -154,53 +154,69 @@
           <p class="blood-tooltip-title">{{ tooltip.title }}</p>
           <p class="blood-tooltip-meta mono">{{ tooltip.meta }}</p>
         </div>
-      </div>
-
-      <aside class="blood-detail-panel" :class="{ 'is-open': Boolean(selectedNode) }">
-        <header class="blood-detail-head">
-          <p class="blood-detail-title">{{ selectedNode?.title || '选择节点查看详情' }}</p>
-          <button class="blood-detail-close" type="button" @click="selectedNode = null">✕</button>
-        </header>
-        <div v-if="selectedNode" class="blood-detail-body">
-          <p class="blood-detail-meta mono">{{ detailMeta }}</p>
-          <div class="blood-detail-tags">
-            <span class="blood-detail-tag">{{ selectedNodeInfo.nodeRoleLabel }}</span>
-            <span v-if="selectedNodeInfo.relationLabel" class="blood-detail-tag">{{ selectedNodeInfo.relationLabel }}</span>
-          </div>
-
-          <div class="blood-detail-grid">
-            <article
-              v-for="item in selectedNodeInfo.metaItems"
-              :key="item.label"
-              class="blood-detail-grid-item"
-            >
-              <p class="blood-detail-grid-label mono">{{ item.label }}</p>
-              <p class="blood-detail-grid-value">{{ item.value }}</p>
-            </article>
-          </div>
-
-          <section v-if="selectedNodeInfo.relationDescription" class="blood-detail-section">
-            <p class="blood-detail-section-title mono">关系说明</p>
-            <p class="blood-detail-text">{{ selectedNodeInfo.relationDescription }}</p>
-          </section>
-
-          <section class="blood-detail-section">
-            <p class="blood-detail-section-title mono">摘要</p>
-            <p class="blood-detail-text">{{ selectedNodeInfo.abstractText }}</p>
-          </section>
-
-          <a
-            v-if="selectedNodeInfo.url"
-            class="blood-detail-link mono"
-            :href="selectedNodeInfo.url"
-            target="_blank"
-            rel="noopener noreferrer"
+        <div v-if="selectedNode" class="blood-detail-overlay">
+          <article
+            class="blood-detail-card"
+            @click.stop
+            @pointerdown.stop
+            @pointermove.stop
+            @pointerup.stop
           >
-            查看原文
-          </a>
-          <p class="blood-detail-id mono">{{ selectedNodeInfo.paperId }}</p>
+            <header class="blood-detail-head">
+              <p class="blood-detail-title">{{ selectedNode?.title || '选择节点查看详情' }}</p>
+              <button class="blood-detail-close" type="button" aria-label="关闭卡片" title="关闭" @click="selectedNode = null">
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M4 4l8 8M12 4l-8 8" />
+                </svg>
+              </button>
+            </header>
+            <div class="blood-detail-body">
+              <div class="blood-detail-tags">
+                <span class="blood-detail-tag" :class="selectedNodeInfo.nodeRoleTagClass">{{ selectedNodeInfo.nodeRoleLabel }}</span>
+                <span
+                  v-if="selectedNodeInfo.relationLabel"
+                  class="blood-detail-tag"
+                  :class="selectedNodeInfo.relationTagClass"
+                >
+                  {{ selectedNodeInfo.relationLabel }}
+                </span>
+              </div>
+
+              <div class="blood-detail-grid">
+                <article
+                  v-for="item in selectedNodeInfo.metaItems"
+                  :key="item.label"
+                  class="blood-detail-grid-item"
+                >
+                  <p class="blood-detail-grid-label mono">{{ item.label }}</p>
+                  <p class="blood-detail-grid-value">{{ item.value }}</p>
+                </article>
+              </div>
+
+              <section v-if="selectedNodeInfo.relationDescription" class="blood-detail-section">
+                <p class="blood-detail-section-title mono">关系说明</p>
+                <p class="blood-detail-text">{{ selectedNodeInfo.relationDescription }}</p>
+              </section>
+
+              <section class="blood-detail-section">
+                <p class="blood-detail-section-title mono">摘要</p>
+                <p class="blood-detail-text">{{ selectedNodeInfo.abstractText }}</p>
+              </section>
+
+              <a
+                v-if="selectedNodeInfo.url"
+                class="blood-detail-link mono"
+                :href="selectedNodeInfo.url"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                查看原文
+              </a>
+              <p class="blood-detail-id mono">{{ selectedNodeInfo.paperId }}</p>
+            </div>
+          </article>
         </div>
-      </aside>
+      </div>
     </div>
   </section>
 </template>
@@ -354,6 +370,30 @@ function textOrFallback(value, fallback = '-') {
   return text || fallback;
 }
 
+function firstNonEmptyText(...values) {
+  for (const value of values) {
+    if (value == null) continue;
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (trimmed) return trimmed;
+      continue;
+    }
+    if (Array.isArray(value)) {
+      const joined = value
+        .map((item) => String(item ?? '').trim())
+        .filter(Boolean)
+        .join(', ')
+        .trim();
+      if (joined) return joined;
+      continue;
+    }
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return String(value);
+    }
+  }
+  return '';
+}
+
 function normalizeCitationType(value) {
   const normalized = String(value || '').trim().toLowerCase();
   if (Object.prototype.hasOwnProperty.call(citationConfig, normalized)) {
@@ -384,6 +424,19 @@ function resolveNodeRoleLabel(node) {
   return nodeRoleLabelZh[key] || nodeRoleLabelZh.descendant;
 }
 
+function resolveNodeRoleTagClass(node) {
+  const key = String(node?.nodeType || '').trim().toLowerCase();
+  if (key === 'root') return 'is-root';
+  if (key === 'ancestor') return 'is-ancestor';
+  if (key === 'descendant') return 'is-descendant';
+  return '';
+}
+
+function resolveRelationTagClass(type) {
+  const normalized = normalizeCitationType(type);
+  return `is-${normalized}`;
+}
+
 function resolveNodeYearText(node) {
   const raw = resolveNodeYear(node, timelineMetrics.value.fallbackYear);
   if (!Number.isFinite(raw)) return '-';
@@ -391,12 +444,14 @@ function resolveNodeYearText(node) {
 }
 
 function resolveNodePublicationDate(node) {
-  const raw = textOrFallback(
-    node?.publication_date
-    ?? node?.published_at
-    ?? node?.date
-    ?? node?.published_date,
-    ''
+  const raw = firstNonEmptyText(
+    node?.publication_date,
+    node?.published_at,
+    node?.date,
+    node?.published_date,
+    node?.meta?.publication_date,
+    node?.meta?.published_at,
+    node?.meta?.published_date
   );
   if (!raw) return '';
   const parsed = new Date(raw);
@@ -406,17 +461,23 @@ function resolveNodePublicationDate(node) {
 
 function resolveNodeVenue(node) {
   return textOrFallback(
-    node?.venue
-    ?? node?.journal
-    ?? node?.conference
-    ?? node?.source
-    ?? node?.publisher,
+    firstNonEmptyText(
+      node?.venue,
+      node?.journal,
+      node?.conference,
+      node?.source,
+      node?.publisher,
+      node?.meta?.venue,
+      node?.meta?.journal,
+      node?.meta?.conference,
+      node?.meta?.source
+    ),
     '-'
   );
 }
 
 function resolveNodeAuthors(node) {
-  const rawAuthors = node?.authors;
+  const rawAuthors = node?.authors ?? node?.meta?.authors;
   if (Array.isArray(rawAuthors)) {
     const normalized = rawAuthors.map((item) => String(item || '').trim()).filter(Boolean);
     if (!normalized.length) return '-';
@@ -427,17 +488,47 @@ function resolveNodeAuthors(node) {
 }
 
 function resolveNodeUrl(node) {
-  const raw = textOrFallback(
-    node?.url
-    ?? node?.paper_url
-    ?? node?.pdf_url
-    ?? node?.link
-    ?? node?.source_url,
-    ''
+  const raw = firstNonEmptyText(
+    node?.url,
+    node?.paper_url,
+    node?.pdf_url,
+    node?.link,
+    node?.source_url,
+    node?.meta?.url,
+    node?.meta?.paper_url,
+    node?.meta?.pdf_url,
+    node?.meta?.source_url
   );
   if (!raw) return '';
   if (/^https?:\/\//i.test(raw)) return raw;
   return '';
+}
+
+function resolveNodeAbstract(node) {
+  const text = firstNonEmptyText(
+    node?.abstract,
+    node?.summary,
+    node?.description,
+    node?.abstract_text,
+    node?.abstractText,
+    node?.paper_abstract,
+    node?.meta?.abstract,
+    node?.meta?.summary,
+    node?.meta?.description,
+    node?.meta?.abstract_text,
+    node?.paper?.abstract,
+    node?.paper?.summary
+  );
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+function resolveNodeRelationDescription(node) {
+  return firstNonEmptyText(
+    node?.relation_description,
+    node?.relationDescription,
+    node?.meta?.relation_description,
+    node?.meta?.relationDescription
+  );
 }
 
 function normalizeYear(value) {
@@ -674,7 +765,7 @@ const normalizedNodes = computed(() => {
     id: rootId,
     paper_id: rootId,
     nodeType: 'root',
-    abstract: root?.abstract || '',
+    abstract: resolveNodeAbstract(root),
     citation_count: normalizeCitationCount(root?.citation_count || root?.citationCount),
     relation_type: 'mentioning',
     relation_description: '种子论文',
@@ -684,14 +775,14 @@ const normalizedNodes = computed(() => {
     ...item,
     id: resolvePaperId(item) || `ancestor-${index}`,
     paper_id: resolvePaperId(item) || `ancestor-${index}`,
-    abstract: item?.abstract || '',
+    abstract: resolveNodeAbstract(item),
     nodeType: 'ancestor'
   }));
   const descendantNodes = descendants.map((item, index) => ({
     ...item,
     id: resolvePaperId(item) || `descendant-${index}`,
     paper_id: resolvePaperId(item) || `descendant-${index}`,
-    abstract: item?.abstract || '',
+    abstract: resolveNodeAbstract(item),
     nodeType: 'descendant'
   }));
 
@@ -1248,23 +1339,14 @@ const viewportScaleRange = computed(() => {
   };
 });
 
-const detailMeta = computed(() => {
-  if (!selectedNode.value) return '';
-  const selected = selectedNode.value;
-  const year = resolveNodeYearText(selected);
-  const cite = formatCitation(normalizeCitationCount(selected?.citation_count || selected?.citationCount));
-  if (String(selected?.nodeType || '').toLowerCase() === 'root') {
-    return `${year} · ${cite} 引 · ${resolveNodeRoleLabel(selected)}`;
-  }
-  return `${year} · ${cite} 引 · ${resolveCitationTypeLabel(selected?.ctype || selected?.relation_type)}`;
-});
-
 const selectedNodeInfo = computed(() => {
   const selected = selectedNode.value;
   if (!selected) {
     return {
       nodeRoleLabel: nodeRoleLabelZh.root,
+      nodeRoleTagClass: 'is-root',
       relationLabel: '',
+      relationTagClass: '',
       abstractText: '暂无摘要信息。',
       relationDescription: '',
       paperId: '-',
@@ -1281,8 +1363,8 @@ const selectedNodeInfo = computed(() => {
   const relationLabel = String(selected?.nodeType || '').toLowerCase() === 'root'
     ? ''
     : resolveCitationTypeLabel(selected?.ctype || selected?.relation_type);
-  const relationDescription = textOrFallback(selected?.relation_description, '');
-  const abstractText = textOrFallback(selected?.abstract, '暂无摘要信息。');
+  const relationDescription = resolveNodeRelationDescription(selected);
+  const abstractText = textOrFallback(resolveNodeAbstract(selected), '暂无摘要信息。');
   const paperId = resolvePaperId(selected) || textOrFallback(selected?.id, '-');
   const metaItems = [
     { label: '论文 ID', value: paperId },
@@ -1295,7 +1377,9 @@ const selectedNodeInfo = computed(() => {
 
   return {
     nodeRoleLabel: resolveNodeRoleLabel(selected),
+    nodeRoleTagClass: resolveNodeRoleTagClass(selected),
     relationLabel,
+    relationTagClass: resolveRelationTagClass(selected?.ctype || selected?.relation_type),
     relationDescription,
     abstractText,
     paperId,
@@ -1756,7 +1840,6 @@ defineExpose({
 
 <style scoped>
 .blood-lineage {
-  --blood-detail-width: clamp(280px, 30vw, 360px);
   --blood-head-height: 32px;
   --blood-head-offset: 12px;
   width: 100%;
@@ -1948,55 +2031,85 @@ defineExpose({
   fill: var(--text);
 }
 
-.blood-detail-panel {
-  width: 0;
-  border-left: 1px solid var(--line);
-  background: var(--bg);
-  overflow: hidden;
-  transition: width 0.2s ease;
+.blood-detail-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 11;
+  display: grid;
+  place-items: center;
+  padding: 52px 12px 12px;
+  pointer-events: none;
 }
 
-.blood-detail-panel.is-open {
-  width: var(--blood-detail-width);
+.blood-detail-card {
+  width: min(520px, calc(100% - 24px));
+  max-height: calc(100% - 64px);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-lg);
+  background: var(--bg);
+  box-shadow: var(--shadow-soft);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  pointer-events: auto;
 }
 
 .blood-detail-head {
-  height: 56px;
+  min-height: 52px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--line);
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
+  justify-content: space-between;
   align-items: center;
   gap: 8px;
 }
 
 .blood-detail-title {
   margin: 0;
-  font-size: 13px;
-  line-height: 1.4;
+  font-size: 15px;
+  line-height: 1.45;
+  font-weight: 700;
   color: var(--text);
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 
 .blood-detail-close {
+  flex-shrink: 0;
   width: 24px;
   height: 24px;
-  border: 0;
+  border: 1px solid var(--line-2);
   border-radius: var(--radius-sm);
-  background: transparent;
+  background: var(--bg);
   color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
 }
 
-.blood-detail-body {
-  padding: 12px;
-  display: grid;
-  gap: 12px;
+.blood-detail-close:hover {
+  background: var(--panel);
 }
 
-.blood-detail-meta {
-  margin: 0;
-  font-size: 10px;
-  color: var(--muted);
+.blood-detail-close svg {
+  width: 12px;
+  height: 12px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.blood-detail-body {
+  min-height: 0;
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+  overflow: auto;
 }
 
 .blood-detail-tags {
@@ -2016,6 +2129,46 @@ defineExpose({
   color: var(--text);
   font-size: 11px;
   line-height: 1;
+}
+
+.blood-detail-tag.is-root {
+  border-color: var(--line-2);
+  color: var(--text);
+}
+
+.blood-detail-tag.is-ancestor {
+  border-color: var(--info);
+  color: var(--info);
+}
+
+.blood-detail-tag.is-descendant {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.blood-detail-tag.is-extending {
+  border-color: var(--info);
+  color: var(--info);
+}
+
+.blood-detail-tag.is-supporting {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.blood-detail-tag.is-contradicting {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.blood-detail-tag.is-migrating {
+  border-color: var(--violet);
+  color: var(--violet);
+}
+
+.blood-detail-tag.is-mentioning {
+  border-color: var(--muted);
+  color: var(--muted);
 }
 
 .blood-detail-grid {
@@ -2101,26 +2254,17 @@ defineExpose({
 
 @media (max-width: 980px) {
   .blood-lineage {
-    --blood-detail-width: clamp(236px, 68vw, 320px);
     height: clamp(520px, calc(100vh - 108px), 680px);
     min-height: 480px;
   }
 
-  .blood-main {
-    position: relative;
+  .blood-detail-overlay {
+    padding: 48px 10px 10px;
   }
 
-  .blood-detail-panel {
-    position: absolute;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    z-index: 5;
-    box-shadow: var(--shadow-soft);
-  }
-
-  .blood-detail-panel.is-open {
-    width: var(--blood-detail-width);
+  .blood-detail-card {
+    width: min(520px, calc(100% - 20px));
+    max-height: calc(100% - 58px);
   }
 
   .blood-legend {
@@ -2130,19 +2274,24 @@ defineExpose({
 
 @media (max-width: 768px) {
   .blood-lineage {
-    --blood-detail-width: 100%;
     --blood-head-height: 30px;
     height: clamp(460px, calc(100vh - 82px), 580px);
     min-height: 400px;
   }
 
-  .blood-detail-panel {
-    border-left: 0;
-    border-top: 1px solid var(--line);
+  .blood-detail-overlay {
+    padding: 44px 8px 8px;
   }
 
-  .blood-detail-panel.is-open {
-    width: var(--blood-detail-width);
+  .blood-detail-card {
+    width: calc(100% - 16px);
+    max-height: calc(100% - 52px);
+  }
+
+  .blood-detail-head {
+    height: auto;
+    min-height: 48px;
+    padding: 8px 10px;
   }
 }
 </style>

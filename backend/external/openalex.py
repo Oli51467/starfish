@@ -271,8 +271,11 @@ class OpenAlexClient:
             "paper_id": f"openalex:{openalex_id}" if openalex_id else "",
             "title": str(payload.get("title") or ""),
             "year": self._safe_int(payload.get("publication_year")),
+            "publication_date": str(payload.get("publication_date") or ""),
             "citation_count": self._safe_int(payload.get("cited_by_count")),
             "venue": self._extract_venue(payload),
+            "authors": self._extract_authors(payload),
+            "abstract": self._reconstruct_abstract(payload.get("abstract_inverted_index") or {}),
         }
 
     def _get_papers_batch(self, openalex_ids: list[str]) -> list[dict[str, Any]]:

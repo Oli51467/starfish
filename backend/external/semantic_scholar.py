@@ -55,7 +55,9 @@ class SemanticScholarClient:
             "externalIds",
         ]
     )
-    _RELATION_FIELDS = "paperId,title,year,citationCount,venue,journal,publicationVenue"
+    _RELATION_FIELDS = (
+        "paperId,title,year,citationCount,venue,journal,publicationVenue,abstract,authors,publicationDate"
+    )
     _SEARCH_FIELDS = ",".join(
         [
             "title",
@@ -96,6 +98,9 @@ class SemanticScholarClient:
         "venue",
         "journal",
         "publicationVenue",
+        "abstract",
+        "authors",
+        "publicationDate",
     ]
     _SDK_SEARCH_FIELDS = [
         "paperId",
@@ -304,12 +309,20 @@ class SemanticScholarClient:
             or publication_venue.get("name")
             or "Unknown Venue"
         )
+        authors = [
+            author.get("name")
+            for author in (payload.get("authors") or [])
+            if isinstance(author, dict) and author.get("name")
+        ]
         return {
             "paper_id": str(payload.get("paperId") or ""),
             "title": payload.get("title") or "",
             "year": payload.get("year"),
+            "publication_date": str(payload.get("publicationDate") or ""),
             "citation_count": int(payload.get("citationCount") or 0),
             "venue": venue,
+            "authors": authors,
+            "abstract": str(payload.get("abstract") or ""),
         }
 
     @staticmethod

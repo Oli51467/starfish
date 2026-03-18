@@ -934,6 +934,7 @@ class Neo4jRepository:
                 p.title = $title,
                 p.abstract = $abstract,
                 p.year = $year,
+                p.publication_date = $publication_date,
                 p.citation_count = $citation_count,
                 p.venue = $venue,
                 p.authors = $authors,
@@ -944,6 +945,10 @@ class Neo4jRepository:
             title=str(payload.get("title") or "").strip(),
             abstract=str(payload.get("abstract") or "").strip(),
             year=payload.get("year"),
+            publication_date=(
+                str(payload.get("publication_date") or "").strip()
+                or str(payload.get("publicationDate") or "").strip()
+            ),
             citation_count=int(payload.get("citation_count") or payload.get("citationCount") or 0),
             venue=str(payload.get("venue") or "").strip(),
             authors=Neo4jRepository._lineage_authors(payload),
@@ -982,6 +987,7 @@ class Neo4jRepository:
             "title": str(props.get("title") or "").strip(),
             "abstract": str(props.get("abstract") or "").strip(),
             "year": props.get("year"),
+            "publication_date": str(props.get("publication_date") or "").strip(),
             "citation_count": int(props.get("citation_count") or 0),
             "venue": str(props.get("venue") or "").strip(),
             "authors": authors,

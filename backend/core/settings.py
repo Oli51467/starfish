@@ -35,6 +35,23 @@ class Settings:
         self.openalex_mailto = (os.getenv("OPENALEX_MAILTO") or "").strip()
         self.scite_api_key = (os.getenv("SCITE_API_KEY") or "").strip()
         self.github_token = (os.getenv("GITHUB_TOKEN") or "").strip()
+        self.retrieval_max_workers = max(2, int(os.getenv("RETRIEVAL_MAX_WORKERS", "4")))
+        self.retrieval_provider_timeout_seconds = max(
+            2.0,
+            float(os.getenv("RETRIEVAL_PROVIDER_TIMEOUT_SECONDS", "12")),
+        )
+        self.retrieval_enable_semantic_scholar = self._parse_bool(
+            os.getenv("RETRIEVAL_ENABLE_SEMANTIC_SCHOLAR"),
+            default=True,
+        )
+        self.retrieval_enable_openalex = self._parse_bool(
+            os.getenv("RETRIEVAL_ENABLE_OPENALEX"),
+            default=True,
+        )
+        self.retrieval_enable_arxiv = self._parse_bool(
+            os.getenv("RETRIEVAL_ENABLE_ARXIV"),
+            default=True,
+        )
 
         # Data layer placeholders
         self.postgres_dsn = os.getenv(

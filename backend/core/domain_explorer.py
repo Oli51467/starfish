@@ -10,8 +10,9 @@ import re
 from typing import Any
 
 from core.llm_client import chat, is_configured
-from external.openalex import OpenAlexClient, OpenAlexClientError
-from external.semantic_scholar import SemanticScholarClient, SemanticScholarClientError
+from external.openalex import OpenAlexClient
+from external.semantic_scholar import SemanticScholarClient
+from services.retrieval.multi_source_retriever import MultiSourceRetriever
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +140,10 @@ class DomainExplorer:
     ) -> None:
         self.semantic = semantic_client or SemanticScholarClient()
         self.openalex = openalex_client or OpenAlexClient()
+        self.retriever = MultiSourceRetriever(
+            semantic_client=self.semantic,
+            openalex_client=self.openalex,
+        )
 
     async def generate_landscape(
         self,
@@ -432,59 +437,32 @@ class DomainExplorer:
 
         safe_limit = max(1, min(int(limit), 50))
         normalized_range = self._normalize_paper_range_years(paper_range_years)
-        semantic_error: Exception | None = None
-        openalex_error: Exception | None = None
+        preferred_provider = "openalex" if bool(quick_mode) else "semantic_scholar"
+        search_payload = await asyncio.to_thread(
+            self.retriever.search_papers,
+            query=safe_keyword,
+            limit=safe_limit,
+            preferred_provider=preferred_provider,
+        )
+        merged_papers = self._apply_paper_year_range(
+            list(search_payload.get("papers") or []),
+            paper_range_years=normalized_range,
+        )
+        providers_used = [str(item).strip() for item in (search_payload.get("providers_used") or []) if str(item).strip()]
+        provider_label = "+".join(providers_used)
 
-        provider_order = ["openalex", "semantic"] if bool(quick_mode) else ["semantic", "openalex"]
+        if merged_papers:
+            return merged_papers, provider_label or str(search_payload.get("provider") or "")
 
-        for provider in provider_order:
-            if provider == "semantic":
-                try:
-                    semantic_payload = await asyncio.to_thread(
-                        self.semantic.search_papers,
-                        safe_keyword,
-                        safe_limit,
-                        0,
-                    )
-                    semantic_papers = self._apply_paper_year_range(
-                        list(semantic_payload.get("papers") or []),
-                        paper_range_years=normalized_range,
-                    )
-                    if semantic_papers:
-                        return semantic_papers, "semantic_scholar"
-                except SemanticScholarClientError as exc:
-                    semantic_error = exc
-                continue
-
-            try:
-                openalex_payload = await asyncio.to_thread(
-                    self.openalex.search_papers,
-                    safe_keyword,
-                    safe_limit,
-                    0,
-                )
-                openalex_papers = self._apply_paper_year_range(
-                    list(openalex_payload.get("papers") or []),
-                    paper_range_years=normalized_range,
-                )
-                if openalex_papers:
-                    return openalex_papers, "openalex"
-            except OpenAlexClientError as exc:
-                openalex_error = exc
-
-        if semantic_error is not None and openalex_error is not None:
-            logger.warning(
-                "Semantic Scholar and OpenAlex both unavailable for keyword '%s': semantic=%s, openalex=%s",
-                safe_keyword,
-                semantic_error,
-                openalex_error,
-            )
-        elif semantic_error is not None:
-            logger.warning("Semantic Scholar unavailable for keyword '%s': %s", safe_keyword, semantic_error)
-        elif openalex_error is not None:
-            logger.warning("OpenAlex unavailable for keyword '%s': %s", safe_keyword, openalex_error)
-
-        return [], ""
+        source_stats = list(search_payload.get("source_stats") or [])
+        failed_stats = [item for item in source_stats if str(item.get("status") or "") == "fallback"]
+        if failed_stats:
+            error_map = {
+                str(item.get("provider") or "unknown"): str(item.get("error") or "empty")
+                for item in failed_stats
+            }
+            logger.warning("all providers unavailable for keyword '%s': %s", safe_keyword, error_map)
+        return [], provider_label or ""
 
     async def generate_landscape_summary(self, landscape: dict[str, Any]) -> str:
         directions = list(landscape.get("sub_directions") or [])
