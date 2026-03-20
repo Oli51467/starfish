@@ -53,6 +53,8 @@ class SemanticScholarClient:
             "abstract",
             "url",
             "externalIds",
+            "fieldsOfStudy",
+            "s2FieldsOfStudy",
         ]
     )
     _RELATION_FIELDS = (
@@ -89,6 +91,8 @@ class SemanticScholarClient:
         "abstract",
         "url",
         "externalIds",
+        "fieldsOfStudy",
+        "s2FieldsOfStudy",
     ]
     _SDK_RELATION_FIELDS = [
         "paperId",
@@ -281,6 +285,14 @@ class SemanticScholarClient:
             or publication_venue.get("name")
             or "Unknown Venue"
         )
+        fields = []
+        for field in payload.get("fieldsOfStudy") or []:
+            if isinstance(field, str) and field.strip():
+                fields.append(field.strip())
+        for field in payload.get("s2FieldsOfStudy") or []:
+            if isinstance(field, dict) and field.get("category"):
+                fields.append(str(field["category"]).strip())
+        dedup_fields = list(dict.fromkeys(fields))
 
         return {
             "paper_id": str(payload.get("paperId") or ""),
@@ -294,6 +306,7 @@ class SemanticScholarClient:
             "reference_count": int(payload.get("referenceCount") or len(references)),
             "abstract": payload.get("abstract") or "",
             "url": payload.get("url"),
+            "fields_of_study": dedup_fields,
             "external_ids": payload.get("externalIds") or {},
             "references": references,
             "citations": citations,

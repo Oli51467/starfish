@@ -27,6 +27,7 @@ class OpenAlexClient:
             "primary_location",
             "abstract_inverted_index",
             "referenced_works",
+            "concepts",
             "doi",
         ]
     )
@@ -225,6 +226,11 @@ class OpenAlexClient:
         openalex_id = self._compact_openalex_id(payload.get("id"))
         references = self.fetch_references(payload.get("referenced_works") or [], limit=reference_limit)
         citations = self.fetch_citations(payload.get("id") or "", limit=citation_limit)
+        concepts = payload.get("concepts") or []
+        fields: list[str] = []
+        for concept in concepts:
+            if isinstance(concept, dict) and concept.get("display_name"):
+                fields.append(str(concept["display_name"]))
 
         return {
             "paper_id": f"openalex:{openalex_id}" if openalex_id else "",
@@ -238,6 +244,7 @@ class OpenAlexClient:
             "reference_count": len(payload.get("referenced_works") or []),
             "abstract": self._reconstruct_abstract(payload.get("abstract_inverted_index") or {}),
             "url": self._extract_url(payload),
+            "fields_of_study": list(dict.fromkeys(fields[:5])),
             "external_ids": self._extract_external_ids(payload, openalex_id),
             "references": references,
             "citations": citations,

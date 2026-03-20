@@ -203,6 +203,22 @@
                 <p class="blood-detail-text">{{ selectedNodeInfo.abstractText }}</p>
               </section>
 
+              <div class="blood-detail-actions">
+                <button
+                  class="paper-node-action-btn paper-node-star-btn blood-detail-bookmark-btn"
+                  :class="{ 'is-active': selectedNodeInfo.isBookmarked }"
+                  type="button"
+                  :disabled="!isAuthenticated || selectedNodeInfo.isBookmarkSyncing"
+                  :aria-label="selectedNodeInfo.isBookmarked ? '取消收藏' : '收藏论文'"
+                  :title="selectedNodeInfo.isBookmarked ? '取消收藏' : '收藏论文'"
+                  @click="toggleSelectedNodeBookmark"
+                >
+                  <svg class="paper-node-star-icon" viewBox="0 0 16 16" aria-hidden="true">
+                    <path d="M8 1.3l1.96 3.97 4.38.64-3.17 3.09.75 4.36L8 11.28l-3.92 2.08.75-4.36L1.66 5.91l4.38-.64L8 1.3z" />
+                  </svg>
+                </button>
+              </div>
+
               <a
                 v-if="selectedNodeInfo.url"
                 class="blood-detail-link mono"
@@ -223,6 +239,8 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { useAuthStore } from '../../stores/authStore';
+import { useCollectionStore } from '../../stores/collectionStore';
 
 const props = defineProps({
   lineage: {
@@ -348,6 +366,8 @@ const citationMarkers = Object.entries(citationConfig).map(([key, value]) => ({
   label: value.label,
   color: value.color
 }));
+const { accessToken, isAuthenticated } = useAuthStore();
+const { ensureBookmarkIndexLoaded, isPaperSaved, isPaperSyncing, togglePaperSaved } = useCollectionStore();
 const citationTypeLabelZh = Object.freeze({
   extending: '扩展',
   supporting: '支持',
@@ -1351,6 +1371,8 @@ const selectedNodeInfo = computed(() => {
       relationDescription: '',
       paperId: '-',
       url: '',
+      isBookmarked: false,
+      isBookmarkSyncing: false,
       metaItems: []
     };
   }
@@ -1366,6 +1388,7 @@ const selectedNodeInfo = computed(() => {
   const relationDescription = resolveNodeRelationDescription(selected);
   const abstractText = textOrFallback(resolveNodeAbstract(selected), '暂无摘要信息。');
   const paperId = resolvePaperId(selected) || textOrFallback(selected?.id, '-');
+  const safePaperId = paperId === '-' ? '' : paperId;
   const metaItems = [
     { label: '论文 ID', value: paperId },
     { label: '发表年份', value: yearText },
@@ -1384,9 +1407,67 @@ const selectedNodeInfo = computed(() => {
     abstractText,
     paperId,
     url: resolveNodeUrl(selected),
+    isBookmarked: safePaperId ? isPaperSaved(safePaperId) : false,
+    isBookmarkSyncing: safePaperId ? isPaperSyncing(safePaperId) : false,
     metaItems
   };
 });
+
+function normalizeNodeAuthorsToList(node) {
+  const rawAuthors = node?.authors ?? node?.meta?.authors;
+  if (Array.isArray(rawAuthors)) {
+    return rawAuthors.map((item) => String(item || '').trim()).filter(Boolean);
+  }
+  return String(rawAuthors || '')
+    .split(/[;,，]/g)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function buildSelectedNodeMetadata(node) {
+  const paperId = resolvePaperId(node);
+  if (!paperId) return null;
+
+  const resolvedYear = resolveNodeYear(node, timelineMetrics.value.fallbackYear);
+  const safeYear = Number.isFinite(Number(resolvedYear)) ? Math.round(Number(resolvedYear)) : null;
+  const citationCount = normalizeCitationCount(node?.citation_count || node?.citationCount);
+  const impactRaw = Number(node?.impact_factor ?? node?.meta?.impact_factor);
+  const impactFactor = Number.isFinite(impactRaw) ? Math.max(0, impactRaw) : null;
+  const fieldsRaw = node?.fields_of_study ?? node?.meta?.fields_of_study;
+  const fieldsOfStudy = Array.isArray(fieldsRaw)
+    ? fieldsRaw.map((item) => String(item || '').trim()).filter(Boolean)
+    : String(fieldsRaw || '')
+      .split(/[;,，]/g)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  return {
+    title: String(node?.title || paperId).trim(),
+    abstract: String(resolveNodeAbstract(node) || '').trim(),
+    authors: normalizeNodeAuthorsToList(node),
+    year: safeYear,
+    publication_date: resolveNodePublicationDate(node),
+    citation_count: citationCount,
+    impact_factor: impactFactor,
+    fields_of_study: fieldsOfStudy,
+    venue: resolveNodeVenue(node),
+    url: resolveNodeUrl(node)
+  };
+}
+
+async function toggleSelectedNodeBookmark() {
+  if (!isAuthenticated.value || !String(accessToken.value || '').trim()) return;
+  const node = selectedNode.value;
+  if (!node) return;
+  const paperId = resolvePaperId(node);
+  if (!paperId) return;
+  if (isPaperSyncing(paperId)) return;
+
+  await togglePaperSaved({
+    accessToken: accessToken.value,
+    paperId,
+    metadata: buildSelectedNodeMetadata(node)
+  });
+}
 
 function formatCitation(value) {
   const count = Number(value || 0);
@@ -1809,7 +1890,19 @@ onMounted(async () => {
     resizeObserver.observe(canvasRef.value);
   }
   updateFullscreenState();
+  if (isAuthenticated.value && String(accessToken.value || '').trim()) {
+    void ensureBookmarkIndexLoaded({ accessToken: accessToken.value });
+  }
 });
+
+watch(
+  () => [isAuthenticated.value, String(accessToken.value || '').trim()],
+  ([authenticated, token]) => {
+    if (!authenticated || !token) return;
+    void ensureBookmarkIndexLoaded({ accessToken: token });
+  },
+  { deep: true }
+);
 
 watch(
   () => props.lineage,
@@ -2220,6 +2313,18 @@ defineExpose({
   line-height: 1.65;
   color: var(--text);
   word-break: break-word;
+}
+
+.blood-detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.blood-detail-bookmark-btn {
+  width: 30px;
+  min-width: 30px;
+  padding: 0;
 }
 
 .blood-detail-link {

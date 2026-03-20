@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.auth import router as auth_router
+from api.collections import router as collections_router
 from api.gaps import router as gaps_router
 from api.graphrag import router as graphrag_router
 from api.landscape import router as landscape_router
@@ -35,6 +36,7 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
+app.include_router(collections_router)
 app.include_router(map_router)
 app.include_router(graphrag_router)
 app.include_router(landscape_router)

@@ -24,6 +24,9 @@ GapType = Literal["method_scene", "stagnant", "island", "contradiction"]
 GraphRole = Literal["hub", "bridge", "leaf"]
 KnowledgeNodeType = Literal["paper", "entity", "domain"]
 KnowledgeEdgeType = Literal["mentions", "belongs_to", "related", "covers"]
+SavedPaperReadStatus = Literal["unread", "reading", "completed"]
+SavedPaperSortBy = Literal["saved_at", "last_opened_at", "year", "citation_count"]
+SortOrder = Literal["asc", "desc"]
 
 
 class HealthResponse(BaseModel):
@@ -259,6 +262,114 @@ class ResearchHistoryBatchDeleteResponse(BaseModel):
     deleted: bool = False
     deleted_count: int = Field(default=0, ge=0)
     deleted_ids: list[str] = Field(default_factory=list)
+
+
+class CollectionCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    color: str = Field(default="", max_length=20)
+    emoji: str = Field(default="", max_length=10)
+
+
+class CollectionUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    color: str | None = Field(default=None, max_length=20)
+    emoji: str | None = Field(default=None, max_length=10)
+
+
+class CollectionItem(BaseModel):
+    collection_id: str
+    name: str
+    color: str = ""
+    emoji: str = ""
+    paper_count: int = Field(default=0, ge=0)
+    created_at: datetime
+    updated_at: datetime
+
+
+class CollectionListResponse(BaseModel):
+    items: list[CollectionItem] = Field(default_factory=list)
+
+
+class SavedPaperMetadata(BaseModel):
+    title: str = ""
+    abstract: str = ""
+    authors: list[str] = Field(default_factory=list)
+    year: int | None = None
+    publication_date: str = ""
+    citation_count: int = Field(default=0, ge=0)
+    impact_factor: float | None = Field(default=None, ge=0)
+    fields_of_study: list[str] = Field(default_factory=list)
+    venue: str = ""
+    url: str | None = None
+
+
+class SavedPaperCreateRequest(BaseModel):
+    paper_id: str = Field(..., min_length=1, max_length=200)
+    collection_ids: list[str] = Field(default_factory=list, max_length=20)
+    metadata: SavedPaperMetadata | None = None
+
+
+class SavedPaperStatusUpdateRequest(BaseModel):
+    read_status: SavedPaperReadStatus
+    touch_last_opened: bool = True
+
+
+class CollectionPaperAttachRequest(BaseModel):
+    saved_paper_id: str = Field(..., min_length=1)
+
+
+class SavedPaperItem(BaseModel):
+    saved_paper_id: str
+    paper_id: str
+    read_status: SavedPaperReadStatus
+    saved_at: datetime
+    last_opened_at: datetime | None = None
+    collection_ids: list[str] = Field(default_factory=list)
+    metadata: SavedPaperMetadata = Field(default_factory=SavedPaperMetadata)
+
+
+class SavedPaperListResponse(BaseModel):
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1, le=50)
+    total: int = Field(ge=0)
+    total_pages: int = Field(ge=0)
+    items: list[SavedPaperItem] = Field(default_factory=list)
+
+
+class CollectionDeleteResponse(BaseModel):
+    deleted: bool = False
+
+
+class SavedPaperDeleteResponse(BaseModel):
+    deleted: bool = False
+
+
+class SavedPaperNoteCreateRequest(BaseModel):
+    content: str = Field(..., min_length=1, max_length=500)
+
+
+class SavedPaperNoteItem(BaseModel):
+    note_id: str
+    saved_paper_id: str
+    content: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class SavedPaperNoteListResponse(BaseModel):
+    items: list[SavedPaperNoteItem] = Field(default_factory=list)
+
+
+class SavedPaperNoteDeleteResponse(BaseModel):
+    deleted: bool = False
+
+
+class CollectionPaperAttachResponse(BaseModel):
+    linked: bool = False
+
+
+class CollectionPaperDetachResponse(BaseModel):
+    unlinked: bool = False
 
 
 class LandscapeGenerateRequest(BaseModel):

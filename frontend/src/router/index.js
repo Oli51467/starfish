@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router';
 
 import { useAuthStore } from '../stores/authStore';
 import HomeView from '../views/HomeView.vue';
+import CollectionWorkbenchView from '../views/CollectionWorkbenchView.vue';
 import ResearchHistoryView from '../views/ResearchHistoryView.vue';
 
 const routes = [
@@ -38,6 +39,14 @@ const routes = [
     path: '/research-history',
     name: 'research-history',
     component: ResearchHistoryView,
+    meta: {
+      requiresAuth: true
+    }
+  },
+  {
+    path: '/collections',
+    name: 'collection-workbench',
+    component: CollectionWorkbenchView,
     meta: {
       requiresAuth: true
     }

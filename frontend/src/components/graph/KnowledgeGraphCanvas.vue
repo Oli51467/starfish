@@ -294,8 +294,18 @@
         <button class="paper-node-action-btn" type="button" @click="exportCitation">
           导出引用
         </button>
-        <button class="paper-node-action-btn" type="button" @click="toggleBookmark">
-          {{ pinnedNodeDetail.isBookmarked ? '已收藏' : '收藏' }}
+        <button
+          class="paper-node-action-btn paper-node-star-btn"
+          :class="{ 'is-active': pinnedNodeDetail.isBookmarked }"
+          type="button"
+          :disabled="!isAuthenticated || pinnedNodeDetail.isBookmarkSyncing"
+          :aria-label="pinnedNodeDetail.isBookmarked ? '取消收藏' : '收藏论文'"
+          :title="pinnedNodeDetail.isBookmarked ? '取消收藏' : '收藏论文'"
+          @click="toggleBookmark"
+        >
+          <svg class="paper-node-star-icon" viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M8 1.3l1.96 3.97 4.38.64-3.17 3.09.75 4.36L8 11.28l-3.92 2.08.75-4.36L1.66 5.91l4.38-.64L8 1.3z" />
+          </svg>
         </button>
       </footer>
     </article>
@@ -308,6 +318,8 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { buildKnowledgeNodeDetail } from './knowledgeNodeDetail';
 import { clamp, normalizeRate, shortLabel } from './knowledgeGraphModel';
+import { useAuthStore } from '../../stores/authStore';
+import { useCollectionStore } from '../../stores/collectionStore';
 
 const props = defineProps({
   graph: {
@@ -326,11 +338,12 @@ const pinnedNode = ref(null);
 const pinnedCardPoint = ref(null);
 const cardOverlayRef = ref(null);
 const pinnedCardSize = ref({ width: 460, height: 300 });
-const bookmarkedNodeIds = ref([]);
 const selectedDirectionId = ref('');
 const selectedDirectionMode = ref('none');
 const isGraphDragging = ref(false);
 const isFullscreen = ref(false);
+const { accessToken, isAuthenticated } = useAuthStore();
+const { ensureBookmarkIndexLoaded, isPaperSaved, isPaperSyncing, togglePaperSaved } = useCollectionStore();
 let graphInstance = null;
 let resizeObserver = null;
 let resizeRaf = 0;
@@ -1019,17 +1032,69 @@ function exportCitation() {
   }
 }
 
-function toggleBookmark() {
+function splitAuthorsToList(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || '').trim()).filter(Boolean);
+  }
+  return String(value || '')
+    .split(/[;,，]/g)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function buildPaperMetadataFromGraphNode(node, detail) {
+  const meta = node?.meta && typeof node.meta === 'object' ? node.meta : {};
+  const yearRaw = Number(meta?.year);
+  const year = Number.isFinite(yearRaw) ? Math.round(yearRaw) : null;
+  const citationRaw = Number(meta?.citation_count);
+  const citationCount = Number.isFinite(citationRaw) ? Math.max(0, Math.round(citationRaw)) : 0;
+  const impactRaw = Number(meta?.impact_factor);
+  const impactFactor = Number.isFinite(impactRaw) ? Math.max(0, impactRaw) : null;
+  const publicationDate = String(meta?.publication_date || '').trim();
+  const fieldsOfStudy = Array.isArray(meta?.fields_of_study)
+    ? meta.fields_of_study.map((item) => String(item || '').trim()).filter(Boolean)
+    : String(meta?.fields_of_study || '')
+      .split(/[;,，]/g)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  return {
+    title: String(detail?.name || node?.label || '').trim(),
+    abstract: String(meta?.abstract || '').trim(),
+    authors: splitAuthorsToList(meta?.authors),
+    year,
+    publication_date: publicationDate,
+    citation_count: citationCount,
+    impact_factor: impactFactor,
+    fields_of_study: fieldsOfStudy,
+    venue: String(meta?.venue || '').trim(),
+    url: String(meta?.url || '').trim()
+  };
+}
+
+function resolvePaperIdForNode(node) {
+  const direct = String(node?.paper_id || '').trim();
+  if (direct) return direct;
+  const metaId = String(node?.meta?.paper_id || '').trim();
+  if (metaId) return metaId;
+  const nodeId = String(node?.id || '').trim();
+  if (nodeId.startsWith('paper:')) return nodeId.slice('paper:'.length).trim() || nodeId;
+  return nodeId;
+}
+
+async function toggleBookmark() {
   const detail = pinnedNodeDetail.value;
   if (!detail || !detail.isPaper) return;
-  const next = [...bookmarkedNodeIds.value];
-  const index = next.indexOf(detail.id);
-  if (index >= 0) {
-    next.splice(index, 1);
-  } else {
-    next.push(detail.id);
-  }
-  bookmarkedNodeIds.value = next;
+  if (!isAuthenticated.value || !String(accessToken.value || '').trim()) return;
+  if (detail.isBookmarkSyncing) return;
+
+  const node = pinnedNode.value;
+  const paperId = String(detail.paperId || resolvePaperIdForNode(node)).trim();
+  if (!paperId) return;
+  await togglePaperSaved({
+    accessToken: accessToken.value,
+    paperId,
+    metadata: buildPaperMetadataFromGraphNode(node, detail)
+  });
 }
 
 function startGraphDragCursor() {
@@ -1183,9 +1248,12 @@ const directionPaperListItems = computed(() => {
 const pinnedNodeDetail = computed(() => {
   const detail = buildKnowledgeNodeDetail(pinnedNode.value);
   if (!detail) return null;
+  const paperId = detail.isPaper ? resolvePaperIdForNode(pinnedNode.value) : '';
   return {
     ...detail,
-    isBookmarked: bookmarkedNodeIds.value.includes(detail.id)
+    paperId,
+    isBookmarked: paperId ? isPaperSaved(paperId) : false,
+    isBookmarkSyncing: paperId ? isPaperSyncing(paperId) : false
   };
 });
 
@@ -1270,7 +1338,19 @@ onMounted(async () => {
   window.addEventListener('pointerup', endGraphDragCursor);
   window.addEventListener('pointercancel', endGraphDragCursor);
   updateFullscreenState();
+  if (isAuthenticated.value && String(accessToken.value || '').trim()) {
+    void ensureBookmarkIndexLoaded({ accessToken: accessToken.value });
+  }
 });
+
+watch(
+  () => [isAuthenticated.value, String(accessToken.value || '').trim()],
+  ([authenticated, token]) => {
+    if (!authenticated || !token) return;
+    void ensureBookmarkIndexLoaded({ accessToken: token });
+  },
+  { deep: true }
+);
 
 onBeforeUnmount(() => {
   if (resizeRaf) {

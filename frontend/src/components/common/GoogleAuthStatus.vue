@@ -21,6 +21,16 @@
         <div v-if="userMenuOpen" class="header-user-dropdown panel" role="menu">
           <button
             class="header-user-dropdown-item mono"
+            :class="{ 'is-disabled': isCollectionWorkbenchPage }"
+            type="button"
+            role="menuitem"
+            :disabled="isCollectionWorkbenchPage"
+            @click="openCollectionWorkbench"
+          >
+            我的论文
+          </button>
+          <button
+            class="header-user-dropdown-item mono"
             :class="{ 'is-disabled': isHistoryPage }"
             type="button"
             role="menuitem"
@@ -48,6 +58,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router';
 
 import { useAuthStore } from '../../stores/authStore';
+import { useCollectionStore } from '../../stores/collectionStore';
 
 const googleClientId = String(import.meta.env.VITE_GOOGLE_CLIENT_ID || '').trim();
 const googleButtonRef = ref(null);
@@ -57,10 +68,12 @@ const scriptLoadError = ref('');
 const router = useRouter();
 const route = useRoute();
 const { user, isAuthenticated, loading, errorMessage, loginWithGoogleCredential, logout } = useAuthStore();
+const { clearCollectionStoreState } = useCollectionStore();
 
 const userEmail = computed(() => String(user.value?.email || '').trim());
 const avatarInitial = computed(() => userEmail.value.slice(0, 1).toUpperCase() || 'U');
 const isHistoryPage = computed(() => route.name === 'research-history');
+const isCollectionWorkbenchPage = computed(() => route.name === 'collection-workbench');
 const loginErrorMessage = computed(() => {
   return scriptLoadError.value || errorMessage.value;
 });
@@ -134,6 +147,7 @@ function handleEscape(event) {
 function handleLogout() {
   closeUserMenu();
   logout();
+  clearCollectionStoreState();
   if (route.name !== 'home') {
     void router.push({ name: 'home' });
   }
@@ -143,6 +157,12 @@ function openResearchHistory() {
   closeUserMenu();
   if (isHistoryPage.value) return;
   void router.push({ name: 'research-history' });
+}
+
+function openCollectionWorkbench() {
+  closeUserMenu();
+  if (isCollectionWorkbenchPage.value) return;
+  void router.push({ name: 'collection-workbench' });
 }
 
 function renderGoogleButton() {

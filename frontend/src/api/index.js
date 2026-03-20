@@ -217,3 +217,127 @@ export function getLineage(
   }
   return request(`/api/lineage/${encodeURIComponent(paperId)}?${query.toString()}`);
 }
+
+export function createCollection(payload, { accessToken = '' } = {}) {
+  return request('/api/collections', {
+    method: 'POST',
+    headers: buildAuthHeaders(accessToken, { 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload || {})
+  });
+}
+
+export function getCollections({ accessToken = '' } = {}) {
+  return request('/api/collections', {
+    headers: buildAuthHeaders(accessToken)
+  });
+}
+
+export function updateCollection(collectionId, payload, { accessToken = '' } = {}) {
+  return request(`/api/collections/${encodeURIComponent(collectionId)}`, {
+    method: 'PUT',
+    headers: buildAuthHeaders(accessToken, { 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload || {})
+  });
+}
+
+export function removeCollection(collectionId, { accessToken = '' } = {}) {
+  return request(`/api/collections/${encodeURIComponent(collectionId)}`, {
+    method: 'DELETE',
+    headers: buildAuthHeaders(accessToken)
+  });
+}
+
+export function savePaper(payload, { accessToken = '' } = {}) {
+  return request('/api/saved-papers', {
+    method: 'POST',
+    headers: buildAuthHeaders(accessToken, { 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload || {})
+  });
+}
+
+export function getSavedPapers(
+  {
+    page = 1,
+    pageSize = 20,
+    collectionId = '',
+    readStatus = '',
+    keyword = '',
+    sortBy = 'saved_at',
+    sortOrder = 'desc',
+    accessToken = ''
+  } = {}
+) {
+  const query = new URLSearchParams();
+  query.set('page', String(Math.max(1, Number(page) || 1)));
+  query.set('page_size', String(Math.max(1, Math.min(50, Number(pageSize) || 20))));
+  if (String(collectionId || '').trim()) query.set('collection_id', String(collectionId).trim());
+  if (String(readStatus || '').trim()) query.set('read_status', String(readStatus).trim());
+  if (String(keyword || '').trim()) query.set('keyword', String(keyword).trim());
+  query.set('sort_by', String(sortBy || 'saved_at').trim());
+  query.set('sort_order', String(sortOrder || 'desc').trim());
+  return request(`/api/saved-papers?${query.toString()}`, {
+    headers: buildAuthHeaders(accessToken)
+  });
+}
+
+export function removeSavedPaper(savedPaperId, { accessToken = '' } = {}) {
+  return request(`/api/saved-papers/${encodeURIComponent(savedPaperId)}`, {
+    method: 'DELETE',
+    headers: buildAuthHeaders(accessToken)
+  });
+}
+
+export function updateSavedPaperStatus(savedPaperId, payload, { accessToken = '' } = {}) {
+  return request(`/api/saved-papers/${encodeURIComponent(savedPaperId)}/status`, {
+    method: 'PATCH',
+    headers: buildAuthHeaders(accessToken, { 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload || {})
+  });
+}
+
+export function enrichSavedPaperMetadata(savedPaperId, { accessToken = '', force = false } = {}) {
+  const query = new URLSearchParams();
+  query.set('force', force ? 'true' : 'false');
+  return request(`/api/saved-papers/${encodeURIComponent(savedPaperId)}/enrich-metadata?${query.toString()}`, {
+    method: 'POST',
+    headers: buildAuthHeaders(accessToken)
+  });
+}
+
+export function getSavedPaperNotes(savedPaperId, { accessToken = '', limit = 30 } = {}) {
+  const query = new URLSearchParams();
+  query.set('limit', String(Math.max(1, Math.min(100, Number(limit) || 30))));
+  return request(`/api/saved-papers/${encodeURIComponent(savedPaperId)}/notes?${query.toString()}`, {
+    headers: buildAuthHeaders(accessToken)
+  });
+}
+
+export function createSavedPaperNote(savedPaperId, payload, { accessToken = '' } = {}) {
+  return request(`/api/saved-papers/${encodeURIComponent(savedPaperId)}/notes`, {
+    method: 'POST',
+    headers: buildAuthHeaders(accessToken, { 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload || {})
+  });
+}
+
+export function removeSavedPaperNote(savedPaperId, noteId, { accessToken = '' } = {}) {
+  return request(`/api/saved-papers/${encodeURIComponent(savedPaperId)}/notes/${encodeURIComponent(noteId)}`, {
+    method: 'DELETE',
+    headers: buildAuthHeaders(accessToken)
+  });
+}
+
+export function attachSavedPaperToCollection(collectionId, payload, { accessToken = '' } = {}) {
+  return request(`/api/collections/${encodeURIComponent(collectionId)}/papers`, {
+    method: 'POST',
+    headers: buildAuthHeaders(accessToken, { 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload || {})
+  });
+}
+
+export function detachSavedPaperFromCollection(collectionId, savedPaperId, { accessToken = '' } = {}) {
+  return request(`/api/collections/${encodeURIComponent(collectionId)}/papers/${encodeURIComponent(savedPaperId)}`, {
+    method: 'DELETE',
+    headers: buildAuthHeaders(accessToken)
+  });
+}
