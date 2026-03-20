@@ -5,12 +5,10 @@
         <LandscapeWorkspace
           ref="workspaceRef"
           :graph-data="graphData"
-          :insight-text="insightText"
           :loading="loading"
           :loading-message="activeStepHint"
           :error-message="errorMessage"
           :is-graph-fullscreen="isGraphFullscreen"
-          :summary-enabled="summaryEnabled"
           @toggle-graph-fullscreen="toggleGraphFullscreen"
         />
       </article>
@@ -58,11 +56,6 @@ const STEP_DEFINITION = {
     title: '论文检索',
     description: '补充各子方向的代表论文并完成筛选。'
   },
-  summarize: {
-    key: 'summarize',
-    title: '深度总结',
-    description: '提炼趋势、机会与风险。'
-  },
   graph: {
     key: 'graph',
     title: '图谱生成',
@@ -70,13 +63,11 @@ const STEP_DEFINITION = {
   }
 };
 
-const summaryEnabled = ref(false);
-const steps = ref(buildSteps(summaryEnabled.value));
+const steps = ref(buildSteps());
 
 const loading = ref(false);
 const errorMessage = ref('');
 const loadingMessage = ref('正在准备任务...');
-const landscape = ref(null);
 const graphData = ref(null);
 const isGraphFullscreen = ref(false);
 const workspaceRef = ref(null);
@@ -90,7 +81,6 @@ const activeStep = computed(() => {
   return done || steps.value[0];
 });
 const activeStepHint = computed(() => loadingMessage.value || activeStep.value.description || '处理中...');
-const insightText = computed(() => String(landscape.value?.trend_summary || '').trim());
 const graphStats = computed(() => {
   const nodes = Array.isArray(graphData.value?.nodes) ? graphData.value.nodes : [];
   const edges = Array.isArray(graphData.value?.edges) ? graphData.value.edges : [];
@@ -109,10 +99,8 @@ const beijingTimeFormatter = new Intl.DateTimeFormat('zh-CN', {
   second: '2-digit'
 });
 
-function buildSteps(enableSummary) {
-  const order = enableSummary
-    ? ['research', 'retrieve', 'summarize', 'graph']
-    : ['research', 'retrieve', 'graph'];
+function buildSteps() {
+  const order = ['research', 'retrieve', 'graph'];
   return order.map((key, index) => ({
     index: index + 1,
     key,
@@ -124,9 +112,9 @@ function buildSteps(enableSummary) {
   }));
 }
 
-function rebuildSteps(enableSummary) {
+function rebuildSteps() {
   const previousMap = new Map(steps.value.map((item) => [item.key, item]));
-  steps.value = buildSteps(enableSummary).map((item) => {
+  steps.value = buildSteps().map((item) => {
     const previous = previousMap.get(item.key);
     if (!previous) return item;
     return {
@@ -156,7 +144,12 @@ function resetSteps() {
 }
 
 function stepIndexFromKey(stepKey) {
-  const matchedIndex = steps.value.findIndex((item) => item.key === String(stepKey || '').trim());
+  const normalizedKey = String(stepKey || '').trim();
+  if (normalizedKey === 'summarize') {
+    const graphIndex = steps.value.findIndex((item) => item.key === 'graph');
+    return graphIndex >= 0 ? graphIndex + 1 : 1;
+  }
+  const matchedIndex = steps.value.findIndex((item) => item.key === normalizedKey);
   return matchedIndex >= 0 ? matchedIndex + 1 : 1;
 }
 
@@ -214,13 +207,10 @@ function normalizeLandscapeMessage(stepKey, rawMessage, { running = false } = {}
   }
 
   if (key === 'summarize') {
-    if (messageLower.includes('关闭')) {
-      return '已跳过深度总结，继续进入图谱生成。';
-    }
     if (messageLower.includes('完成')) {
-      return '趋势与机会总结已完成。';
+      return '中间阶段处理完成。';
     }
-    return running ? '正在生成趋势、机会与风险总结...' : '已完成趋势总结。';
+    return running ? '正在处理中间阶段内容...' : '中间阶段处理完成。';
   }
 
   if (key === 'graph') {
@@ -257,7 +247,6 @@ function normalizeStepLogs(taskLogs) {
   const grouped = {
     research: [],
     retrieve: [],
-    summarize: [],
     graph: []
   };
   if (!Array.isArray(taskLogs)) return grouped;
@@ -322,11 +311,6 @@ function normalizeLogsByStepStatus(logs, stepStatus) {
 }
 
 function applyTaskState(task) {
-  if (typeof task?.summary_enabled === 'boolean' && task.summary_enabled !== summaryEnabled.value) {
-    summaryEnabled.value = task.summary_enabled;
-    rebuildSteps(summaryEnabled.value);
-  }
-
   const status = String(task?.status || '').trim();
   const stepKey = String(task?.step_key || '').trim() || 'research';
   const currentIndex = stepIndexFromKey(stepKey);
@@ -385,11 +369,6 @@ function applyTaskState(task) {
 }
 
 function finalizeResult(result) {
-  if (typeof result?.summary_enabled === 'boolean' && result.summary_enabled !== summaryEnabled.value) {
-    summaryEnabled.value = result.summary_enabled;
-    rebuildSteps(summaryEnabled.value);
-  }
-  landscape.value = result;
   if (result?.graph_data && Array.isArray(result.graph_data.nodes) && result.graph_data.nodes.length > 0) {
     graphData.value = result.graph_data;
   } else {
@@ -409,11 +388,10 @@ function parsePaperRangeYears(rawValue) {
 
 async function runWorkflow() {
   if (loading.value) return;
-  rebuildSteps(summaryEnabled.value);
+  rebuildSteps();
   resetSteps();
   loading.value = true;
   errorMessage.value = '';
-  landscape.value = null;
   graphData.value = null;
   loadingMessage.value = '正在创建领域全景任务...';
 

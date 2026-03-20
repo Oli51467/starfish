@@ -107,11 +107,16 @@ class CollectionService:
             raise ValueError("paper_id_required")
 
         metadata = self._normalize_metadata(request.metadata)
-        if self._needs_metadata_enrichment(metadata):
-            metadata = self._enrich_metadata_payload(
-                paper_id=paper_id,
-                current_payload=metadata,
+        # Keep save-path fast: metadata enrichment can trigger multiple remote calls
+        # and significantly delay bookmark feedback in graph/lineage views.
+        # Detailed enrichment is handled by the dedicated enrich endpoint/workflow.
+        if metadata.get("impact_factor") is None:
+            estimated_impact = self._estimate_impact_factor(
+                self._safe_int(metadata.get("citation_count"))
             )
+            if estimated_impact is not None:
+                metadata["impact_factor"] = estimated_impact
+
         row, _ = self.repository.create_or_get_saved_paper(
             user_id=user.id,
             paper_id=paper_id,

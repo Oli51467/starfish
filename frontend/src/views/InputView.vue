@@ -234,7 +234,7 @@ const inputTypeMeta = {
   },
   domain: {
     placeholder: '例如：transformer、深度强化学习、多模态大模型',
-    hint: '输入研究领域，生成子方向、核心论文与趋势洞察全景图。'
+    hint: '输入研究领域，生成子方向与核心论文的知识图谱。'
   }
 };
 const currentInputMeta = computed(

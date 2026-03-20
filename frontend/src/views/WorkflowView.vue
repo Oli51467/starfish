@@ -45,6 +45,7 @@
               ref="workflowLineageViewRef"
               :lineage="lineageData"
               :stretch-timeline="true"
+              :focus-paper-id="lineageFocusPaperId"
             >
               <template #tools-extra>
                 <div class="workflow-result-tabbar" role="tablist" aria-label="论文检索结果切换">
@@ -140,6 +141,12 @@ const resultTabs = computed(() => ([
     disabled: !canViewLineage.value
   }
 ]));
+
+const lineageFocusPaperId = computed(() => {
+  const seed = props.seed || {};
+  if (!Boolean(seed?.auto_lineage)) return '';
+  return String(seed?.lineage_seed_paper_id || seed?.input_value || '').trim();
+});
 
 async function activateResultTab(tab) {
   if (!tab || tab.disabled) return;

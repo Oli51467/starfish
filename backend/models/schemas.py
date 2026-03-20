@@ -20,6 +20,13 @@ CitationRelationType = Literal[
     "migrating",
     "mentioning",
 ]
+PaperSignalTrendLabel = Literal["rising", "steady", "cooling", "controversial"]
+PaperSignalEventType = Literal[
+    "lineage_expanded",
+    "controversy_rise",
+    "citation_delta",
+    "metadata_enriched",
+]
 GapType = Literal["method_scene", "stagnant", "island", "contradiction"]
 GraphRole = Literal["hub", "bridge", "leaf"]
 KnowledgeNodeType = Literal["paper", "entity", "domain"]
@@ -262,6 +269,64 @@ class ResearchHistoryBatchDeleteResponse(BaseModel):
     deleted: bool = False
     deleted_count: int = Field(default=0, ge=0)
     deleted_ids: list[str] = Field(default_factory=list)
+
+
+class PaperSignal(BaseModel):
+    paper_id: str
+    paper_title: str = ""
+    citation_count: int = Field(default=0, ge=0)
+    published_year: int | None = None
+    ancestor_count: int = Field(default=0, ge=0)
+    descendant_count: int = Field(default=0, ge=0)
+    relation_distribution: dict[str, int] = Field(default_factory=dict)
+    heat_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    controversy_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    trend_label: PaperSignalTrendLabel = "steady"
+    computed_at: datetime
+
+
+class PaperSignalRefreshRequest(BaseModel):
+    collection_id: str = ""
+    limit: int = Field(default=20, ge=1, le=50)
+    force_refresh: bool = False
+
+
+class PaperSignalRefreshItem(BaseModel):
+    saved_paper_id: str
+    paper_id: str
+    signal: PaperSignal
+    event_created: bool = False
+
+
+class PaperSignalRefreshResponse(BaseModel):
+    refreshed_count: int = Field(default=0, ge=0)
+    event_count: int = Field(default=0, ge=0)
+    items: list[PaperSignalRefreshItem] = Field(default_factory=list)
+
+
+class PaperSignalEvent(BaseModel):
+    event_id: str
+    saved_paper_id: str
+    paper_id: str
+    event_type: PaperSignalEventType
+    title: str
+    content: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    is_read: bool = False
+    created_at: datetime
+
+
+class PaperSignalEventListResponse(BaseModel):
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1, le=50)
+    total: int = Field(ge=0)
+    total_pages: int = Field(ge=0)
+    unread_count: int = Field(ge=0)
+    items: list[PaperSignalEvent] = Field(default_factory=list)
+
+
+class PaperSignalEventReadResponse(BaseModel):
+    updated: bool = False
 
 
 class CollectionCreateRequest(BaseModel):

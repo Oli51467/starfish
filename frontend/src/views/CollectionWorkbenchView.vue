@@ -65,8 +65,10 @@
         <article class="panel collection-main">
           <div class="panel-head collection-main-head">
             <h2>{{ activeCollectionTitle }}</h2>
-            <div class="collection-status-summary mono">
-              未读 {{ unreadCount }} · 阅读中 {{ readingCount }} · 已读 {{ completedCount }}
+            <div class="collection-main-head-right">
+              <div class="collection-status-summary mono">
+                未读 {{ unreadCount }} · 阅读中 {{ readingCount }} · 已读 {{ completedCount }}
+              </div>
             </div>
           </div>
           <div class="panel-body collection-main-body">
@@ -91,6 +93,14 @@
                 <option value="citation_count">引用数</option>
               </select>
               <button class="btn mono collection-query-btn" type="button" @click="reloadSavedPapers">查询</button>
+              <button
+                class="btn mono collection-filter-refresh-btn"
+                type="button"
+                :disabled="signalRefreshing"
+                @click="refreshSignalFeed"
+              >
+                {{ signalRefreshing ? '刷新中...' : '刷新动态' }}
+              </button>
             </div>
 
             <LoadingState v-if="savedPapersLoading" message="正在加载论文..." />
@@ -111,7 +121,7 @@
                         <span class="collection-meta-label mono">收藏时间</span>
                         <span class="collection-meta-value mono">{{ formatDateTime(item.saved_at) }}</span>
                       </div>
-                      <div class="collection-meta-item">
+                      <div class="collection-meta-item is-right-meta">
                         <span class="collection-meta-label mono">论文作者</span>
                         <span class="collection-meta-value">{{ formatAuthors(item.metadata.authors) }}</span>
                       </div>
@@ -119,7 +129,7 @@
                         <span class="collection-meta-label mono">发表时间</span>
                         <span class="collection-meta-value mono">{{ formatPublicationTime(item.metadata.publication_date, item.metadata.year) }}</span>
                       </div>
-                      <div class="collection-meta-item">
+                      <div class="collection-meta-item is-right-meta">
                         <span class="collection-meta-label mono">影响因子</span>
                         <span class="collection-meta-value mono accent">{{ formatImpactFactor(item.metadata.impact_factor) }}</span>
                       </div>
@@ -127,7 +137,7 @@
                         <span class="collection-meta-label mono">引用数</span>
                         <span class="collection-meta-value mono">{{ Number(item.metadata.citation_count || 0).toLocaleString() }}</span>
                       </div>
-                      <div class="collection-meta-item">
+                      <div class="collection-meta-item is-right-meta">
                         <span class="collection-meta-label mono">论文领域</span>
                         <span class="collection-meta-value tag">{{ formatFields(item.metadata.fields_of_study) }}</span>
                       </div>
@@ -136,6 +146,26 @@
                       <p class="collection-paper-abstract">
                         {{ formatAbstract(item.metadata.abstract) }}
                       </p>
+                    </div>
+                    <div
+                      v-if="hasRefreshedSignals && paperSignalLinks(item).length"
+                      class="collection-paper-signal-links"
+                    >
+                      <p class="collection-paper-signal-title mono">研究动态外链</p>
+                      <div class="collection-paper-signal-link-list">
+                        <a
+                          v-for="link in paperSignalLinks(item)"
+                          :key="`${item.saved_paper_id}-${link.url}`"
+                          class="collection-paper-signal-link"
+                          :href="link.url"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          @click.stop
+                        >
+                          <span class="collection-paper-signal-link-label">{{ link.label }}</span>
+                          <span class="collection-paper-signal-link-url mono">{{ link.displayUrl }}</span>
+                        </a>
+                      </div>
                     </div>
                   </section>
 
@@ -254,6 +284,7 @@ import { useRouter } from 'vue-router';
 import AppHeader from '../components/layout/AppHeader.vue';
 import ErrorBoundary from '../components/common/ErrorBoundary.vue';
 import LoadingState from '../components/common/LoadingState.vue';
+import { useGlobalInputDialog } from '../composables/useGlobalInputDialog';
 import { useAuthStore } from '../stores/authStore';
 import { useCollectionStore } from '../stores/collectionStore';
 
@@ -261,6 +292,7 @@ const UNCLASSIFIED_COLLECTION_ID = '__unclassified__';
 
 const router = useRouter();
 const { accessToken, isAuthenticated, loadSession } = useAuthStore();
+const { askForInput } = useGlobalInputDialog();
 const {
   collections,
   collectionsLoading,
@@ -279,8 +311,12 @@ const {
   savedPaperIndexItems,
   notesBySavedPaperId,
   notesLoadingBySavedPaperId,
+  signalEvents,
+  signalRefreshing,
   fetchCollections,
   querySavedPapers,
+  fetchSignalEvents,
+  refreshSavedPaperSignals,
   setSavedPaperReadStatus,
   fetchSavedPaperNotes,
   addSavedPaperNote,
@@ -299,6 +335,7 @@ const sortOrder = ref('desc');
 const noteDraftMap = ref({});
 const noteEditorOpenMap = ref({});
 const metadataEnrichAttemptedSet = ref(new Set());
+const hasRefreshedSignals = ref(false);
 
 const collectionNameMap = computed(() => {
   const mapped = {};
@@ -350,6 +387,31 @@ const visiblePapers = computed(() => {
   return sorted;
 });
 
+const paperSignalLinksMap = computed(() => {
+  const mapped = {};
+  const dedupSets = {};
+  for (const event of signalEvents.value) {
+    const links = resolveEventExternalLinks(event);
+    if (!links.length) continue;
+    const keys = [
+      String(event?.paper_id || '').trim(),
+      String(event?.saved_paper_id || '').trim()
+    ].filter(Boolean);
+    for (const key of keys) {
+      if (!mapped[key]) {
+        mapped[key] = [];
+        dedupSets[key] = new Set();
+      }
+      for (const link of links) {
+        if (!link?.url || dedupSets[key].has(link.url)) continue;
+        dedupSets[key].add(link.url);
+        mapped[key].push(link);
+      }
+    }
+  }
+  return mapped;
+});
+
 function goHome() {
   router.push({ name: 'home' });
 }
@@ -399,7 +461,16 @@ async function setActiveCollection(collectionId) {
 }
 
 async function promptCreateCollection() {
-  const nextName = window.prompt('请输入分组名称');
+  const nextName = await askForInput({
+    title: '新建分组',
+    message: '请输入分组名称。',
+    placeholder: '例如：Transformer 阅读',
+    confirmText: '创建',
+    cancelText: '取消',
+    required: true,
+    requiredMessage: '请输入分组名称。',
+    maxLength: 100
+  });
   const safeName = String(nextName || '').trim();
   if (!safeName) return;
   try {
@@ -479,6 +550,146 @@ function formatDateTime(value) {
   const hour = String(parsed.getHours()).padStart(2, '0');
   const minute = String(parsed.getMinutes()).padStart(2, '0');
   return `${year}-${month}-${day} ${hour}:${minute}`;
+}
+
+function normalizeExternalUrl(rawValue) {
+  const text = String(rawValue || '').trim();
+  if (!text) return '';
+  if (/^https?:\/\//i.test(text)) return text;
+  if (/^(?:dx\.)?doi\.org\/\S+/i.test(text)) return `https://${text}`;
+  if (/^arxiv\.org\/abs\/\S+/i.test(text)) return `https://${text}`;
+  if (/^doi:\s*/i.test(text)) {
+    return `https://doi.org/${text.replace(/^doi:\s*/i, '').trim()}`;
+  }
+  if (/^10\.\d{4,9}\/\S+/i.test(text)) {
+    return `https://doi.org/${text}`;
+  }
+  if (/^www\./i.test(text)) {
+    return `https://${text}`;
+  }
+  return '';
+}
+
+function extractArxivId(rawValue) {
+  const text = String(rawValue || '').trim();
+  if (!text) return '';
+  const urlMatched = text.match(/arxiv\.org\/abs\/([^?#\s]+)/i);
+  if (urlMatched?.[1]) return urlMatched[1];
+  const normalized = text.replace(/^arxiv:\s*/i, '').trim();
+  if (/^\d{4}\.\d{4,5}(v\d+)?$/i.test(normalized)) return normalized;
+  if (/^[a-z\-]+(?:\.[a-z\-]+)?\/\d{7}(v\d+)?$/i.test(normalized)) return normalized;
+  return '';
+}
+
+function resolvePaperCanonicalUrl(paperId) {
+  const safePaperId = String(paperId || '').trim();
+  if (!safePaperId) return '';
+  const normalized = normalizeExternalUrl(safePaperId);
+  if (normalized) return normalized;
+  const arxivId = extractArxivId(safePaperId);
+  if (arxivId) return `https://arxiv.org/abs/${arxivId}`;
+  return '';
+}
+
+function compactExternalUrl(url) {
+  try {
+    const parsed = new URL(url);
+    const path = parsed.pathname === '/' ? '' : parsed.pathname;
+    return `${parsed.hostname}${path}`;
+  } catch {
+    return url;
+  }
+}
+
+function appendEventLinksFromValue(rawValue, fallbackLabel, collector, depth = 0) {
+  if (depth > 2 || rawValue == null) return;
+
+  if (typeof rawValue === 'string') {
+    const url = normalizeExternalUrl(rawValue);
+    if (!url) return;
+    collector({
+      url,
+      label: fallbackLabel,
+      displayUrl: compactExternalUrl(url)
+    });
+    return;
+  }
+
+  if (Array.isArray(rawValue)) {
+    for (const item of rawValue) {
+      appendEventLinksFromValue(item, fallbackLabel, collector, depth + 1);
+    }
+    return;
+  }
+
+  if (typeof rawValue !== 'object') return;
+  const label = String(rawValue?.title || rawValue?.label || rawValue?.name || fallbackLabel).trim() || fallbackLabel;
+  const directUrl = normalizeExternalUrl(
+    rawValue?.url
+    || rawValue?.href
+    || rawValue?.link
+    || rawValue?.source_url
+    || rawValue?.sourceUrl
+  );
+  if (directUrl) {
+    collector({
+      url: directUrl,
+      label,
+      displayUrl: compactExternalUrl(directUrl)
+    });
+    return;
+  }
+
+  appendEventLinksFromValue(rawValue?.links, fallbackLabel, collector, depth + 1);
+  appendEventLinksFromValue(rawValue?.external_links || rawValue?.externalLinks, fallbackLabel, collector, depth + 1);
+  appendEventLinksFromValue(rawValue?.references, fallbackLabel, collector, depth + 1);
+  appendEventLinksFromValue(rawValue?.sources, fallbackLabel, collector, depth + 1);
+}
+
+function resolveEventExternalLinks(event) {
+  const fallbackLabel = String(event?.title || '研究动态').trim() || '研究动态';
+  const payload = event?.payload && typeof event.payload === 'object' ? event.payload : {};
+  const links = [];
+  const seen = new Set();
+  const collect = (entry) => {
+    if (!entry?.url || seen.has(entry.url)) return;
+    seen.add(entry.url);
+    links.push(entry);
+  };
+
+  appendEventLinksFromValue(payload, fallbackLabel, collect);
+  appendEventLinksFromValue(payload?.links, fallbackLabel, collect);
+  appendEventLinksFromValue(payload?.external_links || payload?.externalLinks, fallbackLabel, collect);
+  appendEventLinksFromValue(payload?.url || payload?.link || payload?.href, fallbackLabel, collect);
+
+  if (!links.length) {
+    const fallbackUrl = resolvePaperCanonicalUrl(event?.paper_id);
+    if (fallbackUrl) {
+      links.push({
+        url: fallbackUrl,
+        label: fallbackLabel,
+        displayUrl: compactExternalUrl(fallbackUrl)
+      });
+    }
+  }
+  return links;
+}
+
+function paperSignalLinks(item) {
+  const paperId = String(item?.paper_id || '').trim();
+  const savedPaperId = String(item?.saved_paper_id || '').trim();
+  const byPaperId = paperId ? (paperSignalLinksMap.value[paperId] || []) : [];
+  const bySavedPaperId = savedPaperId ? (paperSignalLinksMap.value[savedPaperId] || []) : [];
+  if (!byPaperId.length) return bySavedPaperId;
+  if (!bySavedPaperId.length) return byPaperId;
+  const merged = [];
+  const seen = new Set();
+  for (const link of [...byPaperId, ...bySavedPaperId]) {
+    if (!link?.url || seen.has(link.url)) continue;
+    seen.add(link.url);
+    merged.push(link);
+  }
+  return merged;
 }
 
 function formatPublicationTime(publicationDate, year) {
@@ -615,6 +826,22 @@ async function removeNote(item, note) {
   }
 }
 
+async function refreshSignalFeed() {
+  await refreshSavedPaperSignals({
+    accessToken: accessToken.value,
+    collectionId: activeCollectionId.value === UNCLASSIFIED_COLLECTION_ID ? '' : activeCollectionId.value,
+    limit: 50,
+    forceRefresh: false
+  });
+  await fetchSignalEvents({
+    accessToken: accessToken.value,
+    page: 1,
+    pageSize: 50,
+    unreadOnly: false
+  });
+  hasRefreshedSignals.value = true;
+}
+
 onMounted(async () => {
   await loadSession();
   if (!isAuthenticated.value) {
@@ -653,6 +880,13 @@ onMounted(async () => {
   gap: 12px;
 }
 
+.collection-main-head-right {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0;
+}
+
 .collection-status-summary {
   color: var(--muted);
   font-size: 11px;
@@ -667,7 +901,7 @@ onMounted(async () => {
 
 .collection-filter-row {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) 108px 108px auto;
+  grid-template-columns: minmax(220px, 1fr) 108px 108px auto auto;
   gap: 6px;
   margin-bottom: 0;
 }
@@ -701,6 +935,11 @@ onMounted(async () => {
 }
 
 .collection-query-btn {
+  height: 32px;
+  padding: 0 10px;
+}
+
+.collection-filter-refresh-btn {
   height: 32px;
   padding: 0 10px;
 }
@@ -769,7 +1008,7 @@ onMounted(async () => {
 }
 
 .collection-paper-list {
-  margin-top: 0;
+  margin-top: 10px;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -819,7 +1058,7 @@ onMounted(async () => {
 .collection-meta-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 4px 16px;
+  gap: 4px 12px;
 }
 
 .collection-meta-item {
@@ -827,6 +1066,10 @@ onMounted(async () => {
   align-items: baseline;
   gap: 6px;
   min-width: 0;
+}
+
+.collection-meta-item.is-right-meta {
+  transform: translateX(-8px);
 }
 
 .collection-meta-label {
@@ -868,6 +1111,59 @@ onMounted(async () => {
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   padding: 8px 10px;
+}
+
+.collection-paper-signal-links {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  padding: 8px 10px;
+  display: grid;
+  gap: 6px;
+}
+
+.collection-paper-signal-title {
+  margin: 0;
+  font-size: 10px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.collection-paper-signal-link-list {
+  display: grid;
+  gap: 5px;
+}
+
+.collection-paper-signal-link {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  text-decoration: none;
+  padding: 6px 8px;
+  display: grid;
+  gap: 2px;
+  transition: border-color 0.2s ease, background-color 0.2s ease;
+}
+
+.collection-paper-signal-link:hover {
+  border-color: var(--line-2);
+  background: color-mix(in srgb, var(--panel) 76%, var(--bg));
+}
+
+.collection-paper-signal-link-label {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.collection-paper-signal-link-url {
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .collection-icon-btn {
@@ -1109,6 +1405,16 @@ onMounted(async () => {
 }
 
 @media (max-width: 768px) {
+  .collection-main-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .collection-main-head-right {
+    width: auto;
+    justify-content: flex-end;
+  }
+
   .collection-filter-row {
     grid-template-columns: 1fr;
   }
@@ -1124,6 +1430,10 @@ onMounted(async () => {
 
   .collection-meta-grid {
     grid-template-columns: 1fr;
+  }
+
+  .collection-meta-item.is-right-meta {
+    transform: none;
   }
 
 }

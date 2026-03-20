@@ -13,6 +13,35 @@
       >
         <div class="blood-canvas-head">
           <div class="blood-canvas-head-right">
+            <div
+              class="blood-view-switcher"
+              role="tablist"
+              aria-label="血缘树视图切换"
+              @pointerdown.stop
+              @pointermove.stop
+              @pointerup.stop
+            >
+              <button
+                class="blood-view-switch-btn mono"
+                :class="{ 'is-active': activeRenderMode === 'citation' }"
+                type="button"
+                role="tab"
+                :aria-selected="activeRenderMode === 'citation'"
+                @click="activeRenderMode = 'citation'"
+              >
+                引用视图
+              </button>
+              <button
+                class="blood-view-switch-btn mono"
+                :class="{ 'is-active': activeRenderMode === 'heat' }"
+                type="button"
+                role="tab"
+                :aria-selected="activeRenderMode === 'heat'"
+                @click="activeRenderMode = 'heat'"
+              >
+                热度视图
+              </button>
+            </div>
             <button
               class="btn graph-refresh-btn blood-canvas-refresh"
               type="button"
@@ -110,13 +139,18 @@
                 v-for="node in layoutNodes"
                 :key="node.id"
                 class="blood-node-group"
-                :class="{ 'is-dragging': draggingNodeId === node.id }"
+                :class="{ 'is-dragging': draggingNodeId === node.id, 'is-focused': isFocusedNode(node) }"
                 :transform="`translate(${node.x}, ${node.y})`"
                 @mouseenter="showTooltip($event, node)"
                 @mouseleave="hideTooltip"
                 @click="openDetail(node)"
                 @pointerdown.stop="startNodeDrag($event, node)"
               >
+                <circle
+                  v-if="isFocusedNode(node)"
+                  :r="node.radius + 13"
+                  class="blood-focus-ring"
+                />
                 <circle
                   v-if="node.nodeType === 'root'"
                   :r="node.radius + 8"
@@ -143,7 +177,7 @@
         </svg>
 
         <div class="blood-legend">
-          <p class="blood-legend-title mono">Citation type</p>
+          <p class="blood-legend-title mono">{{ activeRenderMode === 'heat' ? '热度 + 引用关系' : '引用关系类型' }}</p>
           <div v-for="marker in citationMarkers" :key="`legend-${marker.key}`" class="blood-legend-row">
             <span class="blood-legend-line" :style="{ background: marker.color }"></span>
             <span>{{ marker.label }}</span>
@@ -208,7 +242,7 @@
                   class="paper-node-action-btn paper-node-star-btn blood-detail-bookmark-btn"
                   :class="{ 'is-active': selectedNodeInfo.isBookmarked }"
                   type="button"
-                  :disabled="!isAuthenticated || selectedNodeInfo.isBookmarkSyncing"
+                  :disabled="bookmarkActionLoading || selectedNodeInfo.isBookmarkSyncing"
                   :aria-label="selectedNodeInfo.isBookmarked ? '取消收藏' : '收藏论文'"
                   :title="selectedNodeInfo.isBookmarked ? '取消收藏' : '收藏论文'"
                   @click="toggleSelectedNodeBookmark"
@@ -218,6 +252,7 @@
                   </svg>
                 </button>
               </div>
+              <p v-if="bookmarkErrorMessage" class="blood-detail-bookmark-error mono">{{ bookmarkErrorMessage }}</p>
 
               <a
                 v-if="selectedNodeInfo.url"
@@ -250,12 +285,17 @@ const props = defineProps({
   stretchTimeline: {
     type: Boolean,
     default: false
+  },
+  focusPaperId: {
+    type: String,
+    default: ''
   }
 });
 
 const canvasRef = ref(null);
 const isFullscreen = ref(false);
 const selectedNode = ref(null);
+const activeRenderMode = ref('citation');
 const renderNonce = ref(0);
 const viewBox = ref({
   width: 920,
@@ -366,8 +406,10 @@ const citationMarkers = Object.entries(citationConfig).map(([key, value]) => ({
   label: value.label,
   color: value.color
 }));
-const { accessToken, isAuthenticated } = useAuthStore();
+const { accessToken, isAuthenticated, loadSession } = useAuthStore();
 const { ensureBookmarkIndexLoaded, isPaperSaved, isPaperSyncing, togglePaperSaved } = useCollectionStore();
+const bookmarkActionLoading = ref(false);
+const bookmarkErrorMessage = ref('');
 const citationTypeLabelZh = Object.freeze({
   extending: '扩展',
   supporting: '支持',
@@ -549,6 +591,17 @@ function resolveNodeRelationDescription(node) {
     node?.meta?.relation_description,
     node?.meta?.relationDescription
   );
+}
+
+function normalizePaperIdForMatch(rawValue) {
+  let value = String(rawValue || '').trim().toLowerCase();
+  if (!value) return '';
+  value = value.replace(/^doi:\s*/i, '').trim();
+  value = value.replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, '').trim();
+  value = value.replace(/^arxiv:/i, '').trim();
+  value = value.replace(/^https?:\/\/arxiv\.org\/(?:abs|pdf)\//i, '').trim();
+  value = value.replace(/\.pdf$/i, '').trim();
+  return value;
 }
 
 function normalizeYear(value) {
@@ -751,6 +804,28 @@ const isCanvasDragging = computed(() => {
 
 const draggingNodeId = computed(() => String(nodeDragState.value.nodeId || '').trim());
 const fullscreenButtonLabel = computed(() => (isFullscreen.value ? '收回' : '全屏'));
+const normalizedFocusPaperId = computed(() => normalizePaperIdForMatch(props.focusPaperId));
+
+function isFocusedNode(node) {
+  const focusKey = normalizedFocusPaperId.value;
+  if (!focusKey) return false;
+  const candidateValues = [
+    resolvePaperId(node),
+    node?.paper_id,
+    node?.id,
+    node?.arxiv_id,
+    node?.doi,
+    node?.meta?.arxiv_id,
+    node?.meta?.doi
+  ];
+  for (const candidate of candidateValues) {
+    const normalized = normalizePaperIdForMatch(candidate);
+    if (normalized && normalized === focusKey) {
+      return true;
+    }
+  }
+  return false;
+}
 
 const canvasViewportTransform = computed(() => {
   const { x, y, scale } = viewport.value;
@@ -1003,7 +1078,97 @@ function yearToX(yearValue) {
   return ticks[lastIndex].x;
 }
 
-function computeRadius(node, isRoot = false) {
+function normalizeCitationScore(citationCount, { reference = 5000 } = {}) {
+  const safeCitation = normalizeCitationCount(citationCount);
+  const safeReference = Math.max(50, Number(reference) || 5000);
+  const normalized = 1 - Math.exp(-safeCitation / safeReference);
+  return clamp(normalized, 0, 1);
+}
+
+function resolveNodeRecencyScore(nodeYear) {
+  const safeYear = Number(nodeYear);
+  if (!Number.isFinite(safeYear)) return 0.36;
+  const currentYear = new Date().getFullYear();
+  const age = Math.max(0, currentYear - Math.round(safeYear));
+  if (age <= 1) return 1;
+  if (age <= 3) return 0.86;
+  if (age <= 5) return 0.74;
+  if (age <= 8) return 0.58;
+  if (age <= 12) return 0.42;
+  return 0.28;
+}
+
+function resolveNodeHeatScore(node, { isRoot = false, rootMomentum = 0 } = {}) {
+  const citationScore = normalizeCitationScore(node?.citation_count || node?.citationCount, {
+    reference: isRoot ? 1200 : 700
+  });
+  const recency = resolveNodeRecencyScore(resolveNodeYear(node, timelineMetrics.value.fallbackYear));
+  if (!isRoot) {
+    const score = citationScore * 0.62 + recency * 0.38;
+    return clamp(score, 0, 1);
+  }
+  const momentum = clamp(rootMomentum, 0, 1);
+  const score = citationScore * 0.45 + recency * 0.30 + momentum * 0.25;
+  return clamp(score, 0, 1);
+}
+
+function resolveHeatTrendLabel(heatScore, controversyScore) {
+  const safeHeat = clamp(Number(heatScore) || 0, 0, 1);
+  const safeControversy = clamp(Number(controversyScore) || 0, 0, 1);
+  if (safeControversy >= 0.34) return '争议';
+  if (safeHeat >= 0.72) return '上升';
+  if (safeHeat >= 0.45) return '稳定';
+  return '降温';
+}
+
+function formatSignalPercent(value) {
+  const safeValue = clamp(Number(value) || 0, 0, 1);
+  return `${Math.round(safeValue * 100)}%`;
+}
+
+function formatTrendLabel(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return '稳定';
+  if (normalized === 'rising') return '上升';
+  if (normalized === 'steady') return '稳定';
+  if (normalized === 'cooling') return '降温';
+  if (normalized === 'controversial') return '争议';
+  return String(value).trim();
+}
+
+function resolveNodeControversyScore(node) {
+  if (String(node?.nodeType || '').toLowerCase() === 'root') {
+    const distribution = props.lineage?.stats?.type_distribution || {};
+    const total = Object.values(distribution).reduce((sum, value) => sum + Math.max(0, Number(value) || 0), 0);
+    const contradicting = Math.max(0, Number(distribution?.contradicting || 0));
+    if (total <= 0) return 0;
+    return clamp(contradicting / total, 0, 1);
+  }
+  const relation = normalizeCitationType(node?.ctype || node?.relation_type);
+  if (relation === 'contradicting') return 0.82;
+  if (relation === 'mentioning') return 0.28;
+  if (relation === 'migrating') return 0.34;
+  return 0.2;
+}
+
+function resolveHeatFill(score, { isRoot = false } = {}) {
+  const weight = Math.round(18 + clamp(score, 0, 1) * 62);
+  if (isRoot) {
+    return `color-mix(in srgb, var(--accent) ${Math.max(34, weight)}%, var(--text))`;
+  }
+  return `color-mix(in srgb, var(--accent) ${weight}%, var(--bg))`;
+}
+
+function resolveHeatStroke(score) {
+  const weight = Math.round(38 + clamp(score, 0, 1) * 52);
+  return `color-mix(in srgb, var(--accent) ${weight}%, var(--text))`;
+}
+
+function computeRadius(node, isRoot = false, { mode = 'citation', heatScore = 0 } = {}) {
+  if (mode === 'heat') {
+    if (isRoot) return 24 + clamp(heatScore, 0, 1) * 10;
+    return 12 + clamp(heatScore, 0, 1) * 10;
+  }
   if (isRoot) return 30;
   const citations = normalizeCitationCount(node?.citation_count || node?.citationCount);
   const normalized = Math.min(citations / 50000, 1);
@@ -1065,24 +1230,36 @@ const layoutNodes = computed(() => {
   const root = nodes[0];
   const ancestors = nodes.filter((node) => node.nodeType === 'ancestor');
   const descendants = nodes.filter((node) => node.nodeType === 'descendant');
+  const renderMode = activeRenderMode.value;
+  const rootMomentum = clamp(1 - Math.exp(-Math.max(0, descendants.length) / 6), 0, 1);
   const yearBandWidth = Math.max(18, timelineMetrics.value.axisWidth / Math.max(1, timelineMetrics.value.intervalCount));
   const fallbackYear = timelineMetrics.value.fallbackYear;
   const rootYear = resolveNodeYear(root, fallbackYear) || fallbackYear;
 
   const output = [];
+  const rootHeatScore = resolveNodeHeatScore(root, {
+    isRoot: true,
+    rootMomentum
+  });
   output.push({
     ...root,
     x: yearToX(rootYear) * stretchInverseScale,
     y: centerY,
-    radius: computeRadius(root, true),
-    fill: 'var(--text)',
-    stroke: 'var(--text)',
+    heat_score: rootHeatScore,
+    controversy_score: resolveNodeControversyScore(root),
+    trend_label: resolveHeatTrendLabel(rootHeatScore, resolveNodeControversyScore(root)),
+    radius: computeRadius(root, true, {
+      mode: renderMode,
+      heatScore: rootHeatScore
+    }),
+    fill: renderMode === 'heat' ? resolveHeatFill(rootHeatScore, { isRoot: true }) : 'var(--text)',
+    stroke: renderMode === 'heat' ? resolveHeatStroke(rootHeatScore) : 'var(--text)',
     strokeWidth: 1.6,
-    yearFill: 'var(--bg)',
-    citationFill: 'var(--panel)',
+    yearFill: renderMode === 'heat' ? 'var(--bg)' : 'var(--bg)',
+    citationFill: renderMode === 'heat' ? 'var(--bg)' : 'var(--panel)',
     yearText: Number.isFinite(rootYear) ? String(rootYear) : '--',
     citationText: formatCitation(root?.citation_count),
-    shortTitle: 'Seed Paper',
+    shortTitle: shortTitle(root?.title || 'Seed Paper'),
     labelDy: compact ? 42 : 46
   });
 
@@ -1139,6 +1316,8 @@ const layoutNodes = computed(() => {
       const relationRelevance = relationWeight(relationType);
       const generation = normalizeGeneration(item?.hop || item?.generation || 1);
       const color = citationConfig[relationType]?.color || citationConfig.mentioning.color;
+      const nodeHeatScore = resolveNodeHeatScore(item, { isRoot: false });
+      const nodeControversyScore = resolveNodeControversyScore(item);
       const nodeYear = resolveNodeYear(item, fallbackYear);
       const year = Number.isFinite(nodeYear) ? nodeYear : fallbackYear;
       const yearLayout = yearLayouts.get(year) || { columns: 1, rows: 1, index: 0 };
@@ -1166,15 +1345,23 @@ const layoutNodes = computed(() => {
         ...item,
         relation_type: relationType,
         generation,
+        heat_score: nodeHeatScore,
+        controversy_score: nodeControversyScore,
+        trend_label: resolveHeatTrendLabel(nodeHeatScore, nodeControversyScore),
         citation_count: normalizeCitationCount(item?.citation_count || item?.citationCount),
         x: (yearToX(year) + xSpreadOffset) * stretchInverseScale,
         y: baseY,
-        radius: computeRadius(item),
-        fill: 'var(--bg)',
-        stroke: color,
+        radius: computeRadius(item, false, {
+          mode: renderMode,
+          heatScore: nodeHeatScore
+        }),
+        fill: renderMode === 'heat' ? resolveHeatFill(nodeHeatScore) : 'var(--bg)',
+        stroke: renderMode === 'heat'
+          ? `color-mix(in srgb, ${color} 58%, var(--text))`
+          : color,
         strokeWidth: 1.5,
-        yearFill: 'var(--text)',
-        citationFill: 'var(--muted)',
+        yearFill: renderMode === 'heat' ? 'var(--text)' : 'var(--text)',
+        citationFill: renderMode === 'heat' ? 'var(--text)' : 'var(--muted)',
         yearText: Number.isFinite(year) ? String(year) : '--',
         citationText: formatCitation(item?.citation_count),
         shortTitle: shortTitle(item?.title),
@@ -1389,11 +1576,27 @@ const selectedNodeInfo = computed(() => {
   const abstractText = textOrFallback(resolveNodeAbstract(selected), '暂无摘要信息。');
   const paperId = resolvePaperId(selected) || textOrFallback(selected?.id, '-');
   const safePaperId = paperId === '-' ? '' : paperId;
+  const isRootNode = String(selected?.nodeType || '').toLowerCase() === 'root';
+  const rootMomentum = clamp(1 - Math.exp(-Math.max(0, normalizedNodes.value.filter((item) => item.nodeType === 'descendant').length) / 6), 0, 1);
+  const heatScore = clamp(
+    Number(selected?.heat_score ?? resolveNodeHeatScore(selected, { isRoot: isRootNode, rootMomentum })) || 0,
+    0,
+    1
+  );
+  const controversyScore = clamp(
+    Number(selected?.controversy_score ?? resolveNodeControversyScore(selected)) || 0,
+    0,
+    1
+  );
+  const trendLabel = formatTrendLabel(selected?.trend_label || resolveHeatTrendLabel(heatScore, controversyScore));
   const metaItems = [
     { label: '论文 ID', value: paperId },
     { label: '发表年份', value: yearText },
     { label: '发表日期', value: publicationDate || '-' },
     { label: '引用次数', value: citationCount },
+    { label: '热度评分', value: formatSignalPercent(heatScore) },
+    { label: '趋势判断', value: trendLabel },
+    { label: '争议程度', value: formatSignalPercent(controversyScore) },
     { label: '期刊/会议', value: venue },
     { label: '作者', value: authors }
   ];
@@ -1455,18 +1658,33 @@ function buildSelectedNodeMetadata(node) {
 }
 
 async function toggleSelectedNodeBookmark() {
-  if (!isAuthenticated.value || !String(accessToken.value || '').trim()) return;
+  if (bookmarkActionLoading.value) return;
   const node = selectedNode.value;
   if (!node) return;
   const paperId = resolvePaperId(node);
   if (!paperId) return;
   if (isPaperSyncing(paperId)) return;
-
-  await togglePaperSaved({
-    accessToken: accessToken.value,
-    paperId,
-    metadata: buildSelectedNodeMetadata(node)
-  });
+  bookmarkErrorMessage.value = '';
+  bookmarkActionLoading.value = true;
+  try {
+    if (!isAuthenticated.value || !String(accessToken.value || '').trim()) {
+      await loadSession();
+    }
+    const token = String(accessToken.value || '').trim();
+    if (!token) {
+      bookmarkErrorMessage.value = '请先登录后再收藏。';
+      return;
+    }
+    await togglePaperSaved({
+      accessToken: token,
+      paperId,
+      metadata: buildSelectedNodeMetadata(node)
+    });
+  } catch (error) {
+    bookmarkErrorMessage.value = error?.message || '收藏失败，请稍后重试。';
+  } finally {
+    bookmarkActionLoading.value = false;
+  }
 }
 
 function formatCitation(value) {
@@ -1480,10 +1698,22 @@ function buildNodeTooltipMeta(node) {
   const year = resolveNodeYearText(node);
   const cite = formatCitation(normalizeCitationCount(node?.citation_count || node?.citationCount));
   const role = resolveNodeRoleLabel(node);
+  const heatScore = clamp(
+    Number(node?.heat_score ?? resolveNodeHeatScore(node, { isRoot: String(node?.nodeType || '').toLowerCase() === 'root' })) || 0,
+    0,
+    1
+  );
+  const heatText = `热度 ${formatSignalPercent(heatScore)}`;
   if (String(node?.nodeType || '').toLowerCase() === 'root') {
+    if (activeRenderMode.value === 'heat') {
+      return `${role} · ${year} · ${cite} 引 · ${heatText}`;
+    }
     return `${role} · ${year} · ${cite} 引`;
   }
   const relation = resolveCitationTypeLabel(node?.ctype || node?.relation_type);
+  if (activeRenderMode.value === 'heat') {
+    return `${role} · ${year} · ${cite} 引 · ${relation} · ${heatText}`;
+  }
   return `${role} · ${year} · ${cite} 引 · ${relation}`;
 }
 
@@ -1907,9 +2137,17 @@ watch(
 watch(
   () => props.lineage,
   async () => {
+    bookmarkErrorMessage.value = '';
     await resetLineageViewport({ targetScale: 1, forceRerender: true });
   },
   { deep: true }
+);
+
+watch(
+  () => selectedNode.value?.id,
+  () => {
+    bookmarkErrorMessage.value = '';
+  }
 );
 
 onBeforeUnmount(() => {
@@ -1985,6 +2223,42 @@ defineExpose({
 
 .blood-canvas-head-right {
   gap: 8px;
+}
+
+.blood-view-switcher {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  overflow: hidden;
+  pointer-events: auto;
+}
+
+.blood-view-switch-btn {
+  height: 28px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 0 10px;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+.blood-view-switch-btn + .blood-view-switch-btn {
+  border-left: 1px solid var(--line);
+}
+
+.blood-view-switch-btn:hover {
+  background: var(--panel);
+  color: var(--text);
+}
+
+.blood-view-switch-btn.is-active {
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg));
+  color: var(--text);
 }
 
 .blood-canvas-refresh,
@@ -2103,6 +2377,18 @@ defineExpose({
 
 .blood-node-group.is-dragging {
   cursor: grabbing;
+}
+
+.blood-focus-ring {
+  fill: color-mix(in srgb, var(--accent) 20%, transparent);
+  stroke: color-mix(in srgb, var(--accent) 75%, var(--text));
+  stroke-width: 1.4;
+  stroke-dasharray: 4 3;
+  animation: blood-focus-pulse 1.8s ease-in-out infinite;
+}
+
+.blood-node-group.is-focused text {
+  font-weight: 600;
 }
 
 .blood-root-ring {
@@ -2327,6 +2613,13 @@ defineExpose({
   padding: 0;
 }
 
+.blood-detail-bookmark-error {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--accent);
+}
+
 .blood-detail-link {
   display: inline-flex;
   align-items: center;
@@ -2355,6 +2648,18 @@ defineExpose({
 
 .blood-detail-text.muted {
   color: var(--muted);
+}
+
+@keyframes blood-focus-pulse {
+  0% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 0.95;
+  }
+  100% {
+    opacity: 0.45;
+  }
 }
 
 @media (max-width: 980px) {

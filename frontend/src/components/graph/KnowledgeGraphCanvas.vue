@@ -298,7 +298,7 @@
           class="paper-node-action-btn paper-node-star-btn"
           :class="{ 'is-active': pinnedNodeDetail.isBookmarked }"
           type="button"
-          :disabled="!isAuthenticated || pinnedNodeDetail.isBookmarkSyncing"
+          :disabled="bookmarkActionLoading || pinnedNodeDetail.isBookmarkSyncing"
           :aria-label="pinnedNodeDetail.isBookmarked ? '取消收藏' : '收藏论文'"
           :title="pinnedNodeDetail.isBookmarked ? '取消收藏' : '收藏论文'"
           @click="toggleBookmark"
@@ -307,6 +307,7 @@
             <path d="M8 1.3l1.96 3.97 4.38.64-3.17 3.09.75 4.36L8 11.28l-3.92 2.08.75-4.36L1.66 5.91l4.38-.64L8 1.3z" />
           </svg>
         </button>
+        <p v-if="bookmarkErrorMessage" class="paper-node-action-error mono">{{ bookmarkErrorMessage }}</p>
       </footer>
     </article>
   </div>
@@ -342,13 +343,15 @@ const selectedDirectionId = ref('');
 const selectedDirectionMode = ref('none');
 const isGraphDragging = ref(false);
 const isFullscreen = ref(false);
-const { accessToken, isAuthenticated } = useAuthStore();
+const { accessToken, isAuthenticated, loadSession } = useAuthStore();
 const { ensureBookmarkIndexLoaded, isPaperSaved, isPaperSyncing, togglePaperSaved } = useCollectionStore();
 let graphInstance = null;
 let resizeObserver = null;
 let resizeRaf = 0;
 let nodeClickHandler = null;
 let lastGraphSignature = '';
+const bookmarkActionLoading = ref(false);
+const bookmarkErrorMessage = ref('');
 
 const DIRECTION_MODE = Object.freeze({
   NONE: 'none',
@@ -1084,17 +1087,33 @@ function resolvePaperIdForNode(node) {
 async function toggleBookmark() {
   const detail = pinnedNodeDetail.value;
   if (!detail || !detail.isPaper) return;
-  if (!isAuthenticated.value || !String(accessToken.value || '').trim()) return;
   if (detail.isBookmarkSyncing) return;
+  if (bookmarkActionLoading.value) return;
 
   const node = pinnedNode.value;
   const paperId = String(detail.paperId || resolvePaperIdForNode(node)).trim();
   if (!paperId) return;
-  await togglePaperSaved({
-    accessToken: accessToken.value,
-    paperId,
-    metadata: buildPaperMetadataFromGraphNode(node, detail)
-  });
+  bookmarkErrorMessage.value = '';
+  bookmarkActionLoading.value = true;
+  try {
+    if (!isAuthenticated.value || !String(accessToken.value || '').trim()) {
+      await loadSession();
+    }
+    const token = String(accessToken.value || '').trim();
+    if (!token) {
+      bookmarkErrorMessage.value = '请先登录后再收藏。';
+      return;
+    }
+    await togglePaperSaved({
+      accessToken: token,
+      paperId,
+      metadata: buildPaperMetadataFromGraphNode(node, detail)
+    });
+  } catch (error) {
+    bookmarkErrorMessage.value = error?.message || '收藏失败，请稍后重试。';
+  } finally {
+    bookmarkActionLoading.value = false;
+  }
 }
 
 function startGraphDragCursor() {
@@ -1133,7 +1152,101 @@ function closeDirectionPaperList() {
   resetDirectionSelection();
 }
 
-function toggleDirectionFocus(directionId) {
+function resolveDirectionFocusNodeIds(directionId) {
+  const targetId = String(directionId || '').trim();
+  if (!targetId) return [];
+
+  const nodesRaw = Array.isArray(props.graph?.nodes) ? props.graph.nodes : [];
+  const edgesRaw = Array.isArray(props.graph?.edges) ? props.graph.edges : [];
+  const knownNodeIds = new Set(
+    nodesRaw
+      .map((node) => String(node?.id || '').trim())
+      .filter(Boolean)
+  );
+  if (!knownNodeIds.has(targetId)) return [];
+
+  const colorContext = buildColorContext(nodesRaw, edgesRaw);
+  const relatedPaperIds = selectedPaperNodeIdsByDirection(colorContext, targetId);
+  const focusIds = [targetId];
+  for (const paperId of relatedPaperIds) {
+    if (!knownNodeIds.has(paperId)) continue;
+    focusIds.push(paperId);
+  }
+  return focusIds;
+}
+
+function computeFocusZoomTarget(nodeIds) {
+  if (!graphInstance || !Array.isArray(nodeIds) || !nodeIds.length) return null;
+  const points = nodeIds
+    .map((nodeId) => normalizePoint(graphInstance.getElementPosition?.(nodeId)))
+    .filter(Boolean);
+  if (!points.length) return null;
+
+  const currentZoomRaw = Number(graphInstance.getZoom?.());
+  const currentZoom = Number.isFinite(currentZoomRaw) && currentZoomRaw > 0
+    ? currentZoomRaw
+    : 1;
+  const preferredZoom = currentZoom * 0.86;
+
+  if (points.length < 2) {
+    return clamp(preferredZoom, GRAPH_ZOOM_RANGE[0], GRAPH_ZOOM_RANGE[1]);
+  }
+
+  const xValues = points.map((point) => point.x);
+  const yValues = points.map((point) => point.y);
+  const minX = Math.min(...xValues);
+  const maxX = Math.max(...xValues);
+  const minY = Math.min(...yValues);
+  const maxY = Math.max(...yValues);
+  const boxWidth = Math.max(1, maxX - minX);
+  const boxHeight = Math.max(1, maxY - minY);
+
+  const { width, height } = getContainerSize();
+  const availableWidth = Math.max(80, width - 220);
+  const availableHeight = Math.max(80, height - 160);
+  const fitScale = Math.min(availableWidth / boxWidth, availableHeight / boxHeight);
+  const fitZoom = currentZoom * fitScale * 0.92;
+  const targetZoom = Math.min(preferredZoom, fitZoom);
+  return clamp(targetZoom, GRAPH_ZOOM_RANGE[0], GRAPH_ZOOM_RANGE[1]);
+}
+
+async function focusDirectionNode(directionId) {
+  if (!graphInstance) return;
+  const targetId = String(directionId || '').trim();
+  if (!targetId) return;
+  const focusIds = resolveDirectionFocusNodeIds(targetId);
+  const focusTarget = focusIds.length ? focusIds : [targetId];
+  try {
+    if (graphInstance.focusElement) {
+      await graphInstance.focusElement(focusTarget, { duration: 260 });
+    } else {
+      const point = normalizePoint(graphInstance.getElementPosition?.(targetId));
+      if (point && graphInstance.translateTo) {
+        await graphInstance.translateTo(point, { duration: 260 });
+      }
+    }
+  } catch {
+    // fallback to translateTo if focusElement fails
+    try {
+      const point = normalizePoint(graphInstance.getElementPosition?.(targetId));
+      if (point && graphInstance.translateTo) {
+        await graphInstance.translateTo(point, { duration: 260 });
+      }
+    } catch {
+      // no-op
+    }
+  }
+
+  const targetZoom = computeFocusZoomTarget(focusTarget);
+  if (targetZoom == null || !graphInstance.zoomTo) return;
+  try {
+    await graphInstance.zoomTo(targetZoom, { duration: 260 });
+  } catch {
+    // no-op
+  }
+}
+
+async function toggleDirectionFocus(directionId) {
   const nextId = String(directionId || '').trim();
   if (!nextId) return;
   const isSameDirection = selectedDirectionId.value === nextId;
@@ -1141,15 +1254,21 @@ function toggleDirectionFocus(directionId) {
   if (!isSameDirection) {
     selectedDirectionId.value = nextId;
     selectedDirectionMode.value = DIRECTION_MODE.HIGHLIGHT;
+    await nextTick();
+    await focusDirectionNode(nextId);
     return;
   }
 
   if (selectedDirectionMode.value === DIRECTION_MODE.NONE) {
     selectedDirectionMode.value = DIRECTION_MODE.HIGHLIGHT;
+    await nextTick();
+    await focusDirectionNode(nextId);
     return;
   }
   if (selectedDirectionMode.value === DIRECTION_MODE.HIGHLIGHT) {
     selectedDirectionMode.value = DIRECTION_MODE.LIST;
+    await nextTick();
+    await focusDirectionNode(nextId);
     return;
   }
 
@@ -1321,6 +1440,7 @@ watch(
 watch(
   () => pinnedNodeDetail.value?.id,
   async (nodeId) => {
+    bookmarkErrorMessage.value = '';
     if (!nodeId) return;
     await nextTick();
     const overlay = cardOverlayRef.value;

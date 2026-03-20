@@ -513,11 +513,13 @@ export function usePaperWorkflow({
     resetLineageState();
     errorMessage.value = '';
     graphLoading.value = true;
+    const seed = seedRef.value || {};
+    const inputType = String(seed?.input_type || 'domain').trim().toLowerCase();
+    const quickMode = Boolean(seed?.quick_mode);
+    const preferredLineageSeedPaperId = String(seed?.lineage_seed_paper_id || '').trim();
+    const shouldAutoGenerateLineage = Boolean(seed?.auto_lineage);
 
     try {
-      const seed = seedRef.value || {};
-      const inputType = String(seed?.input_type || 'domain').trim().toLowerCase();
-      const quickMode = Boolean(seed?.quick_mode);
       setStepStatus(1, 'running', createRetrievalRunningMessage(inputType));
       setStepLogs('retrieve', createRunningRetrievalLogs(inputType));
 
@@ -577,6 +579,16 @@ export function usePaperWorkflow({
         retrieval,
         graphResult: resolvedGraph || result
       });
+      if (preferredLineageSeedPaperId) {
+        const papers = Array.isArray(retrieval?.papers) ? retrieval.papers : [];
+        const preferredPaper = papers.find((item) => String(item?.paper_id || '').trim() === preferredLineageSeedPaperId);
+        seedPaper.paperId = preferredLineageSeedPaperId;
+        if (preferredPaper?.title) {
+          seedPaper.title = String(preferredPaper.title || '').trim();
+        } else if (!String(seedPaper.title || '').trim()) {
+          seedPaper.title = preferredLineageSeedPaperId;
+        }
+      }
       lineageSeed.value = seedPaper;
       setStepStatus(3, 'action_required', `已找到核心论文：${seedPaper.title || seedPaper.paperId || '未命名论文'}。`);
       setStepLogs('lineage', [
@@ -592,6 +604,9 @@ export function usePaperWorkflow({
         label: '生成血缘树',
         disabled: false
       });
+      if (shouldAutoGenerateLineage) {
+        await generateLineageTree();
+      }
     } catch (error) {
       const failed = activeStep.value?.index || 2;
       setStepStatus(failed, 'failed', '步骤执行失败。');
@@ -609,6 +624,26 @@ export function usePaperWorkflow({
         }
       ];
       setStepLogs(failedKey, nextLogs);
+      if (shouldAutoGenerateLineage && preferredLineageSeedPaperId) {
+        lineageSeed.value = {
+          paperId: preferredLineageSeedPaperId,
+          title: preferredLineageSeedPaperId
+        };
+        setStepStatus(3, 'running', '知识图谱步骤失败，正在直接生成血缘树...');
+        setStepLogs('lineage', [
+          {
+            title: '降级处理',
+            detail: '已跳过图谱展示，直接尝试生成血缘树。',
+            status: 'fallback',
+            statusText: toStatusText('fallback'),
+            metaText: ''
+          }
+        ]);
+        await generateLineageTree();
+        if (lineageData.value) {
+          errorMessage.value = '';
+        }
+      }
     } finally {
       graphLoading.value = false;
       updateStepSignal();

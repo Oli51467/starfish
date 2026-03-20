@@ -121,6 +121,53 @@ export function updateResearchHistoryLineageStatus(payload, accessToken = '') {
   });
 }
 
+export function getPaperSignal(paperId, { accessToken = '', forceRefresh = false } = {}) {
+  const query = new URLSearchParams();
+  query.set('force_refresh', forceRefresh ? 'true' : 'false');
+  return request(`/api/paper-signals/${encodeURIComponent(paperId)}?${query.toString()}`, {
+    headers: buildAuthHeaders(accessToken)
+  });
+}
+
+export function refreshPaperSignals(
+  { collectionId = '', limit = 20, forceRefresh = false } = {},
+  { accessToken = '' } = {}
+) {
+  return request('/api/paper-signals/refresh', {
+    method: 'POST',
+    headers: buildAuthHeaders(accessToken, { 'Content-Type': 'application/json' }),
+    body: JSON.stringify({
+      collection_id: String(collectionId || '').trim(),
+      limit: Math.max(1, Math.min(50, Number(limit) || 20)),
+      force_refresh: Boolean(forceRefresh)
+    })
+  });
+}
+
+export function getPaperSignalEvents(
+  { page = 1, pageSize = 10, unreadOnly = false, paperId = '', savedPaperId = '' } = {},
+  { accessToken = '' } = {}
+) {
+  const query = new URLSearchParams();
+  query.set('page', String(Math.max(1, Number(page) || 1)));
+  query.set('page_size', String(Math.max(1, Math.min(50, Number(pageSize) || 10))));
+  query.set('unread_only', unreadOnly ? 'true' : 'false');
+  const safePaperId = String(paperId || '').trim();
+  const safeSavedPaperId = String(savedPaperId || '').trim();
+  if (safePaperId) query.set('paper_id', safePaperId);
+  if (safeSavedPaperId) query.set('saved_paper_id', safeSavedPaperId);
+  return request(`/api/paper-signals/events?${query.toString()}`, {
+    headers: buildAuthHeaders(accessToken)
+  });
+}
+
+export function markPaperSignalEventRead(eventId, { accessToken = '' } = {}) {
+  return request(`/api/paper-signals/events/${encodeURIComponent(eventId)}/read`, {
+    method: 'PATCH',
+    headers: buildAuthHeaders(accessToken)
+  });
+}
+
 export function startLandscapeGeneration(payload, accessToken = '') {
   return request('/api/landscape/generate', {
     method: 'POST',

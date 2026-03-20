@@ -38,6 +38,7 @@ VALID_CITATION_TYPES: set[str] = {
 }
 _CACHE_TTL = timedelta(days=7)
 _CACHE_DIR = Path(__file__).resolve().parents[1] / "cache" / "lineage"
+_YEAR_PATTERN = re.compile(r"(19|20)\d{2}")
 
 
 def _normalize_paper_id(paper_id: str) -> str:
@@ -61,6 +62,89 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _extract_year_from_text(raw_value: Any) -> int | None:
+    text = str(raw_value or "").strip()
+    if not text:
+        return None
+    matched = _YEAR_PATTERN.search(text)
+    if not matched:
+        return None
+    try:
+        parsed = int(matched.group(0))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _normalize_iso_date_text(raw_value: Any) -> str:
+    text = str(raw_value or "").strip()
+    if not text:
+        return ""
+    parsed = _extract_year_from_text(text)
+    if parsed is None:
+        return ""
+    return text
+
+
+def _coerce_positive_year(value: Any) -> int:
+    parsed = _safe_int(value, default=0)
+    return parsed if parsed > 0 else 0
+
+
+def _pick_preferred_year(base: dict[str, Any], incoming: dict[str, Any]) -> int:
+    base_year = _coerce_positive_year(base.get("year"))
+    incoming_year = _coerce_positive_year(incoming.get("year"))
+    if base_year <= 0:
+        return incoming_year
+    if incoming_year <= 0:
+        return base_year
+    # Prefer earliest publication year to avoid treating re-release/update dates as first publication.
+    return min(base_year, incoming_year)
+
+
+def _pick_preferred_publication_date(
+    base_date_raw: Any,
+    incoming_date_raw: Any,
+    *,
+    preferred_year: int,
+) -> str:
+    base_date = _normalize_iso_date_text(base_date_raw)
+    incoming_date = _normalize_iso_date_text(incoming_date_raw)
+    if not base_date:
+        return incoming_date
+    if not incoming_date:
+        return base_date
+
+    base_year = _extract_year_from_text(base_date)
+    incoming_year = _extract_year_from_text(incoming_date)
+    if preferred_year > 0:
+        base_matches = base_year == preferred_year
+        incoming_matches = incoming_year == preferred_year
+        if incoming_matches and not base_matches:
+            return incoming_date
+        if base_matches and not incoming_matches:
+            return base_date
+
+    # Both dates are valid: prefer earlier date to reflect first-publication timeline.
+    return incoming_date if incoming_date < base_date else base_date
+
+
+def _is_root_metadata_suspicious(root: dict[str, Any]) -> bool:
+    if not root:
+        return True
+    root_id = str(root.get("paper_id") or "").strip().lower()
+    root_year = _coerce_positive_year(root.get("year"))
+    publication_year = _extract_year_from_text(root.get("publication_date"))
+
+    if root_id.startswith("openalex:"):
+        return True
+    if root_year <= 0:
+        return True
+    if publication_year is not None and abs(root_year - publication_year) >= 2:
+        return True
+    return False
+
+
 def _cache_path(
     paper_id: str,
     *,
@@ -73,7 +157,7 @@ def _cache_path(
         "ancestor_depth": ancestor_depth,
         "descendant_depth": descendant_depth,
         "citation_types": sorted(citation_types),
-        "version": 1,
+        "version": 2,
     }
     key = hashlib.md5(json.dumps(key_payload, sort_keys=True).encode("utf-8")).hexdigest()
     return _CACHE_DIR / f"{key}.json"
@@ -329,10 +413,19 @@ def _merge_raw_paper(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str
 
     if not str(merged.get("title") or "").strip() and str(incoming.get("title") or "").strip():
         merged["title"] = incoming.get("title")
-    if not merged.get("year") and incoming.get("year"):
-        merged["year"] = incoming.get("year")
-    if len(incoming_publication_date) > len(base_publication_date):
-        merged["publication_date"] = incoming_publication_date
+
+    preferred_year = _pick_preferred_year(base, incoming)
+    if preferred_year > 0:
+        merged["year"] = preferred_year
+
+    preferred_publication_date = _pick_preferred_publication_date(
+        base_publication_date,
+        incoming_publication_date,
+        preferred_year=preferred_year,
+    )
+    if preferred_publication_date:
+        merged["publication_date"] = preferred_publication_date
+
     if not merged.get("venue") and incoming.get("venue"):
         merged["venue"] = incoming.get("venue")
     if len(incoming_authors) > len(base_authors):
@@ -580,10 +673,14 @@ async def _fetch_lineage_from_semantic_http(
             "title",
             "abstract",
             "year",
+            "publicationDate",
             "citationCount",
             "authors",
             "venue",
+            "journal",
+            "publicationVenue",
             "externalIds",
+            "url",
         ]
     )
 
@@ -600,10 +697,14 @@ async def _fetch_lineage_from_semantic_http(
         "title": str(root_payload.get("title") or ""),
         "abstract": str(root_payload.get("abstract") or ""),
         "year": root_payload.get("year"),
+        "publication_date": str(root_payload.get("publicationDate") or ""),
         "citation_count": _safe_int(root_payload.get("citationCount"), default=0),
         "authors": root_payload.get("authors") or [],
         "venue": str(root_payload.get("venue") or ""),
+        "journal": root_payload.get("journal") or {},
+        "publicationVenue": root_payload.get("publicationVenue") or {},
         "external_ids": root_payload.get("externalIds") or {},
+        "url": root_payload.get("url"),
     }
 
     references_payload = await _semantic_get_with_retry(
@@ -634,9 +735,12 @@ async def _fetch_lineage_from_semantic_http(
                 "title": str(paper.get("title") or ""),
                 "abstract": str(paper.get("abstract") or ""),
                 "year": paper.get("year"),
+                "publication_date": str(paper.get("publicationDate") or ""),
                 "citation_count": _safe_int(paper.get("citationCount"), default=0),
                 "authors": paper.get("authors") or [],
                 "venue": str(paper.get("venue") or ""),
+                "journal": paper.get("journal") or {},
+                "publicationVenue": paper.get("publicationVenue") or {},
                 "external_ids": paper.get("externalIds") or {},
             }
         )
@@ -652,9 +756,12 @@ async def _fetch_lineage_from_semantic_http(
                 "title": str(paper.get("title") or ""),
                 "abstract": str(paper.get("abstract") or ""),
                 "year": paper.get("year"),
+                "publication_date": str(paper.get("publicationDate") or ""),
                 "citation_count": _safe_int(paper.get("citationCount"), default=0),
                 "authors": paper.get("authors") or [],
                 "venue": str(paper.get("venue") or ""),
+                "journal": paper.get("journal") or {},
+                "publicationVenue": paper.get("publicationVenue") or {},
                 "external_ids": paper.get("externalIds") or {},
             }
         )
@@ -1025,6 +1132,10 @@ async def build_lineage(
         or len(ancestor_raw) < target_ancestor_count
         or len(descendant_raw) < target_descendant_count
         or _needs_metadata_enrichment(root_raw, ancestor_raw, descendant_raw)
+        or (
+            not safe_paper_id.lower().startswith("openalex:")
+            and _is_root_metadata_suspicious(root_raw)
+        )
     )
 
     semantic_result: dict[str, Any] | None = None

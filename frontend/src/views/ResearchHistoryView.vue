@@ -170,6 +170,26 @@
                 </button>
               </div>
             </div>
+            <section v-if="showSignalPanel" class="history-signal-panel">
+              <header class="history-signal-head">
+                <p class="history-signal-title">相关研究动态</p>
+                <p class="history-signal-subtitle mono">
+                  {{ historySignalPaperId || '-' }}
+                </p>
+              </header>
+              <p v-if="historySignalLoading" class="muted history-signal-empty">正在加载相关动态...</p>
+              <p v-else-if="historySignalErrorMessage" class="muted history-signal-error">{{ historySignalErrorMessage }}</p>
+              <p v-else-if="!historySignalEvents.length" class="muted history-signal-empty">暂无与当前论文相关的动态。</p>
+              <div v-else class="history-signal-list">
+                <article v-for="event in historySignalEvents" :key="event.event_id" class="history-signal-card">
+                  <p class="history-signal-card-title">{{ event.title }}</p>
+                  <p class="history-signal-card-content">{{ event.content }}</p>
+                  <p class="history-signal-card-meta mono">
+                    {{ formatSignalEventType(event.event_type) }} · {{ formatDateTime(event.created_at) }}
+                  </p>
+                </article>
+              </div>
+            </section>
             <div class="history-detail-stage">
               <BloodLineageTree
                 v-if="activeDetailTab === 'lineage' && historyLineageData"
@@ -204,6 +224,7 @@ import KnowledgeGraphView from '../components/graph/KnowledgeGraphView.vue';
 import { adaptDomainGraphFromHistoryGraph } from '../components/history/historyGraphAdapter';
 import LoadingState from '../components/common/LoadingState.vue';
 import { useGlobalConfirmDialog } from '../composables/useGlobalConfirmDialog';
+import { getPaperSignalEvents } from '../api';
 import { useAuthStore } from '../stores/authStore';
 import { useResearchHistoryStore } from '../stores/researchHistoryStore';
 
@@ -235,6 +256,10 @@ const historyGraphViewRef = ref(null);
 const historyLineageViewRef = ref(null);
 const selectedHistoryIds = ref([]);
 const batchSelectMode = ref(false);
+const historySignalEvents = ref([]);
+const historySignalLoading = ref(false);
+const historySignalErrorMessage = ref('');
+const historySignalPaperId = ref('');
 const activeHistoryId = computed(() => String(selectedDetail.value?.history_id || '').trim());
 const selectedHistoryIdSet = computed(() => new Set(selectedHistoryIds.value));
 const selectedCount = computed(() => selectedHistoryIds.value.length);
@@ -263,6 +288,11 @@ const historyLineageData = computed(() => {
   return raw;
 });
 const showDetailTabs = computed(() => Boolean(historyLineageData.value));
+const showSignalPanel = computed(() => {
+  const researchType = String(selectedDetail.value?.research_type || '').trim().toLowerCase();
+  if (!selectedDetail.value) return false;
+  return researchType === 'arxiv_id' || researchType === 'doi';
+});
 
 function goHome() {
   router.push({ name: 'home' });
@@ -426,6 +456,55 @@ async function autoCenterPaperHistoryLineage() {
   await historyLineageViewRef.value?.refreshLineageDisplay?.();
 }
 
+function formatSignalEventType(eventType) {
+  const normalized = String(eventType || '').trim().toLowerCase();
+  if (normalized === 'lineage_expanded') return '血缘扩展';
+  if (normalized === 'controversy_rise') return '争议上升';
+  if (normalized === 'citation_delta') return '引用变化';
+  if (normalized === 'metadata_enriched') return '信息补全';
+  return '研究动态';
+}
+
+function resolveSignalPaperIdFromDetail(detail) {
+  if (!detail || typeof detail !== 'object') return '';
+  const searchRecord = String(detail.search_record || '').trim();
+  const lineageSeedPaperId = String(detail?.lineage?.seed_paper_id || '').trim();
+  const lineageRootPaperId = String(detail?.lineage_graph?.root?.paper_id || detail?.lineage_graph?.root?.id || '').trim();
+  return lineageSeedPaperId || lineageRootPaperId || searchRecord;
+}
+
+async function loadHistorySignalEvents() {
+  historySignalEvents.value = [];
+  historySignalErrorMessage.value = '';
+  historySignalPaperId.value = '';
+
+  if (!showSignalPanel.value) return;
+  const paperId = resolveSignalPaperIdFromDetail(selectedDetail.value);
+  historySignalPaperId.value = paperId;
+  if (!paperId) return;
+
+  historySignalLoading.value = true;
+  try {
+    const payload = await getPaperSignalEvents(
+      {
+        page: 1,
+        pageSize: 4,
+        unreadOnly: false,
+        paperId
+      },
+      {
+        accessToken: accessToken.value
+      }
+    );
+    historySignalEvents.value = Array.isArray(payload?.items) ? payload.items : [];
+  } catch (error) {
+    historySignalEvents.value = [];
+    historySignalErrorMessage.value = error?.message || '加载相关动态失败。';
+  } finally {
+    historySignalLoading.value = false;
+  }
+}
+
 onMounted(async () => {
   await loadSession();
   if (!isAuthenticated.value) {
@@ -443,6 +522,7 @@ watch(
   () => selectedDetail.value?.history_id,
   async () => {
     activeDetailTab.value = 'graph';
+    await loadHistorySignalEvents();
     await autoCenterPaperHistoryGraph();
     await autoCenterPaperHistoryLineage();
   }

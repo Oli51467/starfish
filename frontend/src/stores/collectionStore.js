@@ -4,9 +4,12 @@ import {
   createSavedPaperNote,
   createCollection,
   enrichSavedPaperMetadata as requestEnrichSavedPaperMetadata,
+  getPaperSignalEvents as requestPaperSignalEvents,
   getSavedPaperNotes as requestSavedPaperNotes,
   getCollections,
   getSavedPapers,
+  markPaperSignalEventRead as requestMarkPaperSignalEventRead,
+  refreshPaperSignals as requestRefreshPaperSignals,
   removeSavedPaperNote,
   removeSavedPaper,
   savePaper,
@@ -32,6 +35,15 @@ const bookmarkIndexLoaded = ref(false);
 const syncingPaperIdSet = ref(new Set());
 const notesBySavedPaperId = ref({});
 const notesLoadingBySavedPaperId = ref({});
+const signalEvents = ref([]);
+const signalEventsLoading = ref(false);
+const signalEventsErrorMessage = ref('');
+const signalEventsPage = ref(1);
+const signalEventsPageSize = ref(10);
+const signalEventsTotal = ref(0);
+const signalEventsTotalPages = ref(0);
+const signalEventsUnreadCount = ref(0);
+const signalRefreshing = ref(false);
 
 const hasCollections = computed(() => collections.value.length > 0);
 const hasSavedPapers = computed(() => savedPapers.value.length > 0);
@@ -95,6 +107,21 @@ function normalizeSavedPaperNote(rawItem) {
     content: String(rawItem?.content || '').trim(),
     created_at: rawItem?.created_at || null,
     updated_at: rawItem?.updated_at || null
+  };
+}
+
+function normalizeSignalEvent(rawItem) {
+  const eventType = String(rawItem?.event_type || '').trim().toLowerCase();
+  return {
+    event_id: String(rawItem?.event_id || rawItem?.id || '').trim(),
+    saved_paper_id: String(rawItem?.saved_paper_id || '').trim(),
+    paper_id: String(rawItem?.paper_id || '').trim(),
+    event_type: eventType || 'citation_delta',
+    title: String(rawItem?.title || '').trim() || '研究动态',
+    content: String(rawItem?.content || '').trim() || '该论文有新的研究动态。',
+    payload: rawItem?.payload && typeof rawItem.payload === 'object' ? rawItem.payload : {},
+    is_read: Boolean(rawItem?.is_read),
+    created_at: rawItem?.created_at || null
   };
 }
 
@@ -335,6 +362,107 @@ async function querySavedPapers({
   }
 }
 
+async function fetchSignalEvents({
+  accessToken = '',
+  page = 1,
+  pageSize = 10,
+  unreadOnly = false,
+  paperId = '',
+  savedPaperId = ''
+} = {}) {
+  signalEventsLoading.value = true;
+  signalEventsErrorMessage.value = '';
+  try {
+    const payload = await requestPaperSignalEvents(
+      {
+        page,
+        pageSize,
+        unreadOnly,
+        paperId,
+        savedPaperId
+      },
+      {
+        accessToken
+      }
+    );
+    signalEvents.value = Array.isArray(payload?.items)
+      ? payload.items.map(normalizeSignalEvent).filter((item) => item.event_id)
+      : [];
+    signalEventsPage.value = Number(payload?.page || page) || 1;
+    signalEventsPageSize.value = Number(payload?.page_size || pageSize) || 10;
+    signalEventsTotal.value = Number(payload?.total || 0) || 0;
+    signalEventsTotalPages.value = Number(payload?.total_pages || 0) || 0;
+    signalEventsUnreadCount.value = Number(payload?.unread_count || 0) || 0;
+    return signalEvents.value;
+  } catch (error) {
+    signalEvents.value = [];
+    signalEventsTotal.value = 0;
+    signalEventsTotalPages.value = 0;
+    signalEventsUnreadCount.value = 0;
+    signalEventsErrorMessage.value = error?.message || '获取研究动态失败。';
+    return [];
+  } finally {
+    signalEventsLoading.value = false;
+  }
+}
+
+async function refreshSavedPaperSignals({
+  accessToken = '',
+  collectionId = '',
+  limit = 20,
+  forceRefresh = false
+} = {}) {
+  signalRefreshing.value = true;
+  signalEventsErrorMessage.value = '';
+  try {
+    const payload = await requestRefreshPaperSignals(
+      {
+        collectionId,
+        limit,
+        forceRefresh
+      },
+      {
+        accessToken
+      }
+    );
+    await fetchSignalEvents({
+      accessToken,
+      page: 1,
+      pageSize: signalEventsPageSize.value || 10,
+      unreadOnly: false
+    });
+    return payload || null;
+  } catch (error) {
+    signalEventsErrorMessage.value = error?.message || '刷新研究动态失败。';
+    return null;
+  } finally {
+    signalRefreshing.value = false;
+  }
+}
+
+async function markSignalEventRead(eventId, { accessToken = '' } = {}) {
+  const safeEventId = String(eventId || '').trim();
+  if (!safeEventId) return false;
+  try {
+    const payload = await requestMarkPaperSignalEventRead(safeEventId, { accessToken });
+    const updated = Boolean(payload?.updated);
+    if (updated) {
+      signalEvents.value = signalEvents.value.map((item) => {
+        if (item.event_id !== safeEventId) return item;
+        return { ...item, is_read: true };
+      });
+      signalEventsUnreadCount.value = Math.max(
+        0,
+        signalEvents.value.filter((item) => !item.is_read).length
+      );
+    }
+    return updated;
+  } catch (error) {
+    signalEventsErrorMessage.value = error?.message || '更新动态状态失败。';
+    return false;
+  }
+}
+
 async function ensureBookmarkIndexLoaded({ accessToken = '', force = false } = {}) {
   if (!force && (bookmarkIndexLoaded.value || bookmarkIndexLoading.value)) {
     return;
@@ -460,8 +588,16 @@ function clearCollectionStoreState() {
   syncingPaperIdSet.value = new Set();
   notesBySavedPaperId.value = {};
   notesLoadingBySavedPaperId.value = {};
+  signalEvents.value = [];
+  signalEventsPage.value = 1;
+  signalEventsPageSize.value = 10;
+  signalEventsTotal.value = 0;
+  signalEventsTotalPages.value = 0;
+  signalEventsUnreadCount.value = 0;
+  signalRefreshing.value = false;
   collectionsErrorMessage.value = '';
   savedPapersErrorMessage.value = '';
+  signalEventsErrorMessage.value = '';
 }
 
 export function useCollectionStore() {
@@ -487,8 +623,20 @@ export function useCollectionStore() {
     bookmarkIndexLoading,
     notesBySavedPaperId,
     notesLoadingBySavedPaperId,
+    signalEvents,
+    signalEventsLoading,
+    signalEventsErrorMessage,
+    signalEventsPage,
+    signalEventsPageSize,
+    signalEventsTotal,
+    signalEventsTotalPages,
+    signalEventsUnreadCount,
+    signalRefreshing,
     fetchCollections,
     querySavedPapers,
+    fetchSignalEvents,
+    refreshSavedPaperSignals,
+    markSignalEventRead,
     ensureBookmarkIndexLoaded,
     togglePaperSaved,
     setSavedPaperReadStatus,

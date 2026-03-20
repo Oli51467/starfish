@@ -7,7 +7,7 @@
           type="button"
           aria-label="切换全屏图谱"
           :title="isGraphFullscreen ? '退出全屏' : '全屏图谱'"
-          :disabled="activeTab !== 'graph' || !hasGraph"
+          :disabled="!hasGraph"
           :class="{ 'is-active': isGraphFullscreen }"
           @click="toggleGraphFullscreen"
         >
@@ -24,7 +24,7 @@
           type="button"
           aria-label="刷新图谱"
           title="刷新图谱"
-          :disabled="activeTab !== 'graph' || !hasGraph"
+          :disabled="!hasGraph"
           @click="refreshGraph"
         >
           <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -32,40 +32,14 @@
             <path d="M13.5 3.5v3.1h-3.1" />
           </svg>
         </button>
-
-        <div class="landscape-tab-switcher" role="tablist" aria-label="领域分析视图切换">
-          <button
-            v-for="tab in tabs"
-            :key="tab.key"
-            class="workflow-result-tab mono"
-            :class="{ 'is-active': activeTab === tab.key }"
-            type="button"
-            role="tab"
-            :aria-selected="activeTab === tab.key"
-            :disabled="tab.disabled"
-            @click="activateTab(tab)"
-          >
-            {{ tab.label }}
-          </button>
-        </div>
       </div>
 
-      <template v-if="activeTab === 'graph'">
-        <LoadingState v-if="loading && !hasGraph" :message="loadingMessage || '正在生成领域图谱...'" />
-        <ErrorBoundary v-else-if="errorMessage && !hasGraph" :message="errorMessage" />
-        <KnowledgeGraphCanvas v-else-if="hasGraph" ref="graphCanvasRef" :graph="graphData" :show-tools="false" />
-        <section v-else class="panel workflow-empty">
-          <p class="muted">等待图谱数据...</p>
-        </section>
-      </template>
-
-      <template v-else>
-        <LoadingState v-if="loading && !insightText" :message="loadingMessage || '正在生成深度总结...'" />
-        <ErrorBoundary v-else-if="errorMessage && !insightText" :message="errorMessage" />
-        <article v-else class="landscape-insight-article">
-          <p class="landscape-insight-text">{{ insightText || '暂无趋势洞察。' }}</p>
-        </article>
-      </template>
+      <LoadingState v-if="loading && !hasGraph" :message="loadingMessage || '正在生成领域图谱...'" />
+      <ErrorBoundary v-else-if="errorMessage && !hasGraph" :message="errorMessage" />
+      <KnowledgeGraphCanvas v-else-if="hasGraph" ref="graphCanvasRef" :graph="graphData" :show-tools="false" />
+      <section v-else class="panel workflow-empty">
+        <p class="muted">等待图谱数据...</p>
+      </section>
     </div>
   </section>
 </template>
@@ -82,10 +56,6 @@ const props = defineProps({
     type: Object,
     default: null
   },
-  insightText: {
-    type: String,
-    default: ''
-  },
   loading: {
     type: Boolean,
     default: false
@@ -101,20 +71,10 @@ const props = defineProps({
   isGraphFullscreen: {
     type: Boolean,
     default: false
-  },
-  summaryEnabled: {
-    type: Boolean,
-    default: false
   }
 });
 const emit = defineEmits(['toggle-graph-fullscreen']);
 
-const tabs = computed(() => ([
-  { key: 'graph', label: '知识图谱', disabled: false },
-  { key: 'insight', label: '趋势洞察', disabled: !props.summaryEnabled }
-]));
-
-const activeTab = ref('graph');
 const graphCanvasRef = ref(null);
 const hasGraph = computed(() => Array.isArray(props.graphData?.nodes) && props.graphData.nodes.length > 0);
 let autoRefreshTimer = 0;
@@ -138,7 +98,7 @@ function clearAutoRefreshTimer() {
 }
 
 function scheduleAutoRefresh() {
-  if (activeTab.value !== 'graph' || !hasGraph.value) return;
+  if (!hasGraph.value) return;
   clearAutoRefreshTimer();
   autoRefreshTimer = window.setTimeout(async () => {
     autoRefreshTimer = 0;
@@ -149,10 +109,6 @@ function scheduleAutoRefresh() {
 
 async function refreshGraphAfterTaskCompleted() {
   if (!hasGraph.value) return;
-  if (activeTab.value !== 'graph') {
-    activeTab.value = 'graph';
-    await nextTick();
-  }
   if (graphCanvasRef.value?.refreshGraphToMinOverview) {
     await graphCanvasRef.value.refreshGraphToMinOverview();
     return;
@@ -163,21 +119,6 @@ async function refreshGraphAfterTaskCompleted() {
 function toggleGraphFullscreen() {
   emit('toggle-graph-fullscreen');
 }
-
-function activateTab(tab) {
-  if (tab?.disabled) return;
-  activeTab.value = tab.key;
-}
-
-watch(
-  () => props.summaryEnabled,
-  (enabled) => {
-    if (!enabled && activeTab.value === 'insight') {
-      activeTab.value = 'graph';
-    }
-  },
-  { immediate: true }
-);
 
 watch(
   () => [props.loading, graphSignature(props.graphData)],
@@ -205,16 +146,6 @@ defineExpose({
   height: 100%;
   min-height: 0;
   display: grid;
-  overflow: hidden;
-}
-
-.landscape-tab-switcher {
-  display: inline-flex;
-  align-items: center;
-  border: 1px solid var(--line-2);
-  border-radius: var(--radius-md);
-  background: var(--bg);
-  gap: 0;
   overflow: hidden;
 }
 
@@ -255,61 +186,8 @@ defineExpose({
   transform: none;
 }
 
-.landscape-tab-switcher .workflow-result-tab {
-  height: 30px;
-  border: 0;
-  border-right: 1px solid var(--line);
-  background: var(--bg);
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1;
-  white-space: nowrap;
-  padding: 0 10px;
-  cursor: pointer;
-  transition: background-color 0.2s ease, color 0.2s ease;
-}
-
-.landscape-tab-switcher .workflow-result-tab:last-child {
-  border-right: 0;
-}
-
-.landscape-tab-switcher .workflow-result-tab:hover:not(:disabled) {
-  background: var(--panel);
-  color: var(--text);
-}
-
-.landscape-tab-switcher .workflow-result-tab.is-active {
-  background: var(--text);
-  color: var(--bg);
-}
-
-.landscape-tab-switcher .workflow-result-tab:disabled {
-  background: var(--panel);
-  color: var(--muted);
-  cursor: not-allowed;
-}
-
 .landscape-workspace-body > * {
   min-height: 0;
-}
-
-.landscape-insight-article {
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  background: #fff;
-  padding: 14px;
-  margin: 10px;
-  height: calc(100% - 20px);
-  min-height: 0;
-  overflow: auto;
-}
-
-.landscape-insight-text {
-  margin: 0;
-  font-size: 14px;
-  line-height: 1.85;
-  color: #2f2f2f;
-  white-space: pre-wrap;
 }
 
 :deep(.knowledge-graph-body),
@@ -338,16 +216,6 @@ defineExpose({
   .landscape-graph-tools {
     top: 8px;
     right: 8px;
-  }
-
-  .landscape-insight-article {
-    margin: 10px;
-    padding: 12px;
-  }
-
-  .landscape-insight-text {
-    font-size: 13px;
-    line-height: 1.78;
   }
 }
 </style>

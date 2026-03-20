@@ -819,6 +819,81 @@
   padding: 8px 0 0;
 }
 
+.history-signal-panel {
+  margin: 8px 12px 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.history-signal-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.history-signal-title {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.35;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.history-signal-subtitle {
+  margin: 0;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.history-signal-empty,
+.history-signal-error {
+  margin: 0;
+  font-size: 12px;
+}
+
+.history-signal-list {
+  max-height: 148px;
+  overflow: auto;
+  display: grid;
+  gap: 6px;
+}
+
+.history-signal-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  padding: 8px;
+  display: grid;
+  gap: 5px;
+}
+
+.history-signal-card-title {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.history-signal-card-content {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.history-signal-card-meta {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
 .history-detail-stage .knowledge-graph-panel,
 .history-detail-stage .knowledge-graph-body,
 .history-detail-stage .knowledge-graph-body-full,
@@ -1062,6 +1137,21 @@
 
 .global-confirm-accept-btn.is-danger:hover {
   background: color-mix(in srgb, var(--accent) 10%, var(--bg));
+}
+
+.global-input-card {
+  width: min(420px, 100%);
+}
+
+.global-input-field {
+  height: 36px;
+}
+
+.global-input-error {
+  margin: -2px 0 0;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--accent);
 }
 
 .history-lineage-badge {

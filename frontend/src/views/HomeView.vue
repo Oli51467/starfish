@@ -47,7 +47,9 @@ const workflowSeed = ref({
   input_value: '',
   paper_range_years: null,
   quick_mode: false,
-  depth: 2
+  depth: 2,
+  auto_lineage: false,
+  lineage_seed_paper_id: ''
 });
 const headerStep = ref({
   index: 1,
@@ -70,6 +72,16 @@ const WORKFLOW_ROUTE_NAMES = new Set([
 
 function normalizeText(value) {
   return String(value || '').trim();
+}
+
+function detectPaperInputType(paperId) {
+  const safePaperId = normalizeText(paperId);
+  if (!safePaperId) return 'arxiv_id';
+  const normalized = safePaperId.toLowerCase();
+  if (/10\.\d{4,9}\/\S+/i.test(safePaperId) || normalized.includes('doi.org/')) {
+    return 'doi';
+  }
+  return 'arxiv_id';
 }
 
 function parseBooleanLike(value) {
@@ -97,14 +109,28 @@ function normalizeWorkflowSeed(payload = {}) {
       ? parseOptionalPositiveInteger(payload.paper_range_years)
       : null,
     quick_mode: parseBooleanLike(payload.quick_mode),
-    depth: parseOptionalPositiveInteger(payload.depth) || 2
+    depth: parseOptionalPositiveInteger(payload.depth) || 2,
+    auto_lineage: parseBooleanLike(payload.auto_lineage),
+    lineage_seed_paper_id: normalizeText(payload.lineage_seed_paper_id)
+  };
+}
+
+function toPersistableWorkflowSeed(seed = {}) {
+  const normalized = normalizeWorkflowSeed(seed);
+  return {
+    ...normalized,
+    auto_lineage: false,
+    lineage_seed_paper_id: ''
   };
 }
 
 function persistWorkflowSeed(seed) {
   if (typeof window === 'undefined') return;
   try {
-    window.sessionStorage.setItem(WORKFLOW_SEED_STORAGE_KEY, JSON.stringify(seed || {}));
+    window.sessionStorage.setItem(
+      WORKFLOW_SEED_STORAGE_KEY,
+      JSON.stringify(toPersistableWorkflowSeed(seed || {}))
+    );
   } catch {
     // ignore storage write failures
   }
@@ -186,6 +212,36 @@ function isSeedCompatibleWithRoute(seed, routeName) {
   return true;
 }
 
+function parseRouteSeed(routeName, queryPayload = {}) {
+  if (!WORKFLOW_ROUTE_NAMES.has(routeName)) return null;
+  if (routeName === 'research-domain-graph') {
+    const query = normalizeText(queryPayload.query || queryPayload.input_value);
+    if (!query) return null;
+    return normalizeWorkflowSeed({
+      input_type: 'domain',
+      input_value: query,
+      paper_range_years: queryPayload.paper_range_years,
+      quick_mode: queryPayload.quick_mode,
+      depth: queryPayload.depth
+    });
+  }
+
+  const paperId = normalizeText(queryPayload.paper_id || queryPayload.paperId || queryPayload.input_value);
+  if (!paperId) return null;
+  const routeInputType = normalizeText(queryPayload.input_type).toLowerCase();
+  const inputType = routeInputType === 'doi' || routeInputType === 'arxiv_id'
+    ? routeInputType
+    : detectPaperInputType(paperId);
+  return normalizeWorkflowSeed({
+    input_type: inputType,
+    input_value: paperId,
+    quick_mode: queryPayload.quick_mode,
+    depth: queryPayload.depth,
+    auto_lineage: queryPayload.auto_lineage,
+    lineage_seed_paper_id: normalizeText(queryPayload.lineage_seed_paper_id || paperId)
+  });
+}
+
 async function applyRouteToWorkflow() {
   if (syncingRoute) return;
   const routeName = String(route.name || '');
@@ -206,7 +262,9 @@ async function applyRouteToWorkflow() {
     return;
   }
 
-  const seed = restoreWorkflowSeed();
+  const routeSeed = parseRouteSeed(routeName, route.query || {});
+  const restoredSeed = restoreWorkflowSeed();
+  const seed = routeSeed || restoredSeed;
   if (!seed || !isSeedCompatibleWithRoute(seed, routeName)) {
     resetWorkflowState();
     clearPersistedWorkflowSeed();
@@ -215,6 +273,9 @@ async function applyRouteToWorkflow() {
   }
 
   workflowSeed.value = seed;
+  if (routeSeed) {
+    persistWorkflowSeed(routeSeed);
+  }
   applyHeaderForSeed(seed);
   workflowActive.value = true;
 

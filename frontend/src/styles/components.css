@@ -985,6 +985,14 @@
   padding-top: 10px;
 }
 
+.paper-node-action-error {
+  margin: 0;
+  width: 100%;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--accent);
+}
+
 .paper-node-action-btn {
   border-color: var(--line-2);
   background: #fff;
