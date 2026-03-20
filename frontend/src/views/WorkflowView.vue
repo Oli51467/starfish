@@ -1,7 +1,14 @@
 <template>
   <section class="workflow-page paper-fixed-page">
-    <div class="workflow-layout paper-fixed-layout">
-      <article class="workflow-left workflow-result-shell">
+    <div class="workflow-layout paper-fixed-layout paper-workflow-layout">
+      <PaperWorkflowPanel
+        class="paper-workflow-side"
+        :steps="steps"
+        :progress="workflowProgress"
+        @step-action="handleStepAction"
+      />
+
+      <article class="paper-result-side workflow-result-shell">
         <div class="workflow-result-stage">
           <template v-if="activeViewKey === 'graph'">
             <ErrorBoundary v-if="errorMessage && !graphData" :message="errorMessage" />
@@ -68,13 +75,11 @@
               </template>
             </BloodLineageTree>
             <section v-else class="panel workflow-empty">
-              <p class="muted">点击右侧第 3 步按钮后生成血缘树。</p>
+              <p class="muted">点击左侧第 4 步按钮后生成血缘树。</p>
             </section>
           </template>
         </div>
       </article>
-
-      <LandscapeWorkflowPanel :steps="steps" :graph-stats="graphStats" @step-action="handleStepAction" />
     </div>
   </section>
 </template>
@@ -85,8 +90,8 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import ErrorBoundary from '../components/common/ErrorBoundary.vue';
 import LoadingState from '../components/common/LoadingState.vue';
 import KnowledgeGraphView from '../components/graph/KnowledgeGraphView.vue';
-import LandscapeWorkflowPanel from '../components/landscape/LandscapeWorkflowPanel.vue';
 import BloodLineageTree from '../components/lineage/BloodLineageTree.vue';
+import PaperWorkflowPanel from '../components/workflow/PaperWorkflowPanel.vue';
 import { usePaperWorkflow } from '../composables/usePaperWorkflow';
 import { useAuthStore } from '../stores/authStore';
 
@@ -105,6 +110,7 @@ const emit = defineEmits(['step-change', 'back', 'result-view-change', 'lineage-
 const { accessToken } = useAuthStore();
 const workflowGraphViewRef = ref(null);
 const workflowLineageViewRef = ref(null);
+const lastCenteredGraphId = ref('');
 
 const {
   steps,
@@ -114,7 +120,7 @@ const {
   lineageLoading,
   lineageData,
   lineageErrorMessage,
-  graphStats,
+  workflowProgress,
   activeStepHint,
   activeViewKey,
   canViewLineage,
@@ -147,6 +153,26 @@ const lineageFocusPaperId = computed(() => {
   if (!Boolean(seed?.auto_lineage)) return '';
   return String(seed?.lineage_seed_paper_id || seed?.input_value || '').trim();
 });
+
+function resolveGraphId(payload) {
+  return String(payload?.graph_id || '').trim();
+}
+
+async function autoCenterGeneratedGraph() {
+  const graphId = resolveGraphId(graphData.value);
+  if (!graphId) return;
+  if (activeViewKey.value !== 'graph') return;
+  if (lastCenteredGraphId.value === graphId) return;
+
+  await nextTick();
+  await nextTick();
+  if (workflowGraphViewRef.value?.refreshGraphToMinOverview) {
+    await workflowGraphViewRef.value.refreshGraphToMinOverview();
+  } else {
+    await workflowGraphViewRef.value?.refreshGraphDisplay?.();
+  }
+  lastCenteredGraphId.value = graphId;
+}
 
 async function activateResultTab(tab) {
   if (!tab || tab.disabled) return;
@@ -184,6 +210,14 @@ watch(
     await workflowLineageViewRef.value?.refreshLineageDisplay?.();
   }
 );
+
+watch(
+  () => [resolveGraphId(graphData.value), activeViewKey.value],
+  async ([graphId, viewKey]) => {
+    if (!graphId || viewKey !== 'graph') return;
+    await autoCenterGeneratedGraph();
+  }
+);
 </script>
 
 <style scoped>
@@ -195,16 +229,25 @@ watch(
 .paper-fixed-layout {
   height: 100%;
   min-height: 0;
+  gap: 10px;
+  grid-template-columns: minmax(380px, 430px) minmax(0, 1fr);
 }
 
-.paper-fixed-layout .workflow-left,
-.paper-fixed-layout .workflow-right {
+.paper-workflow-layout::after {
+  display: none;
+}
+
+.paper-workflow-side,
+.paper-result-side {
   min-height: 0;
 }
 
-.paper-fixed-layout .workflow-right {
-  overflow: auto;
-  padding-right: 4px;
+.paper-workflow-side {
+  height: 100%;
+}
+
+.paper-result-side {
+  overflow: hidden;
 }
 
 .workflow-result-shell {
@@ -308,11 +351,16 @@ watch(
 
   .paper-fixed-layout {
     height: auto;
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .paper-fixed-layout .workflow-right {
+  .paper-workflow-side,
+  .paper-result-side {
+    height: auto;
+  }
+
+  .paper-result-side {
     overflow: visible;
-    padding-right: 0;
   }
 }
 </style>

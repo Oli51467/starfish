@@ -36,6 +36,14 @@ const routes = [
     }
   },
   {
+    path: '/research/pipeline',
+    name: 'research-pipeline',
+    component: HomeView,
+    meta: {
+      requiresAuth: true
+    }
+  },
+  {
     path: '/research-history',
     name: 'research-history',
     component: ResearchHistoryView,

@@ -12,6 +12,7 @@ from api.graphrag import router as graphrag_router
 from api.landscape import router as landscape_router
 from api.lineage import router as lineage_router
 from api.map import router as map_router
+from api.pipeline import router as pipeline_router
 from api.paper_signals import router as paper_signals_router
 from api.papers import router as papers_router
 from api.reading_list import router as reading_list_router
@@ -39,6 +40,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(collections_router)
 app.include_router(map_router)
+app.include_router(pipeline_router)
 app.include_router(graphrag_router)
 app.include_router(landscape_router)
 app.include_router(paper_signals_router)

@@ -1,7 +1,13 @@
 <template>
   <section class="workflow-page landscape-fixed-page">
     <div class="workflow-layout landscape-fixed-layout" :class="{ 'is-graph-fullscreen': isGraphFullscreen }">
-      <article class="workflow-left">
+      <PaperWorkflowPanel
+        class="landscape-workflow-side"
+        :steps="steps"
+        :progress="workflowProgress"
+      />
+
+      <article class="landscape-result-side">
         <LandscapeWorkspace
           ref="workspaceRef"
           :graph-data="graphData"
@@ -12,8 +18,6 @@
           @toggle-graph-fullscreen="toggleGraphFullscreen"
         />
       </article>
-
-      <LandscapeWorkflowPanel :steps="steps" :graph-stats="graphStats" />
     </div>
   </section>
 </template>
@@ -22,8 +26,8 @@
 import { computed, nextTick, onMounted, ref } from 'vue';
 
 import { generateLandscape } from '../api';
-import LandscapeWorkflowPanel from '../components/landscape/LandscapeWorkflowPanel.vue';
 import LandscapeWorkspace from '../components/landscape/LandscapeWorkspace.vue';
+import PaperWorkflowPanel from '../components/workflow/PaperWorkflowPanel.vue';
 import { buildLandscapeGraphFallback } from '../components/landscape/landscapeGraphAdapter';
 import { useAuthStore } from '../stores/authStore';
 
@@ -81,15 +85,13 @@ const activeStep = computed(() => {
   return done || steps.value[0];
 });
 const activeStepHint = computed(() => loadingMessage.value || activeStep.value.description || '处理中...');
-const graphStats = computed(() => {
-  const nodes = Array.isArray(graphData.value?.nodes) ? graphData.value.nodes : [];
-  const edges = Array.isArray(graphData.value?.edges) ? graphData.value.edges : [];
-  const directionCount = nodes.filter((node) => (node?.kind || node?.type) === 'domain').length;
-  return {
-    nodeCount: nodes.length,
-    edgeCount: edges.length,
-    directionCount
-  };
+const workflowProgress = computed(() => {
+  const total = Math.max(1, steps.value.length);
+  const doneCount = steps.value.filter((item) => String(item.status || '').toLowerCase() === 'done').length;
+  const hasRunning = steps.value.some((item) => String(item.status || '').toLowerCase() === 'running');
+  const partial = hasRunning ? 0.5 : 0;
+  const percent = Math.round(((doneCount + partial) / total) * 100);
+  return Math.max(0, Math.min(100, percent));
 });
 const beijingTimeFormatter = new Intl.DateTimeFormat('zh-CN', {
   timeZone: 'Asia/Shanghai',
@@ -444,16 +446,25 @@ onMounted(async () => {
 .landscape-fixed-layout {
   height: 100%;
   min-height: 0;
+  gap: 10px;
+  grid-template-columns: minmax(380px, 430px) minmax(0, 1fr);
 }
 
-.landscape-fixed-layout .workflow-left,
-.landscape-fixed-layout .workflow-right {
+.landscape-fixed-layout::after {
+  display: none;
+}
+
+.landscape-workflow-side,
+.landscape-result-side {
   min-height: 0;
 }
 
-.landscape-fixed-layout .workflow-right {
-  overflow: auto;
-  padding-right: 4px;
+.landscape-workflow-side {
+  height: 100%;
+}
+
+.landscape-result-side {
+  overflow: hidden;
 }
 
 .landscape-fixed-layout.is-graph-fullscreen {
@@ -464,11 +475,7 @@ onMounted(async () => {
   display: none;
 }
 
-.landscape-fixed-layout.is-graph-fullscreen .workflow-left {
-  padding-right: 0;
-}
-
-.landscape-fixed-layout.is-graph-fullscreen .workflow-right {
+.landscape-fixed-layout.is-graph-fullscreen .landscape-workflow-side {
   display: none;
 }
 
@@ -480,11 +487,16 @@ onMounted(async () => {
 
   .landscape-fixed-layout {
     height: auto;
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .landscape-fixed-layout .workflow-right {
+  .landscape-workflow-side,
+  .landscape-result-side {
+    height: auto;
+  }
+
+  .landscape-result-side {
     overflow: visible;
-    padding-right: 0;
   }
 }
 

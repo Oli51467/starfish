@@ -13,13 +13,21 @@
     ></div>
 
     <div v-if="showTools" class="knowledge-canvas-tools">
-      <button class="btn graph-refresh-btn" type="button" aria-label="刷新图谱" title="刷新图谱" @click="refreshGraphDisplay">
+      <button
+        v-if="showTools"
+        class="btn graph-refresh-btn"
+        type="button"
+        aria-label="刷新图谱"
+        title="刷新图谱"
+        @click="refreshGraphDisplay"
+      >
         <svg viewBox="0 0 16 16" aria-hidden="true">
           <path d="M13.5 8a5.5 5.5 0 1 1-1.16-3.4" />
           <path d="M13.5 3.5v3.1h-3.1" />
         </svg>
       </button>
       <button
+        v-if="showTools"
         class="btn graph-fullscreen-btn"
         type="button"
         :aria-label="fullscreenButtonLabel"
@@ -37,30 +45,48 @@
           <path v-if="isFullscreen" d="M13.5 10H10v3.5" />
         </svg>
       </button>
-      <slot name="tools-extra"></slot>
+      <slot v-if="showTools" name="tools-extra"></slot>
     </div>
 
-    <div v-if="directionLegendRows.length" class="knowledge-legend-overlay">
-      <div
-        v-for="(row, rowIndex) in directionLegendRows"
-        :key="`legend-row-${rowIndex}`"
-        class="legend-grid-row"
-        :class="`is-cols-${row.length}`"
-      >
+    <div v-if="hasDirectionLegend" class="knowledge-legend-overlay" :class="{ 'is-collapsed': !isLegendVisible }">
+      <div class="knowledge-legend-inline">
+        <div v-show="isLegendVisible" class="knowledge-legend-content">
+          <div
+            v-for="(row, rowIndex) in directionLegendRows"
+            :key="`legend-row-${rowIndex}`"
+            class="legend-grid-row"
+            :class="`is-cols-${row.length}`"
+          >
+            <button
+              v-for="item in row"
+              :key="item.id"
+              class="legend-direction-item"
+              :class="{
+                'is-active': isDirectionHighlighted(item.id),
+                'is-list': isDirectionListMode(item.id)
+              }"
+              type="button"
+              :title="item.name"
+              @click="toggleDirectionFocus(item.id)"
+            >
+              <span class="legend-dot legend-dot-direction" :style="item.dotStyle"></span>
+              <span class="legend-direction-name">{{ item.name }}</span>
+            </button>
+          </div>
+        </div>
         <button
-          v-for="item in row"
-          :key="item.id"
-          class="legend-direction-item"
-          :class="{
-            'is-active': isDirectionHighlighted(item.id),
-            'is-list': isDirectionListMode(item.id)
-          }"
+          class="btn graph-legend-toggle-btn graph-legend-toggle-btn-inline"
+          :class="{ 'is-active': isLegendVisible }"
           type="button"
-          :title="item.name"
-          @click="toggleDirectionFocus(item.id)"
+          :aria-label="legendToggleLabel"
+          :title="legendToggleLabel"
+          @click="toggleLegendVisibility"
         >
-          <span class="legend-dot legend-dot-direction" :style="item.dotStyle"></span>
-          <span class="legend-direction-name">{{ item.name }}</span>
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M1.5 8s2.3-4.3 6.5-4.3S14.5 8 14.5 8s-2.3 4.3-6.5 4.3S1.5 8 1.5 8z" />
+            <circle v-if="isLegendVisible" cx="8" cy="8" r="2.1" />
+            <path v-else d="M3 3l10 10" />
+          </svg>
         </button>
       </div>
     </div>
@@ -343,6 +369,7 @@ const selectedDirectionId = ref('');
 const selectedDirectionMode = ref('none');
 const isGraphDragging = ref(false);
 const isFullscreen = ref(false);
+const isLegendVisible = ref(true);
 const { accessToken, isAuthenticated, loadSession } = useAuthStore();
 const { ensureBookmarkIndexLoaded, isPaperSaved, isPaperSyncing, togglePaperSaved } = useCollectionStore();
 let graphInstance = null;
@@ -1152,6 +1179,11 @@ function closeDirectionPaperList() {
   resetDirectionSelection();
 }
 
+function toggleLegendVisibility() {
+  if (!hasDirectionLegend.value) return;
+  isLegendVisible.value = !isLegendVisible.value;
+}
+
 function resolveDirectionFocusNodeIds(directionId) {
   const targetId = String(directionId || '').trim();
   if (!targetId) return [];
@@ -1319,6 +1351,8 @@ const directionLegendRows = computed(() => {
   ];
   return rows.filter((row) => row.length > 0);
 });
+const hasDirectionLegend = computed(() => directionLegendRows.value.length > 0);
+const legendToggleLabel = computed(() => (isLegendVisible.value ? '隐藏图例' : '显示图例'));
 
 const selectedDirectionName = computed(() => {
   const selectedId = String(selectedDirectionId.value || '').trim();

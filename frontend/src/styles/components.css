@@ -235,7 +235,8 @@
 }
 
 .graph-refresh-btn svg,
-.graph-fullscreen-btn svg {
+.graph-fullscreen-btn svg,
+.graph-legend-toggle-btn svg {
   width: 14px;
   height: 14px;
   stroke: currentColor;
@@ -261,6 +262,22 @@
   transform: scale(1.06);
 }
 
+.graph-legend-toggle-btn {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+}
+
+.graph-legend-toggle-btn:hover svg {
+  transform: scale(1.06);
+}
+
+.graph-legend-toggle-btn.is-active {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+  color: var(--accent);
+}
+
 .knowledge-canvas-tools {
   position: absolute;
   right: 10px;
@@ -284,10 +301,38 @@
   background: rgba(255, 255, 255, 0.9);
   backdrop-filter: blur(2px);
   padding: 6px 8px;
-  display: grid;
-  gap: 3px;
+  display: block;
   box-shadow: var(--shadow-soft);
   pointer-events: auto;
+}
+
+.knowledge-legend-inline {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.knowledge-legend-content {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.graph-legend-toggle-btn-inline {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  flex: 0 0 auto;
+  align-self: flex-start;
+}
+
+.knowledge-legend-overlay.is-collapsed {
+  padding: 4px;
+}
+
+.knowledge-legend-overlay.is-collapsed .knowledge-legend-inline {
+  gap: 0;
 }
 
 .knowledge-node-card-overlay {
@@ -304,6 +349,10 @@
   gap: 12px;
   overflow: auto;
   pointer-events: auto;
+}
+
+.pipeline-report-content {
+  font-family: "JetBrains Mono", monospace;
 }
 
 .paper-node-card-top {

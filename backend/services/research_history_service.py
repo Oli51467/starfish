@@ -221,6 +221,27 @@ class ResearchHistoryService:
             logger.exception("Failed batch deleting research history records.")
             return []
 
+    def update_pipeline_payload(
+        self,
+        *,
+        user: UserProfile,
+        history_id: str,
+        pipeline_payload: dict[str, Any],
+    ) -> bool:
+        safe_history_id = str(history_id or "").strip()
+        if not safe_history_id or not isinstance(pipeline_payload, dict):
+            return False
+
+        try:
+            return self.repository.merge_graph_payload(
+                user_id=user.id,
+                history_id=safe_history_id,
+                payload_patch={"pipeline": pipeline_payload},
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed updating pipeline payload in research history.")
+            return False
+
     @staticmethod
     def _normalize_research_type(raw_value: str | None) -> str:
         value = str(raw_value or "").strip().lower()

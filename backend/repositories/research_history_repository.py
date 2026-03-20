@@ -234,6 +234,51 @@ class ResearchHistoryRepository:
             updated = cursor.fetchone()
         return bool(updated and str(updated.get("history_id") or "").strip())
 
+    def merge_graph_payload(
+        self,
+        *,
+        user_id: str,
+        history_id: str,
+        payload_patch: dict[str, Any],
+    ) -> bool:
+        self._ensure_table()
+        safe_user_id = str(user_id or "").strip()
+        safe_history_id = str(history_id or "").strip()
+        if not safe_user_id or not safe_history_id or not isinstance(payload_patch, dict):
+            return False
+
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                SELECT graph_payload
+                FROM research_history_records
+                WHERE user_id = %s AND history_id = %s
+                LIMIT 1
+                """,
+                (safe_user_id, safe_history_id),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return False
+
+            current_payload = row.get("graph_payload")
+            if not isinstance(current_payload, dict):
+                return False
+
+            merged_payload = dict(current_payload)
+            merged_payload.update(payload_patch)
+            cursor.execute(
+                """
+                UPDATE research_history_records
+                SET graph_payload = %s
+                WHERE user_id = %s AND history_id = %s
+                RETURNING history_id
+                """,
+                (Json(merged_payload), safe_user_id, safe_history_id),
+            )
+            updated = cursor.fetchone()
+        return bool(updated and str(updated.get("history_id") or "").strip())
+
     def delete_graph_record(self, *, user_id: str, history_id: str) -> bool:
         self._ensure_table()
         safe_user_id = str(user_id or "").strip()

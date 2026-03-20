@@ -255,15 +255,16 @@
 }
 
 .seed-submit-btn {
-  height: var(--seed-main-control-height);
-  min-width: 96px;
+  height: calc(var(--seed-main-control-height) - 2px);
+  min-width: 92px;
 }
 
 .seed-actions {
   display: inline-flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 0;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .seed-auth-card {

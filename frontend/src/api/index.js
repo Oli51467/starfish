@@ -5,6 +5,17 @@ function getApiBaseUrl() {
   return (import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL).replace(/\/$/, '');
 }
 
+function getWsBaseUrl() {
+  const apiBaseUrl = getApiBaseUrl();
+  if (apiBaseUrl.startsWith('https://')) {
+    return `wss://${apiBaseUrl.slice('https://'.length)}`;
+  }
+  if (apiBaseUrl.startsWith('http://')) {
+    return `ws://${apiBaseUrl.slice('http://'.length)}`;
+  }
+  return apiBaseUrl;
+}
+
 async function request(path, options = {}) {
   const baseUrl = getApiBaseUrl();
   let response;
@@ -263,6 +274,42 @@ export function getLineage(
     query.append('citation_types', type);
   }
   return request(`/api/lineage/${encodeURIComponent(paperId)}?${query.toString()}`);
+}
+
+export function startPipelineSession(payload, { accessToken = '' } = {}) {
+  return request('/api/pipeline/start', {
+    method: 'POST',
+    headers: buildAuthHeaders(accessToken, { 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload || {})
+  });
+}
+
+export function resumePipelineSession(sessionId, feedback = '', { accessToken = '' } = {}) {
+  return request(`/api/pipeline/resume/${encodeURIComponent(sessionId)}`, {
+    method: 'POST',
+    headers: buildAuthHeaders(accessToken, { 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ feedback: String(feedback || '') })
+  });
+}
+
+export function stopPipelineSession(sessionId, { accessToken = '' } = {}) {
+  return request(`/api/pipeline/stop/${encodeURIComponent(sessionId)}`, {
+    method: 'POST',
+    headers: buildAuthHeaders(accessToken)
+  });
+}
+
+export function getPipelineReport(sessionId, { accessToken = '' } = {}) {
+  return request(`/api/pipeline/report/${encodeURIComponent(sessionId)}`, {
+    headers: buildAuthHeaders(accessToken)
+  });
+}
+
+export function createPipelineWebSocket(sessionId, accessToken = '') {
+  const token = String(accessToken || '').trim();
+  const wsBase = getWsBaseUrl();
+  const url = `${wsBase}/api/pipeline/ws/${encodeURIComponent(sessionId)}?token=${encodeURIComponent(token)}`;
+  return new WebSocket(url);
 }
 
 export function createCollection(payload, { accessToken = '' } = {}) {

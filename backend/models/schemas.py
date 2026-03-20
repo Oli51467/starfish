@@ -107,6 +107,54 @@ class TaskDetailResponse(BaseModel):
     error: str | None = None
 
 
+PipelineInputType = Literal["arxiv_id", "doi", "domain"]
+PipelineEventType = Literal[
+    "node_start",
+    "thinking",
+    "node_complete",
+    "pause",
+    "session_complete",
+    "error",
+    "stopped",
+]
+
+
+class PipelineStartRequest(BaseModel):
+    input_type: PipelineInputType
+    input_value: str = Field(..., min_length=1, max_length=240)
+    paper_range_years: int | None = Field(default=None, ge=1, le=30)
+    quick_mode: bool = False
+
+
+class PipelineStartResponse(BaseModel):
+    session_id: str
+    status: Literal["started"] = "started"
+
+
+class PipelineResumeRequest(BaseModel):
+    feedback: str = ""
+
+
+class PipelineResumeResponse(BaseModel):
+    resumed: bool = False
+    status: Literal["resumed", "no_pending_checkpoint", "session_closed"] = "resumed"
+
+
+class PipelineReportResponse(BaseModel):
+    session_id: str
+    status: str
+    progress: int = Field(default=0, ge=0, le=100)
+    current_node: str = ""
+    research_goal: str = ""
+    report: str | None = None
+    report_id: str | None = None
+    errors: list[str] = Field(default_factory=list)
+
+
+class PipelineStopResponse(BaseModel):
+    stopped: bool = False
+
+
 class MapNode(BaseModel):
     id: str
     label: str
