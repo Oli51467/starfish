@@ -12,6 +12,7 @@ from external.semantic_scholar import (
     SemanticScholarNotFoundError,
 )
 from models.schemas import (
+    CollectionAutoCleanupResponse,
     CollectionCreateRequest,
     CollectionItem,
     CollectionListResponse,
@@ -112,6 +113,15 @@ class CollectionService:
             collection_id=str(collection_id or "").strip(),
         )
 
+    def cleanup_auto_generated_content(self, *, user: UserProfile) -> CollectionAutoCleanupResponse:
+        stats = self.repository.cleanup_auto_generated_content(user_id=user.id)
+        return CollectionAutoCleanupResponse(
+            cleaned=True,
+            deleted_collections=max(0, self._safe_int(stats.get("deleted_collections"))),
+            deleted_papers=max(0, self._safe_int(stats.get("deleted_papers"))),
+            deleted_notes=max(0, self._safe_int(stats.get("deleted_notes"))),
+        )
+
     def save_paper(self, *, user: UserProfile, request: SavedPaperCreateRequest) -> SavedPaperItem:
         paper_id = str(request.paper_id or "").strip()
         if not paper_id:
@@ -154,13 +164,14 @@ class CollectionService:
             raise RuntimeError("saved_paper_create_failed")
 
         unique_collection_ids: list[str] = []
-        seen: set[str] = set()
-        for item in request.collection_ids or []:
-            safe_collection_id = str(item or "").strip()
-            if not safe_collection_id or safe_collection_id in seen:
-                continue
-            seen.add(safe_collection_id)
-            unique_collection_ids.append(safe_collection_id)
+        if safe_save_source == "manual":
+            seen: set[str] = set()
+            for item in request.collection_ids or []:
+                safe_collection_id = str(item or "").strip()
+                if not safe_collection_id or safe_collection_id in seen:
+                    continue
+                seen.add(safe_collection_id)
+                unique_collection_ids.append(safe_collection_id)
 
         for collection_id in unique_collection_ids:
             linked = self.repository.attach_saved_paper_to_collection(

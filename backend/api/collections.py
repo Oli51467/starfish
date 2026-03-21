@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from api.dependencies import get_current_user_profile
 from models.schemas import (
+    CollectionAutoCleanupResponse,
     CollectionCreateRequest,
     CollectionDeleteResponse,
     CollectionItem,
@@ -86,6 +87,14 @@ def delete_collection(
     if not deleted:
         raise HTTPException(status_code=404, detail="collection_not_found")
     return CollectionDeleteResponse(deleted=True)
+
+
+@router.post("/collections/cleanup-auto", response_model=CollectionAutoCleanupResponse)
+def cleanup_auto_generated_content(
+    user: UserProfile = Depends(get_current_user_profile),
+    collection_service: CollectionService = Depends(get_collection_service),
+) -> CollectionAutoCleanupResponse:
+    return collection_service.cleanup_auto_generated_content(user=user)
 
 
 @router.post("/saved-papers", response_model=SavedPaperItem)

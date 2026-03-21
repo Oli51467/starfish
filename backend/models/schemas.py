@@ -505,6 +505,13 @@ class CollectionDeleteResponse(BaseModel):
     deleted: bool = False
 
 
+class CollectionAutoCleanupResponse(BaseModel):
+    cleaned: bool = False
+    deleted_collections: int = Field(default=0, ge=0)
+    deleted_papers: int = Field(default=0, ge=0)
+    deleted_notes: int = Field(default=0, ge=0)
+
+
 class SavedPaperDeleteResponse(BaseModel):
     deleted: bool = False
 

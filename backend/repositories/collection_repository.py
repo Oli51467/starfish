@@ -193,6 +193,110 @@ class CollectionRepository:
             deleted = cursor.fetchone()
         return bool(deleted and str(deleted.get("id") or "").strip())
 
+    def cleanup_auto_generated_content(self, *, user_id: str) -> dict[str, int]:
+        self._ensure_tables()
+        safe_user_id = str(user_id or "").strip()
+        if not safe_user_id:
+            return {
+                "deleted_collections": 0,
+                "deleted_papers": 0,
+                "deleted_notes": 0,
+            }
+
+        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                WITH auto_collections AS (
+                    SELECT c.id
+                    FROM collections AS c
+                    WHERE c.user_id = %s
+                      AND (
+                        c.name LIKE '围绕%%'
+                        OR c.name LIKE '探索%%'
+                        OR c.name LIKE '%%领域研究%%'
+                      )
+                ),
+                auto_source_papers AS (
+                    SELECT sp.id
+                    FROM saved_papers AS sp
+                    WHERE sp.user_id = %s
+                      AND COALESCE(sp.paper_payload->>'save_source', '') = 'auto_research'
+                ),
+                legacy_auto_papers AS (
+                    SELECT sp.id
+                    FROM saved_papers AS sp
+                    WHERE sp.user_id = %s
+                      AND EXISTS (
+                        SELECT 1
+                        FROM collection_papers AS cp
+                        JOIN auto_collections AS ac
+                          ON ac.id = cp.collection_id
+                        WHERE cp.saved_paper_id = sp.id
+                      )
+                      AND NOT EXISTS (
+                        SELECT 1
+                        FROM collection_papers AS cp
+                        JOIN collections AS c
+                          ON c.id = cp.collection_id
+                        WHERE cp.saved_paper_id = sp.id
+                          AND c.user_id = %s
+                          AND c.id NOT IN (SELECT id FROM auto_collections)
+                      )
+                ),
+                target_papers AS (
+                    SELECT id FROM auto_source_papers
+                    UNION
+                    SELECT id FROM legacy_auto_papers
+                ),
+                deleted_notes AS (
+                    DELETE FROM notes AS n
+                    USING target_papers AS tp
+                    WHERE n.saved_paper_id = tp.id
+                    RETURNING n.id
+                ),
+                deleted_auto_links AS (
+                    DELETE FROM collection_papers AS cp
+                    USING auto_collections AS ac
+                    WHERE cp.collection_id = ac.id
+                    RETURNING cp.saved_paper_id
+                ),
+                deleted_auto_collections AS (
+                    DELETE FROM collections AS c
+                    USING auto_collections AS ac
+                    WHERE c.id = ac.id
+                    RETURNING c.id
+                ),
+                deleted_target_links AS (
+                    DELETE FROM collection_papers AS cp
+                    USING target_papers AS tp
+                    WHERE cp.saved_paper_id = tp.id
+                    RETURNING cp.saved_paper_id
+                ),
+                deleted_target_papers AS (
+                    DELETE FROM saved_papers AS sp
+                    USING target_papers AS tp
+                    WHERE sp.id = tp.id
+                    RETURNING sp.id
+                )
+                SELECT
+                  COALESCE((SELECT COUNT(1) FROM deleted_auto_collections), 0) AS deleted_collections,
+                  COALESCE((SELECT COUNT(1) FROM deleted_target_papers), 0) AS deleted_papers,
+                  COALESCE((SELECT COUNT(1) FROM deleted_notes), 0) AS deleted_notes
+                """,
+                (
+                    safe_user_id,
+                    safe_user_id,
+                    safe_user_id,
+                    safe_user_id,
+                ),
+            )
+            row = cursor.fetchone() or {}
+        return {
+            "deleted_collections": max(0, int(row.get("deleted_collections") or 0)),
+            "deleted_papers": max(0, int(row.get("deleted_papers") or 0)),
+            "deleted_notes": max(0, int(row.get("deleted_notes") or 0)),
+        }
+
     def collection_exists(self, *, user_id: str, collection_id: str) -> bool:
         self._ensure_tables()
         with self._connect() as conn, conn.cursor(row_factory=dict_row) as cursor:
