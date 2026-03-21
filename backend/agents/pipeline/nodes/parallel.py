@@ -7,7 +7,6 @@ from agents.pipeline.nodes.utils import parse_json_array, summarize_exception
 from agents.pipeline.state import PipelineState, append_message
 from core.llm_client import chat, is_configured
 from services.lineage_service import get_lineage_service
-from services.paper_signal_service import get_paper_signal_service
 from services.pipeline_runtime_service import get_pipeline_runtime_service
 
 _NODE = "parallel"
@@ -139,13 +138,11 @@ async def parallel_analysis_node(state: PipelineState) -> PipelineState:
     session_id = state["session_id"]
 
     await runtime.ensure_active(session_id)
-    await runtime.emit_node_start(session_id, _NODE, 55)
+    await runtime.emit_node_start(session_id, _NODE, 92)
 
     seed_paper_id = _get_seed_paper_id(state)
-    top_papers = _top_papers(state, limit=5)
 
     lineage_service = get_lineage_service()
-    signal_service = get_paper_signal_service()
 
     errors = list(state.get("errors") or [])
 
@@ -181,34 +178,6 @@ async def parallel_analysis_node(state: PipelineState) -> PipelineState:
             return None
         return lineage.model_dump(mode="json")
 
-    async def heat_task():
-        tasks: list[asyncio.Task] = []
-        for paper in top_papers[:3]:
-            paper_id = str(paper.get("paper_id") or "").strip()
-            if not paper_id:
-                continue
-            tasks.append(
-                asyncio.create_task(
-                    run_with_soft_timeout(
-                        signal_service.get_paper_signal(paper_id=paper_id, force_refresh=False),
-                        timeout_seconds=25,
-                        label=f"heat_task_failed:{paper_id}",
-                    )
-                )
-            )
-        if not tasks:
-            return []
-        payloads = await asyncio.gather(*tasks, return_exceptions=True)
-        result: list[dict] = []
-        for item in payloads:
-            if isinstance(item, Exception):
-                errors.append(f"heat_task_failed: {summarize_exception(item)}")
-                continue
-            if item is None:
-                continue
-            result.append(item.model_dump(mode="json"))
-        return result
-
     async def gaps_task():
         return _build_research_gaps(state)
 
@@ -222,9 +191,8 @@ async def parallel_analysis_node(state: PipelineState) -> PipelineState:
             errors.append(f"critic_task_failed: {summarize_exception(exc)}")
             return _fallback_critic_notes(state)
 
-    lineage_data, heat_reports, research_gaps, critic_notes = await asyncio.gather(
+    lineage_data, research_gaps, critic_notes = await asyncio.gather(
         lineage_task(),
-        heat_task(),
         gaps_task(),
         critic_task(),
         return_exceptions=False,
@@ -236,19 +204,18 @@ async def parallel_analysis_node(state: PipelineState) -> PipelineState:
 
     summary = (
         f"并行分析完成：血缘节点 {lineage_node_count}，"
-        f"热度样本 {len(heat_reports)}，研究空白 {len(research_gaps)}。"
+        f"研究空白 {len(research_gaps)}。"
     )
     await runtime.emit_thinking(session_id, _NODE, summary)
-    await runtime.emit_node_complete(session_id, _NODE, 75, summary)
+    await runtime.emit_node_complete(session_id, _NODE, 100, summary)
 
     return {
         **state,
         "lineage_data": lineage_data,
-        "heat_reports": heat_reports,
         "research_gaps": research_gaps,
         "critic_notes": critic_notes,
         "errors": errors,
         "current_node": _NODE,
-        "progress": 75,
+        "progress": 100,
         "messages": append_message(state, summary),
     }

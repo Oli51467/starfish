@@ -110,7 +110,7 @@ const emit = defineEmits(['step-change', 'back', 'result-view-change', 'lineage-
 const { accessToken } = useAuthStore();
 const workflowGraphViewRef = ref(null);
 const workflowLineageViewRef = ref(null);
-const lastCenteredGraphId = ref('');
+const lastCenteredGraphKey = ref('');
 
 const {
   steps,
@@ -158,20 +158,32 @@ function resolveGraphId(payload) {
   return String(payload?.graph_id || '').trim();
 }
 
+function resolveGraphCenterKey(payload) {
+  const graphId = resolveGraphId(payload);
+  if (graphId) return `graph:${graphId}`;
+  const nodes = Array.isArray(payload?.nodes) ? payload.nodes : [];
+  const edges = Array.isArray(payload?.edges) ? payload.edges : [];
+  if (!nodes.length) return '';
+  const query = String(payload?.query || '').trim().toLowerCase();
+  return `preview:${query}:n${nodes.length}:e${edges.length}`;
+}
+
 async function autoCenterGeneratedGraph() {
-  const graphId = resolveGraphId(graphData.value);
-  if (!graphId) return;
+  const graphCenterKey = resolveGraphCenterKey(graphData.value);
+  if (!graphCenterKey) return;
   if (activeViewKey.value !== 'graph') return;
-  if (lastCenteredGraphId.value === graphId) return;
+  if (lastCenteredGraphKey.value === graphCenterKey) return;
 
   await nextTick();
   await nextTick();
-  if (workflowGraphViewRef.value?.refreshGraphToMinOverview) {
-    await workflowGraphViewRef.value.refreshGraphToMinOverview();
+  const graphView = workflowGraphViewRef.value;
+  if (!graphView) return;
+  if (graphView.refreshGraphToMinOverview) {
+    await graphView.refreshGraphToMinOverview();
   } else {
-    await workflowGraphViewRef.value?.refreshGraphDisplay?.();
+    await graphView.refreshGraphDisplay?.();
   }
-  lastCenteredGraphId.value = graphId;
+  lastCenteredGraphKey.value = graphCenterKey;
 }
 
 async function activateResultTab(tab) {
@@ -212,11 +224,19 @@ watch(
 );
 
 watch(
-  () => [resolveGraphId(graphData.value), activeViewKey.value],
-  async ([graphId, viewKey]) => {
-    if (!graphId || viewKey !== 'graph') return;
+  () => [resolveGraphCenterKey(graphData.value), activeViewKey.value],
+  async ([graphCenterKey, viewKey]) => {
+    if (!graphCenterKey || viewKey !== 'graph') return;
     await autoCenterGeneratedGraph();
   }
+);
+
+watch(
+  () => props.seed,
+  () => {
+    lastCenteredGraphKey.value = '';
+  },
+  { deep: true }
 );
 </script>
 

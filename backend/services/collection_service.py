@@ -23,6 +23,7 @@ from models.schemas import (
     SavedPaperNoteCreateRequest,
     SavedPaperNoteItem,
     SavedPaperNoteListResponse,
+    SavedPaperSaveSource,
     SavedPaperStatusUpdateRequest,
     UserProfile,
 )
@@ -62,9 +63,19 @@ class CollectionService:
         )
         return self._to_collection_item(row)
 
-    def list_collections(self, *, user: UserProfile) -> CollectionListResponse:
+    def list_collections(self, *, user: UserProfile, manual_only: bool = False) -> CollectionListResponse:
         rows = self.repository.list_collections(user_id=user.id)
-        return CollectionListResponse(items=[self._to_collection_item(row) for row in rows])
+        items: list[CollectionItem] = []
+        for row in rows:
+            if manual_only:
+                manual_count = max(0, self._safe_int(row.get("manual_paper_count")))
+                auto_count = max(0, self._safe_int(row.get("auto_paper_count")))
+                # Hide legacy auto-created theme collections that only contain auto research papers.
+                if manual_count <= 0 and auto_count > 0:
+                    continue
+                row = {**row, "paper_count": manual_count}
+            items.append(self._to_collection_item(row))
+        return CollectionListResponse(items=items)
 
     def update_collection(
         self,
@@ -106,7 +117,11 @@ class CollectionService:
         if not paper_id:
             raise ValueError("paper_id_required")
 
-        metadata = self._normalize_metadata(request.metadata)
+        safe_save_source = self._normalize_save_source(request.save_source) or "manual"
+        metadata = self._normalize_metadata(
+            request.metadata,
+            save_source=safe_save_source,
+        )
         # Keep save-path fast: metadata enrichment can trigger multiple remote calls
         # and significantly delay bookmark feedback in graph/lineage views.
         # Detailed enrichment is handled by the dedicated enrich endpoint/workflow.
@@ -122,6 +137,18 @@ class CollectionService:
             paper_id=paper_id,
             paper_payload=metadata,
         )
+        row_payload = self._normalize_metadata_payload_dict(row.get("paper_payload"))
+        row_save_source = self._normalize_save_source(row_payload.get("save_source"))
+        if safe_save_source == "manual" and row_save_source != "manual":
+            next_payload = {**row_payload, "save_source": "manual"}
+            updated_row = self.repository.update_saved_paper_payload(
+                user_id=user.id,
+                saved_paper_id=str(row.get("id") or "").strip(),
+                paper_payload=next_payload,
+            )
+            if updated_row is not None:
+                row = updated_row
+
         saved_paper_id = str(row.get("id") or "").strip()
         if not saved_paper_id:
             raise RuntimeError("saved_paper_create_failed")
@@ -155,6 +182,7 @@ class CollectionService:
         page: int,
         page_size: int,
         collection_id: str | None = None,
+        manual_only: bool = False,
         read_status: str | None = None,
         keyword: str | None = None,
         sort_by: str = "saved_at",
@@ -178,6 +206,7 @@ class CollectionService:
             page=safe_page,
             page_size=safe_page_size,
             collection_id=str(collection_id or "").strip() or None,
+            manual_only=bool(manual_only),
             read_status=safe_read_status or None,
             keyword=str(keyword or "").strip() or None,
             sort_by=safe_sort_by,
@@ -643,6 +672,7 @@ class CollectionService:
     @classmethod
     def _normalize_metadata_payload_dict(cls, payload: Any) -> dict[str, Any]:
         raw_payload = payload if isinstance(payload, dict) else {}
+        save_source = cls._normalize_save_source(raw_payload.get("save_source"))
         authors = cls._normalize_text_list(raw_payload.get("authors"), max_size=12)
 
         year = cls._safe_int_or_none(
@@ -690,6 +720,7 @@ class CollectionService:
             "fields_of_study": fields_of_study,
             "venue": venue,
             "url": url or None,
+            "save_source": save_source or None,
         }
 
     @staticmethod
@@ -818,9 +849,13 @@ class CollectionService:
         return left_val or right_val
 
     @staticmethod
-    def _normalize_metadata(metadata: SavedPaperMetadata | None) -> dict[str, Any]:
+    def _normalize_metadata(
+        metadata: SavedPaperMetadata | None,
+        *,
+        save_source: SavedPaperSaveSource = "manual",
+    ) -> dict[str, Any]:
         if metadata is None:
-            return {}
+            return {"save_source": save_source}
         payload = {
             "title": metadata.title,
             "abstract": metadata.abstract,
@@ -832,8 +867,16 @@ class CollectionService:
             "fields_of_study": metadata.fields_of_study,
             "venue": metadata.venue,
             "url": metadata.url,
+            "save_source": save_source,
         }
         return CollectionService._normalize_metadata_payload_dict(payload)
+
+    @staticmethod
+    def _normalize_save_source(raw_value: Any) -> SavedPaperSaveSource | None:
+        value = str(raw_value or "").strip().lower()
+        if value in {"manual", "auto_research"}:
+            return value
+        return None
 
     @staticmethod
     def _to_collection_item(row: dict[str, Any]) -> CollectionItem:

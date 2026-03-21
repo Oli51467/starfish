@@ -169,14 +169,6 @@
           >
             开始分析
           </button>
-          <button
-            class="btn mono seed-submit-btn"
-            type="button"
-            :disabled="!canUseFeatures || !String(mapInput.input_type || '').trim() || !mapInput.input_value.trim()"
-            @click="startAnalysis('pipeline')"
-          >
-            自主 Pipeline
-          </button>
         </div>
       </div>
     </form>
@@ -374,7 +366,7 @@ function parsePaperRangeYears(rawValue) {
   return Math.min(30, parsed);
 }
 
-function startAnalysis(mode = 'manual') {
+function startAnalysis() {
   if (!canUseFeatures.value) return;
   const selectedInputType = String(mapInput.value.input_type || '').trim();
   const value = mapInput.value.input_value.trim();
@@ -387,7 +379,6 @@ function startAnalysis(mode = 'manual') {
     input_value: value,
     paper_range_years: paperRangeYears,
     quick_mode: Boolean(mapInput.value.quick_mode),
-    workflow_mode: String(mode || '').trim().toLowerCase() === 'pipeline' ? 'pipeline' : 'manual',
     depth: mapInput.value.depth || 2
   });
 }

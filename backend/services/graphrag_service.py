@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -18,6 +19,7 @@ from external.semantic_scholar import (
     SemanticScholarClient,
     SemanticScholarClientError,
 )
+from core.domain_explorer import DomainExplorer
 from core.llm_client import chat, get_client, is_configured
 from core.settings import get_settings
 from models.schemas import (
@@ -74,6 +76,10 @@ class GraphRAGService:
     def __init__(self, neo4j_repo: Neo4jRepository | None = None) -> None:
         self.semantic = SemanticScholarClient()
         self.openalex = OpenAlexClient()
+        self.domain_explorer = DomainExplorer(
+            semantic_client=self.semantic,
+            openalex_client=self.openalex,
+        )
         self.retriever = MultiSourceRetriever(
             semantic_client=self.semantic,
             openalex_client=self.openalex,
@@ -249,12 +255,88 @@ class GraphRAGService:
                 quick_mode=quick_mode,
                 paper_range_years=paper_range_years,
             )
-        return self._retrieve_papers_from_query_with_trace(
-            query=query,
+        normalized_query_payload = self._normalize_domain_query(query)
+        normalized_query = str(normalized_query_payload.get("canonical_query") or query).strip() or str(query or "").strip()
+        payload = self._retrieve_papers_from_query_with_trace(
+            query=normalized_query,
             max_papers=max_papers,
             paper_range_years=paper_range_years,
             preferred_provider="openalex" if quick_mode else "semantic_scholar",
+            domain_authority_mode=normalized_input_type == "domain",
         )
+        payload["query"] = normalized_query
+        return self._with_normalized_domain_query_trace(
+            payload=payload,
+            normalized_query_payload=normalized_query_payload,
+        )
+
+    def _normalize_domain_query(self, query: str) -> dict[str, Any]:
+        safe_query = re.sub(r"\s+", " ", str(query or "").strip())
+        if not safe_query:
+            return {
+                "original_query": "",
+                "corrected_query": "",
+                "translated_query": "",
+                "canonical_query": "",
+                "used_llm": False,
+                "was_corrected": False,
+            }
+
+        try:
+            normalized = asyncio.run(self.domain_explorer.normalize_user_query(safe_query))
+            if isinstance(normalized, dict):
+                return normalized
+        except RuntimeError:
+            # A running event loop can appear in non-standard embedding scenarios.
+            logger.debug("event_loop_running_during_query_normalization", exc_info=True)
+        except Exception:  # noqa: BLE001
+            logger.exception("domain query normalization failed; fallback to raw query")
+
+        fallback_query = str(self.domain_explorer._normalize_query_for_search(safe_query) or safe_query).strip() or safe_query
+        return {
+            "original_query": safe_query,
+            "corrected_query": fallback_query,
+            "translated_query": fallback_query,
+            "canonical_query": fallback_query,
+            "used_llm": False,
+            "was_corrected": fallback_query != safe_query,
+        }
+
+    def _with_normalized_domain_query_trace(
+        self,
+        *,
+        payload: dict[str, Any],
+        normalized_query_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        steps = list(payload.get("steps") or [])
+        if not steps:
+            return payload
+
+        original_query = str(normalized_query_payload.get("original_query") or "").strip()
+        canonical_query = str(normalized_query_payload.get("canonical_query") or "").strip()
+        corrected_query = str(normalized_query_payload.get("corrected_query") or "").strip()
+        translated_query = str(normalized_query_payload.get("translated_query") or "").strip()
+        was_corrected = bool(normalized_query_payload.get("was_corrected"))
+        if not original_query:
+            return payload
+
+        lead_step = dict(steps[0])
+        if was_corrected and canonical_query:
+            normalization_mode = "中文翻译+纠错" if bool(re.search(r"[\u4e00-\u9fff]", original_query)) else "英文纠错"
+            lead_step["title"] = "检索词标准化与搜索规划"
+            lead_step["detail"] = (
+                f"输入标准化完成（{normalization_mode}）：原始“{original_query}” -> 当前检索“{canonical_query}”。"
+                f" 纠错结果“{corrected_query or original_query}”，英文检索词“{translated_query or canonical_query}”。"
+            )
+        else:
+            lead_step["title"] = "检索词检查与搜索规划"
+            lead_step["detail"] = f"已检查检索词“{original_query}”，并直接用于学术检索。"
+
+        steps[0] = lead_step
+        return {
+            **payload,
+            "steps": steps,
+        }
 
     def _retrieve_papers_from_seed_input_with_trace(
         self,
@@ -619,10 +701,11 @@ class GraphRAGService:
         max_papers: int,
         paper_range_years: int | None = None,
         preferred_provider: str = "semantic_scholar",
+        domain_authority_mode: bool = False,
     ) -> dict[str, Any]:
         safe_query = query.strip()
         safe_max = max(1, max_papers)
-        candidate_limit = min(120, max(safe_max + 20, safe_max * 6))
+        candidate_limit = min(180, max(safe_max + 20, safe_max * 6)) if domain_authority_mode else min(120, max(safe_max + 20, safe_max * 6))
         normalized_range = self._normalize_paper_range_years(paper_range_years)
         primary_provider = self._normalize_search_provider(preferred_provider)
         steps: list[dict[str, Any]] = []
@@ -634,7 +717,11 @@ class GraphRAGService:
             self._build_retrieval_step(
                 phase="search_web",
                 title="LLM 检索规划与网页搜索",
-                detail="已构造学术检索查询，并向外部学术索引发起请求。",
+                detail=(
+                    "已构造代表性论文检索策略（核心主题 / survey / benchmark / 高被引），并向多学术索引发起请求。"
+                    if domain_authority_mode
+                    else "已构造学术检索查询，并向外部学术索引发起请求。"
+                ),
                 provider="semantic_scholar+openalex",
                 count=0,
                 links=web_links,
@@ -653,7 +740,11 @@ class GraphRAGService:
                 self._build_retrieval_step(
                     phase="retrieve",
                     title="候选论文检索",
-                    detail=f"已启用 mock 模式，生成 {len(candidates)} 条候选论文。{range_hint}",
+                    detail=(
+                        f"已启用 mock 模式，生成 {len(candidates)} 条候选论文。{range_hint}"
+                        if not domain_authority_mode
+                        else f"已启用 mock 模式，模拟代表性候选 {len(candidates)} 条。{range_hint}"
+                    ),
                     status="fallback",
                     provider="mock",
                     count=len(candidates),
@@ -661,14 +752,27 @@ class GraphRAGService:
                     elapsed_seconds=0.0,
                 )
             )
-            selected_papers, filter_stats = self._filter_and_rank_papers(candidates, safe_max, safe_query)
+            selected_papers, filter_stats = self._filter_and_rank_papers(
+                candidates,
+                safe_max,
+                safe_query,
+                ranking_profile="domain_authority" if domain_authority_mode else "balanced",
+                paper_range_years=normalized_range,
+            )
             steps.append(
                 self._build_retrieval_step(
                     phase="filter",
                     title="候选筛选与排序",
                     detail=(
-                        f"输入 {filter_stats['input']} 条，去重后 {filter_stats['deduped']} 条，"
-                        f"按相关度/引用数/新近性筛选保留 {filter_stats['selected']} 条。"
+                        (
+                            f"输入 {filter_stats['input']} 条，去重后 {filter_stats['deduped']} 条，"
+                            f"按代表性/引用数/相关性筛选保留 {filter_stats['selected']} 条。"
+                        )
+                        if domain_authority_mode
+                        else (
+                            f"输入 {filter_stats['input']} 条，去重后 {filter_stats['deduped']} 条，"
+                            f"按相关度/引用数/新近性筛选保留 {filter_stats['selected']} 条。"
+                        )
                     ),
                     provider="mock",
                     count=len(selected_papers),
@@ -686,11 +790,18 @@ class GraphRAGService:
                 "steps": steps,
             }
 
-        search_result = self.retriever.search_papers(
-            query=safe_query,
-            limit=candidate_limit,
-            preferred_provider=primary_provider,
-        )
+        if domain_authority_mode:
+            search_result = self._search_domain_authority_candidates(
+                query=safe_query,
+                limit=candidate_limit,
+                preferred_provider=primary_provider,
+            )
+        else:
+            search_result = self.retriever.search_papers(
+                query=safe_query,
+                limit=candidate_limit,
+                preferred_provider=primary_provider,
+            )
         provider_used = str(search_result.get("provider") or "mock")
         providers_used = [
             str(item).strip()
@@ -707,6 +818,13 @@ class GraphRAGService:
             candidate_papers,
             paper_range_years=normalized_range,
         )
+        if domain_authority_mode and normalized_range is not None:
+            candidate_papers = self._ensure_recent_year_coverage_candidates(
+                query=safe_query,
+                papers=candidate_papers,
+                paper_range_years=normalized_range,
+                preferred_provider=primary_provider,
+            )
         range_hint = self._build_year_range_hint(normalized_range, range_filter_stats)
         retrieve_status = "done" if provider_used != "mock" else "fallback"
         retrieve_elapsed = float(search_result.get("elapsed_seconds") or 0.0)
@@ -715,15 +833,24 @@ class GraphRAGService:
         if provider_used == "mock":
             retrieve_detail = f"外部检索失败，已降级为 mock 数据（{len(candidate_papers)} 条候选）。{range_hint}"
         else:
+            query_variants = list(search_result.get("query_variants") or [])
+            variant_hint = (
+                f" 基于 {len(query_variants)} 个主题扩展查询聚合结果。"
+                if domain_authority_mode and len(query_variants) > 1
+                else ""
+            )
             if len(providers_used) > 1:
-                retrieve_detail = f"并行检索已完成，多个学术索引共返回 {len(candidate_papers)} 条候选论文。{range_hint}"
+                retrieve_detail = (
+                    f"并行检索已完成，多个学术索引共返回 {len(candidate_papers)} 条候选论文。"
+                    f"{variant_hint}{range_hint}"
+                )
             elif used_fallback and provider_used != primary_provider:
                 retrieve_detail = (
                     f"主检索通道暂不可用，"
-                    f"已自动切换备用通道，返回 {len(candidate_papers)} 条候选论文。{range_hint}"
+                    f"已自动切换备用通道，返回 {len(candidate_papers)} 条候选论文。{variant_hint}{range_hint}"
                 )
             else:
-                retrieve_detail = f"检索通道返回 {len(candidate_papers)} 条候选论文。{range_hint}"
+                retrieve_detail = f"检索通道返回 {len(candidate_papers)} 条候选论文。{variant_hint}{range_hint}"
 
         trace_provider = "+".join(providers_used) if providers_used else provider_used
         steps.append(
@@ -739,14 +866,27 @@ class GraphRAGService:
             )
         )
 
-        selected_papers, filter_stats = self._filter_and_rank_papers(candidate_papers, safe_max, safe_query)
+        selected_papers, filter_stats = self._filter_and_rank_papers(
+            candidate_papers,
+            safe_max,
+            safe_query,
+            ranking_profile="domain_authority" if domain_authority_mode else "balanced",
+            paper_range_years=normalized_range,
+        )
         steps.append(
             self._build_retrieval_step(
                 phase="filter",
                 title="候选筛选与排序",
                 detail=(
-                    f"输入 {filter_stats['input']} 条，去重后 {filter_stats['deduped']} 条，"
-                    f"按相关度/引用数/新近性筛选保留 {filter_stats['selected']} 条。"
+                    (
+                        f"输入 {filter_stats['input']} 条，去重后 {filter_stats['deduped']} 条，"
+                        f"按代表性/引用数/相关性筛选保留 {filter_stats['selected']} 条。"
+                    )
+                    if domain_authority_mode
+                    else (
+                        f"输入 {filter_stats['input']} 条，去重后 {filter_stats['deduped']} 条，"
+                        f"按相关度/引用数/新近性筛选保留 {filter_stats['selected']} 条。"
+                    )
                 ),
                 provider=trace_provider,
                 count=len(selected_papers),
@@ -763,6 +903,216 @@ class GraphRAGService:
             "selected_papers": selected_papers,
             "steps": steps,
         }
+
+    def _ensure_recent_year_coverage_candidates(
+        self,
+        *,
+        query: str,
+        papers: list[dict[str, Any]],
+        paper_range_years: int | None,
+        preferred_provider: str,
+    ) -> list[dict[str, Any]]:
+        normalized_range = self._normalize_paper_range_years(paper_range_years)
+        if normalized_range is None or normalized_range <= 1:
+            return papers
+
+        current_year = datetime.now(timezone.utc).year
+        target_years = list(range(max(1, current_year - normalized_range + 1), current_year + 1))
+        merged = self._merge_candidate_lists(
+            primary=[],
+            secondary=list(papers or []),
+            limit=max(220, len(papers or []) + 80),
+        )
+        if not merged:
+            return merged
+
+        existing_years = {
+            self._safe_int(item.get("year"))
+            for item in merged
+            if self._safe_int(item.get("year")) > 0
+        }
+        missing_years = [year for year in target_years if year not in existing_years]
+        if not missing_years:
+            return merged
+
+        for year in missing_years:
+            year_queries = [
+                f"{query} {year} seminal",
+                f"{query} {year} survey",
+                f"{query} {year}",
+            ]
+            found = False
+            for year_query in year_queries:
+                payload = self.retriever.search_papers(
+                    query=year_query,
+                    limit=32,
+                    preferred_provider=preferred_provider,
+                )
+                year_candidates = list(payload.get("papers") or [])
+                if not year_candidates:
+                    continue
+                year_candidates, _ = self._apply_paper_year_range(
+                    year_candidates,
+                    paper_range_years=normalized_range,
+                )
+                year_candidates = [
+                    candidate
+                    for candidate in year_candidates
+                    if self._safe_int(candidate.get("year")) == year
+                ]
+                if not year_candidates:
+                    continue
+                merged = self._merge_candidate_lists(
+                    primary=merged,
+                    secondary=year_candidates,
+                    limit=max(240, len(merged) + 56),
+                )
+                found = True
+                break
+            if not found:
+                continue
+
+        return merged
+
+    def _search_domain_authority_candidates(
+        self,
+        *,
+        query: str,
+        limit: int,
+        preferred_provider: str,
+    ) -> dict[str, Any]:
+        safe_query = str(query or "").strip()
+        safe_limit = max(1, min(limit, 180))
+        query_variants = self._build_domain_authority_queries(safe_query)
+        per_query_limit = max(18, min(60, max(24, safe_limit // max(1, len(query_variants)))))
+
+        merged_candidates: list[dict[str, Any]] = []
+        merged_stats: list[dict[str, Any]] = []
+        merged_providers: list[str] = []
+        total_elapsed = 0.0
+        used_fallback = False
+
+        for expansion_query in query_variants:
+            payload = self.retriever.search_papers(
+                query=expansion_query,
+                limit=per_query_limit,
+                preferred_provider=preferred_provider,
+            )
+            total_elapsed += float(payload.get("elapsed_seconds") or 0.0)
+            used_fallback = used_fallback or bool(payload.get("used_fallback"))
+            merged_stats = self._merge_source_stats(merged_stats, list(payload.get("source_stats") or []))
+            merged_providers = self._merge_provider_list(
+                merged_providers,
+                list(payload.get("providers_used") or []),
+            )
+            merged_candidates = self._merge_candidate_lists(
+                primary=merged_candidates,
+                secondary=list(payload.get("papers") or []),
+                limit=safe_limit,
+            )
+            if len(merged_candidates) >= safe_limit:
+                break
+
+        if not merged_candidates:
+            return {
+                "provider": "mock",
+                "status": "fallback",
+                "papers": self._fallback_papers(query=safe_query, max_papers=safe_limit),
+                "elapsed_seconds": total_elapsed,
+                "used_fallback": True,
+                "primary_provider": preferred_provider,
+                "providers_used": merged_providers,
+                "source_stats": merged_stats,
+                "query_variants": query_variants,
+            }
+
+        provider = self._merge_provider_labels(set(merged_providers))
+        if provider == "mock":
+            provider = str(preferred_provider or "semantic_scholar").strip() or "semantic_scholar"
+        return {
+            "provider": provider,
+            "status": "fallback" if used_fallback else "done",
+            "papers": merged_candidates,
+            "elapsed_seconds": total_elapsed,
+            "used_fallback": used_fallback,
+            "primary_provider": preferred_provider,
+            "providers_used": merged_providers,
+            "source_stats": merged_stats,
+            "query_variants": query_variants,
+        }
+
+    def _build_domain_authority_queries_with_llm(self, query: str) -> list[str]:
+        safe_query = re.sub(r"\s+", " ", str(query or "").strip())
+        if not safe_query or not is_configured():
+            return []
+
+        prompt = (
+            "You are a research retrieval planner.\n"
+            "Given a research domain, output concise English search queries that prioritize:\n"
+            "1) seminal/most representative papers,\n"
+            "2) highly-cited papers,\n"
+            "3) authoritative surveys/benchmarks.\n"
+            "Avoid generic keyword-only variants.\n"
+            "Return JSON only: {\"queries\": [\"...\"]}\n\n"
+            f"Domain: {safe_query}"
+        )
+        try:
+            response = chat(
+                [{"role": "user", "content": prompt}],
+                max_tokens=260,
+                timeout=25,
+            )
+            content = str(response.choices[0].message.content or "").strip()
+            payload = self._extract_json_payload(content)
+            if not isinstance(payload, dict):
+                return []
+            raw_queries = payload.get("queries") or []
+            if not isinstance(raw_queries, list):
+                return []
+            normalized: list[str] = []
+            seen: set[str] = set()
+            for item in raw_queries:
+                text = re.sub(r"\s+", " ", str(item or "").strip())
+                if len(text) < 3:
+                    continue
+                key = text.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                normalized.append(text)
+                if len(normalized) >= 6:
+                    break
+            return normalized
+        except Exception:  # noqa: BLE001
+            logger.warning("domain authority query planning with llm failed", exc_info=True)
+            return []
+
+    def _build_domain_authority_queries(self, query: str) -> list[str]:
+        safe_query = re.sub(r"\s+", " ", str(query or "").strip())
+        if not safe_query:
+            return []
+
+        llm_candidates = self._build_domain_authority_queries_with_llm(safe_query)
+        heuristic_candidates = [
+            safe_query,
+            f"{safe_query} seminal paper",
+            f"{safe_query} survey review",
+            f"{safe_query} benchmark",
+            f"{safe_query} highly cited",
+        ]
+        candidates = [*llm_candidates, *heuristic_candidates]
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for item in candidates:
+            normalized = re.sub(r"\s+", " ", str(item or "").strip())
+            if not normalized:
+                continue
+            key = normalized.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(normalized)
+        return deduped[:5]
 
     def _search_candidates_for_query(
         self,
@@ -1492,9 +1842,10 @@ class GraphRAGService:
         max_papers: int,
         query: str,
         ranking_profile: str = "balanced",
+        paper_range_years: int | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, int | float]]:
         start = perf_counter()
-        ranked: list[tuple[float, dict[str, Any]]] = []
+        ranked: list[tuple[float, float, dict[str, Any]]] = []
         seen_ids: set[str] = set()
         seen_titles: set[str] = set()
         input_count = len(papers)
@@ -1506,11 +1857,19 @@ class GraphRAGService:
             citation_weight = 0.42
             recency_weight = 0.12
             relation_weight = 0.26
+            representative_weight = 0.0
+        elif profile == "domain_authority":
+            relevance_weight = 0.18
+            citation_weight = 0.52
+            recency_weight = 0.08
+            relation_weight = 0.0
+            representative_weight = 0.22
         else:
             relevance_weight = 0.62
             citation_weight = 0.26
             recency_weight = 0.12
             relation_weight = 0.0
+            representative_weight = 0.0
 
         for paper in papers:
             normalized = self._normalize_retrieved_paper(paper)
@@ -1536,24 +1895,34 @@ class GraphRAGService:
             age = max(0, current_year - year) if year > 0 else 12
             recency_signal = max(0.0, 1.0 - min(age, 12) / 12)
             relation_signal = self._seed_relation_signal(str(normalized.get("seed_relation") or ""))
+            representative_signal = self._domain_representative_signal(normalized)
             score = (
                 relevance * relevance_weight
                 + citation_signal * citation_weight
                 + recency_signal * recency_weight
                 + relation_signal * relation_weight
+                + representative_signal * representative_weight
             )
 
-            ranked.append((score, normalized))
+            ranked.append((score, representative_signal, normalized))
 
         ranked.sort(
             key=lambda item: (
                 item[0],
-                self._safe_int(item[1].get("citation_count")),
-                self._safe_int(item[1].get("year")),
+                self._safe_int(item[2].get("citation_count")),
+                item[1],
+                self._safe_int(item[2].get("year")),
             ),
             reverse=True,
         )
-        selected = [item for _score, item in ranked[:max_papers]]
+        if profile == "domain_authority":
+            selected = self._select_ranked_with_year_coverage(
+                ranked=ranked,
+                max_papers=max_papers,
+                paper_range_years=paper_range_years,
+            )
+        else:
+            selected = [item for _score, _representative, item in ranked[:max_papers]]
         stats = {
             "input": input_count,
             "deduped": len(ranked),
@@ -1561,6 +1930,95 @@ class GraphRAGService:
             "elapsed_seconds": perf_counter() - start,
         }
         return selected, stats
+
+    def _select_ranked_with_year_coverage(
+        self,
+        *,
+        ranked: list[tuple[float, float, dict[str, Any]]],
+        max_papers: int,
+        paper_range_years: int | None,
+    ) -> list[dict[str, Any]]:
+        if max_papers <= 0:
+            return []
+        normalized_range = self._normalize_paper_range_years(paper_range_years)
+        if normalized_range is None or normalized_range <= 1:
+            return [item for _score, _representative, item in ranked[:max_papers]]
+
+        current_year = datetime.now(timezone.utc).year
+        target_years = list(range(max(1, current_year - normalized_range + 1), current_year + 1))
+        selected: list[dict[str, Any]] = []
+        selected_ids: set[str] = set()
+
+        for year in target_years:
+            for _score, _representative, paper in ranked:
+                paper_year = self._safe_int(paper.get("year"))
+                paper_id = self._paper_key(str(paper.get("paper_id") or ""))
+                if paper_year != year or not paper_id or paper_id in selected_ids:
+                    continue
+                selected.append(paper)
+                selected_ids.add(paper_id)
+                break
+
+        if len(selected) >= max_papers:
+            return selected[:max_papers]
+
+        for _score, _representative, paper in ranked:
+            paper_id = self._paper_key(str(paper.get("paper_id") or ""))
+            if not paper_id or paper_id in selected_ids:
+                continue
+            selected.append(paper)
+            selected_ids.add(paper_id)
+            if len(selected) >= max_papers:
+                break
+        return selected
+
+    @staticmethod
+    def _domain_representative_signal(paper: dict[str, Any]) -> float:
+        title = str(paper.get("title") or "").strip().lower()
+        venue = str(paper.get("venue") or "").strip().lower()
+        citation_count = GraphRAGService._safe_int(paper.get("citation_count"))
+
+        citation_signal = min(1.0, math.log1p(citation_count) / 9.0)
+        title_bonus = 0.0
+        if any(
+            token in title
+            for token in (
+                "survey",
+                "systematic review",
+                "review",
+                "overview",
+                "benchmark",
+                "tutorial",
+                "foundation",
+                "foundations",
+                "taxonomy",
+            )
+        ):
+            title_bonus = 0.22
+        elif any(token in title for token in ("analysis", "comparison", "empirical study", "best practices")):
+            title_bonus = 0.1
+
+        venue_bonus = 0.0
+        if any(
+            token in venue
+            for token in (
+                "nature",
+                "science",
+                "neurips",
+                "nips",
+                "icml",
+                "iclr",
+                "cvpr",
+                "aaai",
+                "acl",
+                "kdd",
+                "jmlr",
+                "tpami",
+            )
+        ):
+            venue_bonus = 0.12
+
+        return min(1.0, citation_signal * 0.72 + title_bonus + venue_bonus)
 
     def _normalize_retrieved_paper(self, paper: dict[str, Any]) -> dict[str, Any]:
         fields = []

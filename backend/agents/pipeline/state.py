@@ -34,7 +34,6 @@ class PipelineState(TypedDict):
 
     # parallel
     lineage_data: dict[str, Any] | None
-    heat_reports: list[dict[str, Any]]
     research_gaps: list[dict[str, Any]]
     critic_notes: list[str]
 
@@ -93,7 +92,6 @@ def build_initial_state(
         graph_edges=[],
         graph_payload=None,
         lineage_data=None,
-        heat_reports=[],
         research_gaps=[],
         critic_notes=[],
         report_draft=None,

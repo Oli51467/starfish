@@ -934,6 +934,12 @@ async function initGraph() {
   await graphInstance.render();
   if (isSingleSeedGraph(props.graph) && graphInstance?.zoomTo) {
     await graphInstance.zoomTo(1, { duration: 0 });
+  } else if (graphInstance?.fitView) {
+    try {
+      await graphInstance.fitView();
+    } catch {
+      // no-op
+    }
   }
   lastGraphSignature = graphPayloadSignature(props.graph);
   bindNodeClick();

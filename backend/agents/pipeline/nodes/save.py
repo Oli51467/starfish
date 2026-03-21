@@ -4,7 +4,6 @@ import asyncio
 
 from agents.pipeline.state import PipelineState, append_message
 from models.schemas import (
-    CollectionCreateRequest,
     KnowledgeGraphBuildRequest,
     KnowledgeGraphResponse,
     SavedPaperCreateRequest,
@@ -25,11 +24,6 @@ def _safe_int(value: object, fallback: int = 0) -> int:
         return fallback
 
 
-def _normalize_collection_name(raw_goal: str) -> str:
-    safe = str(raw_goal or "").strip() or "AutoResearch"
-    return safe[:20]
-
-
 def _build_pipeline_payload(state: PipelineState) -> dict:
     lineage = state.get("lineage_data") if isinstance(state.get("lineage_data"), dict) else {}
     lineage_nodes = len(lineage.get("ancestors") or []) + len(lineage.get("descendants") or [])
@@ -40,7 +34,6 @@ def _build_pipeline_payload(state: PipelineState) -> dict:
         "checkpoint_feedback": dict(state.get("checkpoint_feedback") or {}),
         "parallel_outputs_summary": {
             "lineage_nodes": lineage_nodes,
-            "heat_reports": len(state.get("heat_reports") or []),
             "research_gaps": len(state.get("research_gaps") or []),
             "critic_notes": len(state.get("critic_notes") or []),
         },
@@ -75,34 +68,9 @@ def _paper_metadata_from_dict(payload: dict) -> SavedPaperMetadata:
     )
 
 
-async def _ensure_collection_id(user: UserProfile, collection_name: str) -> str:
-    collection_service = get_collection_service()
-    listed = await asyncio.to_thread(collection_service.list_collections, user=user)
-    for item in listed.items:
-        if str(item.name).strip() == collection_name:
-            return item.collection_id
-
-    try:
-        created = await asyncio.to_thread(
-            collection_service.create_collection,
-            user=user,
-            request=CollectionCreateRequest(name=collection_name),
-        )
-        return created.collection_id
-    except ValueError:
-        # handle name conflict race
-        listed = await asyncio.to_thread(collection_service.list_collections, user=user)
-        for item in listed.items:
-            if str(item.name).strip() == collection_name:
-                return item.collection_id
-    return ""
-
-
 async def _save_top_papers(user: UserProfile, state: PipelineState, errors: list[str]) -> None:
     collection_service = get_collection_service()
     top_papers = _top_papers(state, limit=5)
-    collection_name = _normalize_collection_name(str(state.get("research_goal") or ""))
-    collection_id = await _ensure_collection_id(user, collection_name)
 
     for paper in top_papers:
         paper_id = str(paper.get("paper_id") or "").strip()
@@ -110,8 +78,9 @@ async def _save_top_papers(user: UserProfile, state: PipelineState, errors: list
             continue
         request = SavedPaperCreateRequest(
             paper_id=paper_id,
-            collection_ids=[collection_id] if collection_id else [],
+            collection_ids=[],
             metadata=_paper_metadata_from_dict(paper),
+            save_source="auto_research",
         )
         try:
             await asyncio.to_thread(

@@ -47,10 +47,11 @@ def create_collection(
 
 @router.get("/collections", response_model=CollectionListResponse)
 def list_collections(
+    manual_only: bool = Query(default=False),
     user: UserProfile = Depends(get_current_user_profile),
     collection_service: CollectionService = Depends(get_collection_service),
 ) -> CollectionListResponse:
-    return collection_service.list_collections(user=user)
+    return collection_service.list_collections(user=user, manual_only=manual_only)
 
 
 @router.put("/collections/{collection_id}", response_model=CollectionItem)
@@ -106,6 +107,7 @@ def list_saved_papers(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=50),
     collection_id: str | None = Query(default=None),
+    manual_only: bool = Query(default=False),
     read_status: SavedPaperReadStatus | None = Query(default=None),
     keyword: str | None = Query(default=None),
     sort_by: SavedPaperSortBy = Query(default="saved_at"),
@@ -119,6 +121,7 @@ def list_saved_papers(
             page=page,
             page_size=page_size,
             collection_id=collection_id,
+            manual_only=manual_only,
             read_status=read_status,
             keyword=keyword,
             sort_by=sort_by,

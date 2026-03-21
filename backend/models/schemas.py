@@ -33,6 +33,7 @@ KnowledgeNodeType = Literal["paper", "entity", "domain"]
 KnowledgeEdgeType = Literal["mentions", "belongs_to", "related", "covers"]
 SavedPaperReadStatus = Literal["unread", "reading", "completed"]
 SavedPaperSortBy = Literal["saved_at", "last_opened_at", "year", "citation_count"]
+SavedPaperSaveSource = Literal["manual", "auto_research"]
 SortOrder = Literal["asc", "desc"]
 
 
@@ -152,6 +153,56 @@ class PipelineReportResponse(BaseModel):
 
 
 class PipelineStopResponse(BaseModel):
+    stopped: bool = False
+
+
+class ResearchSessionStartRequest(BaseModel):
+    input_type: PipelineInputType
+    input_value: str = Field(..., min_length=1, max_length=240)
+    paper_range_years: int | None = Field(default=None, ge=1, le=30)
+    quick_mode: bool = False
+
+
+class ResearchSessionStartResponse(BaseModel):
+    session_id: str
+    status: Literal["started"] = "started"
+
+
+class ResearchSessionResumeRequest(BaseModel):
+    feedback: str = ""
+
+
+class ResearchSessionResumeResponse(BaseModel):
+    resumed: bool = False
+    status: Literal["resumed", "no_pending_checkpoint", "session_closed"] = "resumed"
+
+
+class ResearchSessionStateResponse(BaseModel):
+    session_id: str
+    status: str
+    progress: int = Field(default=0, ge=0, le=100)
+    current_node: str = ""
+    waiting_checkpoint: str = ""
+    input_type: PipelineInputType = "arxiv_id"
+    input_value: str = ""
+    paper_range_years: int | None = None
+    quick_mode: bool = False
+    research_goal: str = ""
+    execution_plan: list[str] = Field(default_factory=list)
+    checkpoint_feedback: dict[str, str] = Field(default_factory=dict)
+    graph: dict[str, Any] | None = None
+    lineage: dict[str, Any] | None = None
+    report: str | None = None
+    report_id: str | None = None
+    history_id: str | None = None
+    research_gaps: list[dict[str, Any]] = Field(default_factory=list)
+    critic_notes: list[str] = Field(default_factory=list)
+    papers: list[dict[str, Any]] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+    messages: list[str] = Field(default_factory=list)
+
+
+class ResearchSessionStopResponse(BaseModel):
     stopped: bool = False
 
 
@@ -420,6 +471,7 @@ class SavedPaperCreateRequest(BaseModel):
     paper_id: str = Field(..., min_length=1, max_length=200)
     collection_ids: list[str] = Field(default_factory=list, max_length=20)
     metadata: SavedPaperMetadata | None = None
+    save_source: SavedPaperSaveSource | None = None
 
 
 class SavedPaperStatusUpdateRequest(BaseModel):

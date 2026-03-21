@@ -1,9 +1,14 @@
-import { computed, ref, watch } from 'vue';
+import { computed, onUnmounted, ref, watch } from 'vue';
 
 import {
   buildKnowledgeGraph,
+  createResearchWebSocket,
   getKnowledgeGraph,
+  getResearchSession,
   retrieveKnowledgePapers,
+  resumeResearchSession,
+  startResearchSession,
+  stopResearchSession,
   updateResearchHistoryLineageStatus
 } from '../api';
 import { buildKnowledgeGraphSets } from '../components/graph/knowledgeGraphModel';
@@ -25,15 +30,15 @@ function toStatusText(status) {
 function resolveRetrievalCopyMap(inputType) {
   if (inputType === 'arxiv_id' || inputType === 'doi') {
     return {
-      search_web: { title: '定位目标论文', detail: '已确认目标论文及其上下文。' },
-      retrieve: { title: '扩展关联论文', detail: '已补充目标论文的引用与被引关系。' },
-      filter: { title: '筛选核心论文', detail: '已筛选高相关论文。' }
+      search_web: { title: 'Planner Agent', detail: '已确认目标论文与研究边界。' },
+      retrieve: { title: 'Retriever Agent', detail: '已扩展目标论文的引用与被引关系。' },
+      filter: { title: 'Critic Agent', detail: '已完成相关性与证据强度筛选。' }
     };
   }
   return {
-    search_web: { title: '明确研究范围', detail: '已完成检索范围确认。' },
-    retrieve: { title: '收集候选论文', detail: '已补充候选论文集合。' },
-    filter: { title: '筛选核心论文', detail: '已筛选高相关论文。' }
+    search_web: { title: 'Planner Agent', detail: '已完成研究范围与关键词确认。' },
+    retrieve: { title: 'Retriever Agent', detail: '已补充候选论文集合。' },
+    filter: { title: 'Critic Agent', detail: '已完成相关性与证据强度筛选。' }
   };
 }
 
@@ -81,19 +86,26 @@ function createRetrievalRunningMessage(inputType) {
 
 function createRunningRetrievalLogs(inputType) {
   const sourceDetail = inputType === 'domain'
-    ? '正在确认检索方向并收集候选论文...'
-    : '正在定位目标论文并扩展关联研究...';
+    ? '正在拆解研究目标并生成检索关键词...'
+    : '正在定位目标论文并规划扩展检索路径...';
   return [
     {
-      title: inputType === 'domain' ? '研究方向确认' : '目标论文定位',
+      title: 'Planner Agent',
       detail: sourceDetail,
       status: 'doing',
       statusText: toStatusText('doing'),
       metaText: ''
     },
     {
-      title: '候选论文筛选',
-      detail: '等待候选结果返回后继续。',
+      title: 'Retriever Agent',
+      detail: '正在并行拉取多源候选论文...',
+      status: 'doing',
+      statusText: toStatusText('doing'),
+      metaText: ''
+    },
+    {
+      title: 'Critic Agent',
+      detail: '等待候选结果返回后启动证据审查。',
       status: 'pending',
       statusText: toStatusText('pending'),
       metaText: ''
@@ -106,14 +118,14 @@ function createFallbackRetrievalLogs(retrieval) {
   const candidateCount = Number(retrieval?.candidate_count || 0);
   return [
     {
-      title: '候选论文收集',
+      title: 'Retriever Agent',
       detail: '候选论文收集已完成。',
       status: 'done',
       statusText: toStatusText('done'),
       metaText: ''
     },
     {
-      title: '候选论文筛选',
+      title: 'Critic Agent',
       detail: `已从 ${candidateCount} 个候选中筛选 ${selectedCount} 篇论文。`,
       status: 'done',
       statusText: toStatusText('done'),
@@ -122,12 +134,58 @@ function createFallbackRetrievalLogs(retrieval) {
   ];
 }
 
+function normalizeProviderLabel(providerName) {
+  const normalized = String(providerName || '').trim().toLowerCase();
+  if (normalized === 'openalex') return 'Retriever SubAgent · OpenAlex';
+  if (normalized === 'semantic_scholar') return 'Retriever SubAgent · Semantic Scholar';
+  if (normalized === 'arxiv') return 'Retriever SubAgent · arXiv';
+  return `Retriever SubAgent · ${providerName || 'Unknown'}`;
+}
+
+function createRetrievalAuditLogs(retrieval) {
+  const logs = [];
+  const providerStats = Array.isArray(retrieval?.provider_stats) ? retrieval.provider_stats : [];
+  for (const item of providerStats) {
+    const count = Number(item?.count || 0);
+    const statusRaw = String(item?.status || '').trim().toLowerCase();
+    const isFallback = statusRaw === 'fallback';
+    logs.push({
+      title: normalizeProviderLabel(item?.provider),
+      detail: isFallback
+        ? '该检索子通道出现波动，已自动降级。'
+        : `该检索子通道完成候选收集（${count} 条）。`,
+      status: isFallback ? 'fallback' : 'done',
+      statusText: toStatusText(isFallback ? 'fallback' : 'done'),
+      metaText: ''
+    });
+  }
+
+  const papers = Array.isArray(retrieval?.papers) ? retrieval.papers : [];
+  if (papers.length) {
+    const years = papers
+      .map((item) => Number(item?.year || 0))
+      .filter((value) => Number.isFinite(value) && value > 0);
+    const span = years.length ? Math.max(...years) - Math.min(...years) : 0;
+    logs.push({
+      title: 'Quality SubAgent',
+      detail: span >= 5
+        ? `时间覆盖较完整（跨度 ${span} 年），可继续建图。`
+        : `时间覆盖偏窄（跨度 ${span} 年），后续将补充对照证据。`,
+      status: span >= 5 ? 'done' : 'fallback',
+      statusText: toStatusText(span >= 5 ? 'done' : 'fallback'),
+      metaText: ''
+    });
+  }
+
+  return logs;
+}
+
 function normalizeBuildTraceStep(step) {
   const phase = String(step?.phase || '').trim().toLowerCase();
   const status = String(step?.status || '').toLowerCase() === 'fallback' ? 'fallback' : 'done';
   if (phase === 'store_graph') {
     return {
-      title: '整理并保存图谱',
+      title: 'Verifier Agent',
       detail: status === 'fallback' ? '图谱保存阶段出现波动，已保留当前结果。' : '图谱结构已整理完成。',
       status,
       statusText: toStatusText(status),
@@ -135,7 +193,7 @@ function normalizeBuildTraceStep(step) {
     };
   }
   return {
-    title: '抽取主题关系',
+    title: 'Graph Builder Agent',
     detail: status === 'fallback' ? '关系整理阶段出现波动，已继续后续流程。' : '论文与主题关系已完成整理。',
     status,
     statusText: toStatusText(status),
@@ -146,14 +204,14 @@ function normalizeBuildTraceStep(step) {
 function createRunningBuildLogs() {
   return [
     {
-      title: '组织论文关系',
+      title: 'Graph Builder Agent',
       detail: '正在整理论文之间的关联结构...',
       status: 'doing',
       statusText: toStatusText('doing'),
       metaText: ''
     },
     {
-      title: '生成图谱视图',
+      title: 'Verifier Agent',
       detail: '等待结构整理完成后生成图谱。',
       status: 'pending',
       statusText: toStatusText('pending'),
@@ -167,14 +225,14 @@ function createFallbackBuildLogs(result) {
   const entityCount = Number(result?.entity_count || 0);
   return [
     {
-      title: '组织论文关系',
+      title: 'Graph Builder Agent',
       detail: '已完成论文关系整理。',
       status: 'done',
       statusText: toStatusText('done'),
       metaText: ''
     },
     {
-      title: '生成图谱视图',
+      title: 'Verifier Agent',
       detail: `已构建图谱内容（论文 ${paperCount}，主题 ${entityCount}）。`,
       status: 'done',
       statusText: toStatusText('done'),
@@ -320,6 +378,38 @@ function extractPanoramaStats(rawGraph) {
   };
 }
 
+const RESEARCH_NODE_LABEL = {
+  planner: 'Planner Agent',
+  router: 'Router Agent',
+  search: 'Retriever Agent',
+  graph_build: 'Graph Builder Agent',
+  checkpoint_1: 'Human Checkpoint',
+  parallel: 'Lineage Agent',
+  checkpoint_2: 'Lineage Checkpoint'
+};
+
+const STEP_FLOW_ORDER = ['retrieve', 'checkpoint', 'graph', 'lineage'];
+const STEP_FINAL_NODE = {
+  retrieve: 'search',
+  checkpoint: 'checkpoint_1',
+  graph: 'graph_build',
+  lineage: 'parallel'
+};
+
+function resolveStepKeyByNode(rawNode) {
+  const node = String(rawNode || '').trim().toLowerCase();
+  if (!node) return 'retrieve';
+  if (node === 'checkpoint_1') return 'checkpoint';
+  if (node === 'graph_build') return 'graph';
+  if (['parallel', 'synthesizer', 'checkpoint_2', 'report', 'save'].includes(node)) return 'lineage';
+  return 'retrieve';
+}
+
+function resolveNodeLabel(rawNode) {
+  const node = String(rawNode || '').trim().toLowerCase();
+  return RESEARCH_NODE_LABEL[node] || `Agent · ${node || 'unknown'}`;
+}
+
 export function usePaperWorkflow({
   seedRef,
   resultViewRef,
@@ -365,7 +455,7 @@ export function usePaperWorkflow({
       index: 4,
       key: 'lineage',
       title: '生成血缘树',
-      description: '围绕核心论文展开祖先与后代演化脉络。',
+      description: '围绕起点论文展开祖先与后代演化脉络。',
       status: 'pending',
       message: '',
       logs: [],
@@ -378,6 +468,24 @@ export function usePaperWorkflow({
   const errorMessage = ref('');
   const lineageSeed = ref({ paperId: '', title: '' });
   const checkpointContext = ref(null);
+  const researchSessionId = ref('');
+  const unifiedRuntimeActive = ref(false);
+  const waitingResearchCheckpoint = ref('');
+  const runtimeAutoResumingCheckpoint = ref('');
+  const lineageRevealApproved = ref(false);
+  const pendingLineagePayload = ref(null);
+  const graphSnapshotSignature = ref('');
+  const runtimeSeed = ref({
+    input_type: 'domain',
+    input_value: '',
+    paper_range_years: null,
+    quick_mode: false,
+    auto_lineage: false,
+    lineage_seed_paper_id: ''
+  });
+  let researchSocket = null;
+  let researchPollTimer = null;
+  const runtimeNodeLogCursor = new Map();
 
   const {
     lineage: lineageData,
@@ -388,6 +496,20 @@ export function usePaperWorkflow({
   } = usePaperStore();
 
   const canViewLineage = computed(() => Boolean(lineageLoading.value || lineageData.value));
+
+  function closeResearchSocket() {
+    if (researchSocket) {
+      researchSocket.close();
+      researchSocket = null;
+    }
+  }
+
+  function stopResearchPolling() {
+    if (researchPollTimer) {
+      window.clearInterval(researchPollTimer);
+      researchPollTimer = null;
+    }
+  }
 
   const activeViewKey = computed({
     get() {
@@ -484,6 +606,12 @@ export function usePaperWorkflow({
     updateStepSignal();
   }
 
+  function setStepStatusByKey(stepKey, status, message = '') {
+    const target = steps.value.find((item) => item.key === String(stepKey || '').trim());
+    if (!target) return;
+    setStepStatus(target.index, status, message);
+  }
+
   function setStepLogs(stepKey, logs) {
     const target = steps.value.find((item) => item.key === String(stepKey || '').trim());
     if (!target) return;
@@ -495,6 +623,75 @@ export function usePaperWorkflow({
     if (!target) return;
     if (!Object.prototype.hasOwnProperty.call(target, 'action')) return;
     target.action = action || null;
+  }
+
+  function appendStepLog(stepKey, logItem) {
+    const target = steps.value.find((item) => item.key === String(stepKey || '').trim());
+    if (!target) return;
+    const nextLog = {
+      title: String(logItem?.title || '').trim() || '执行记录',
+      detail: String(logItem?.detail || '').trim() || '工作流运行中。',
+      status: String(logItem?.status || 'pending').trim() || 'pending',
+      statusText: toStatusText(logItem?.status || 'pending'),
+      metaText: String(logItem?.metaText || '').trim()
+    };
+    const previous = Array.isArray(target.logs) ? target.logs[target.logs.length - 1] : null;
+    if (
+      previous
+      && previous.title === nextLog.title
+      && previous.detail === nextLog.detail
+      && previous.status === nextLog.status
+    ) {
+      return;
+    }
+    target.logs = [...(Array.isArray(target.logs) ? target.logs : []), nextLog];
+  }
+
+  function updateLatestNodeLog(stepKey, node, patch = {}) {
+    const cursorKey = `${String(stepKey || '').trim()}::${String(node || '').trim()}`;
+    const logIndex = runtimeNodeLogCursor.get(cursorKey);
+    if (!Number.isInteger(logIndex)) return;
+    const target = steps.value.find((item) => item.key === String(stepKey || '').trim());
+    if (!target || !Array.isArray(target.logs) || !target.logs[logIndex]) return;
+
+    const nextStatus = String(patch?.status || target.logs[logIndex].status || 'pending');
+    target.logs[logIndex] = {
+      ...target.logs[logIndex],
+      ...patch,
+      status: nextStatus,
+      statusText: toStatusText(nextStatus)
+    };
+  }
+
+  function appendNodeLog(node, detail, status = 'doing') {
+    const stepKey = resolveStepKeyByNode(node);
+    const title = resolveNodeLabel(node);
+    const target = steps.value.find((item) => item.key === stepKey);
+    if (!target) return;
+    const logs = Array.isArray(target.logs) ? [...target.logs] : [];
+    const logIndex = logs.length;
+    logs.push({
+      title,
+      detail: String(detail || '').trim() || '工作流运行中。',
+      status,
+      statusText: toStatusText(status),
+      metaText: ''
+    });
+    target.logs = logs;
+    runtimeNodeLogCursor.set(`${stepKey}::${String(node || '').trim()}`, logIndex);
+  }
+
+  function resetUnifiedRuntimeState() {
+    stopResearchPolling();
+    closeResearchSocket();
+    researchSessionId.value = '';
+    unifiedRuntimeActive.value = false;
+    waitingResearchCheckpoint.value = '';
+    runtimeAutoResumingCheckpoint.value = '';
+    lineageRevealApproved.value = false;
+    pendingLineagePayload.value = null;
+    graphSnapshotSignature.value = '';
+    runtimeNodeLogCursor.clear();
   }
 
   async function playRetrievalTrace(rawSteps) {
@@ -533,6 +730,7 @@ export function usePaperWorkflow({
   }
 
   function resetSteps() {
+    runtimeNodeLogCursor.clear();
     for (const step of steps.value) {
       step.status = 'pending';
       step.message = '';
@@ -547,6 +745,8 @@ export function usePaperWorkflow({
   function resetLineageState() {
     clearLineage();
     lineageSeed.value = { paperId: '', title: '' };
+    pendingLineagePayload.value = null;
+    graphSnapshotSignature.value = '';
     activeViewKey.value = 'graph';
   }
 
@@ -564,6 +764,633 @@ export function usePaperWorkflow({
       }
     ];
     setStepLogs(stepKey, nextLogs);
+  }
+
+  function normalizeRuntimeSeed(seed = {}) {
+    return {
+      input_type: String(seed?.input_type || 'domain').trim().toLowerCase() === 'domain'
+        ? 'domain'
+        : (String(seed?.input_type || '').trim().toLowerCase() === 'doi' ? 'doi' : 'arxiv_id'),
+      input_value: String(seed?.input_value || '').trim(),
+      paper_range_years: parsePaperRangeYears(seed?.paper_range_years),
+      quick_mode: Boolean(seed?.quick_mode),
+      auto_lineage: Boolean(seed?.auto_lineage),
+      lineage_seed_paper_id: String(seed?.lineage_seed_paper_id || '').trim()
+    };
+  }
+
+  function shouldFallbackToLegacy(error) {
+    const message = String(error?.message || '').trim().toLowerCase();
+    if (!message) return false;
+    if (message.includes('403') || message.includes('401') || message.includes('forbidden')) {
+      return false;
+    }
+    return (
+      message.includes('404')
+      || message.includes('session_not_found')
+      || message.includes('/api/research')
+      || message.includes('not found')
+      || message.includes('connection')
+    );
+  }
+
+  function resolveCheckpointStepKey(checkpointNode) {
+    const normalized = String(checkpointNode || '').trim().toLowerCase();
+    if (normalized === 'checkpoint_1') return 'checkpoint';
+    if (normalized === 'checkpoint_2') return 'lineage';
+    return '';
+  }
+
+  function resolveCheckpointActionLabel(checkpointNode) {
+    const normalized = String(checkpointNode || '').trim().toLowerCase();
+    if (normalized === 'checkpoint_2') {
+      return '确认生成血缘树';
+    }
+    return '确认需求并继续';
+  }
+
+  function shouldAutoConfirmCheckpoint(checkpointNode) {
+    const normalized = String(checkpointNode || '').trim().toLowerCase();
+    return normalized === 'checkpoint_1';
+  }
+
+  function shouldAutoRevealLineageView() {
+    return lineageRevealApproved.value;
+  }
+
+  function finalizeAllRuntimeTraceStatuses() {
+    for (const step of steps.value) {
+      if (!Array.isArray(step.logs) || !step.logs.length) continue;
+      step.logs = step.logs.map((log) => {
+        const status = String(log?.status || '').trim().toLowerCase();
+        if (status === 'doing' || status === 'pending') {
+          return {
+            ...log,
+            status: 'done',
+            statusText: toStatusText('done')
+          };
+        }
+        return log;
+      });
+    }
+  }
+
+  function markEarlierStepsDone(stepKey) {
+    const targetIndex = STEP_FLOW_ORDER.indexOf(String(stepKey || '').trim());
+    if (targetIndex <= 0) return;
+    for (let index = 0; index < targetIndex; index += 1) {
+      const key = STEP_FLOW_ORDER[index];
+      const step = steps.value.find((item) => item.key === key);
+      if (!step) continue;
+      const status = String(step.status || '').trim().toLowerCase();
+      if (!['done', 'skipped'].includes(status)) {
+        step.status = 'done';
+      }
+    }
+  }
+
+  function buildGraphSignature(rawGraph = {}) {
+    const graphId = String(rawGraph?.graph_id || '').trim();
+    const nodes = Array.isArray(rawGraph?.nodes) ? rawGraph.nodes : [];
+    const edges = Array.isArray(rawGraph?.edges) ? rawGraph.edges : [];
+    const nodePreview = nodes
+      .map((item) => String(item?.id || item?.label || '').trim())
+      .filter(Boolean)
+      .sort()
+      .slice(0, 24)
+      .join('|');
+    const edgePreview = edges
+      .map((item) => `${String(item?.source || '').trim()}>${String(item?.target || '').trim()}`)
+      .filter((item) => item !== '>')
+      .sort()
+      .slice(0, 24)
+      .join('|');
+    return `${graphId || 'graph'}#n${nodes.length}#e${edges.length}#${nodePreview}#${edgePreview}`;
+  }
+
+  function buildPreviewGraphSignature(query, papers) {
+    const safeQuery = String(query || '').trim().toLowerCase();
+    const sourcePapers = Array.isArray(papers) ? papers : [];
+    const topIds = sourcePapers
+      .slice(0, 12)
+      .map((item) => String(item?.paper_id || item?.title || '').trim())
+      .filter(Boolean)
+      .sort()
+      .join('|');
+    return `preview#${safeQuery}#${sourcePapers.length}#${topIds}`;
+  }
+
+  function commitGraphData(nextGraph, signature) {
+    if (!nextGraph || typeof nextGraph !== 'object') return false;
+    const nextSignature = String(signature || '').trim();
+    if (nextSignature && nextSignature === graphSnapshotSignature.value) {
+      return false;
+    }
+    graphData.value = nextGraph;
+    graphSnapshotSignature.value = nextSignature;
+    return true;
+  }
+
+  function hydrateLineageSeedFromRuntimeSnapshot(snapshot = {}) {
+    const retrieval = { papers: Array.isArray(snapshot?.papers) ? snapshot.papers : [] };
+    const graphResult = snapshot?.graph && typeof snapshot.graph === 'object'
+      ? snapshot.graph
+      : graphData.value;
+    const seedPaper = resolveLineageSeed({
+      seedInputType: snapshot?.input_type || runtimeSeed.value.input_type,
+      seedInputValue: snapshot?.input_value || runtimeSeed.value.input_value,
+      retrieval,
+      graphResult
+    });
+
+    const preferredLineageSeedPaperId = String(runtimeSeed.value.lineage_seed_paper_id || '').trim();
+    if (preferredLineageSeedPaperId) {
+      const preferredPaper = retrieval.papers.find(
+        (item) => String(item?.paper_id || '').trim() === preferredLineageSeedPaperId
+      );
+      seedPaper.paperId = preferredLineageSeedPaperId;
+      seedPaper.title = String(preferredPaper?.title || seedPaper.title || preferredLineageSeedPaperId).trim();
+    }
+    lineageSeed.value = seedPaper;
+  }
+
+  function hydrateRuntimeArtifacts(snapshot = {}) {
+    if (snapshot?.graph && typeof snapshot.graph === 'object') {
+      commitGraphData(snapshot.graph, buildGraphSignature(snapshot.graph));
+    } else if (Array.isArray(snapshot?.papers) && snapshot.papers.length) {
+      const previewQuery = snapshot?.research_goal || snapshot?.input_value || runtimeSeed.value.input_value;
+      const previewSignature = buildPreviewGraphSignature(previewQuery, snapshot.papers);
+      const previewGraph = buildRetrievalPreviewGraph(previewQuery, snapshot.papers);
+      commitGraphData(previewGraph, previewSignature);
+    }
+
+    if (snapshot?.lineage && typeof snapshot.lineage === 'object') {
+      pendingLineagePayload.value = snapshot.lineage;
+      if (lineageRevealApproved.value) {
+        lineageData.value = snapshot.lineage;
+        lineageErrorMessage.value = '';
+        if (shouldAutoRevealLineageView()) {
+          activeViewKey.value = 'lineage';
+        }
+      }
+    }
+
+    if (Array.isArray(snapshot?.papers) && snapshot.papers.length) {
+      hydrateLineageSeedFromRuntimeSnapshot(snapshot);
+    }
+  }
+
+  function handleRuntimeNodeStart(event = {}) {
+    const node = String(event?.node || '').trim().toLowerCase();
+    if (!node) return;
+    const stepKey = resolveStepKeyByNode(node);
+    const step = steps.value.find((item) => item.key === stepKey);
+    if (!step) return;
+
+    markEarlierStepsDone(stepKey);
+    const runningMessage = node === 'parallel'
+      ? '正在生成血缘树...'
+      : `正在执行 ${resolveNodeLabel(node)}。`;
+    setStepStatus(step.index, 'running', runningMessage);
+    appendNodeLog(node, runningMessage, 'doing');
+    if (node === 'graph_build') {
+      void refreshRuntimeSnapshot().catch(() => {
+        // keep graph-building stage resilient when snapshot fetch is transiently unavailable
+      });
+    }
+    setStepAction('checkpoint', null);
+    if (node !== 'checkpoint_2') {
+      setStepAction('lineage', null);
+    }
+  }
+
+  function handleRuntimeThinking(event = {}) {
+    const node = String(event?.node || '').trim().toLowerCase();
+    if (!node) return;
+    const content = String(event?.content || '').trim();
+    if (!content) return;
+    const stepKey = resolveStepKeyByNode(node);
+    if (!steps.value.find((item) => item.key === stepKey)) return;
+    const cursorKey = `${stepKey}::${node}`;
+    if (runtimeNodeLogCursor.has(cursorKey)) {
+      updateLatestNodeLog(stepKey, node, { detail: content, status: 'doing' });
+      return;
+    }
+    appendNodeLog(node, content, 'doing');
+  }
+
+  async function handleRuntimeNodeComplete(event = {}) {
+    const node = String(event?.node || '').trim().toLowerCase();
+    if (!node) return;
+    const stepKey = resolveStepKeyByNode(node);
+    const summary = String(event?.summary || '').trim() || `${resolveNodeLabel(node)} 已完成。`;
+    const target = steps.value.find((item) => item.key === stepKey);
+    if (!target) return;
+
+    const cursorKey = `${stepKey}::${node}`;
+    if (!runtimeNodeLogCursor.has(cursorKey)) {
+      appendNodeLog(node, summary, 'done');
+    } else {
+      updateLatestNodeLog(stepKey, node, { detail: summary, status: 'done' });
+    }
+    if (STEP_FINAL_NODE[stepKey] === node) {
+      setStepStatus(target.index, 'done', summary);
+      if (stepKey === 'checkpoint') {
+        setStepAction('checkpoint', null);
+      }
+    } else {
+      setStepStatus(target.index, 'running', summary);
+    }
+
+    if (node === 'search' || node === 'graph_build' || node === 'parallel') {
+      try {
+        const snapshot = await getResearchSession(researchSessionId.value, {
+          accessToken: accessTokenRef.value || ''
+        });
+        hydrateRuntimeArtifacts(snapshot || {});
+      } catch {
+        // keep websocket-driven states even if snapshot retrieval fails
+      }
+    }
+  }
+
+  function handleRuntimePause(event = {}) {
+    const checkpoint = String(event?.checkpoint || '').trim().toLowerCase();
+    const stepKey = resolveCheckpointStepKey(checkpoint);
+    if (!stepKey) return;
+    waitingResearchCheckpoint.value = checkpoint;
+    const message = String(event?.message || '').trim() || '等待确认后继续执行。';
+    const target = steps.value.find((item) => item.key === stepKey);
+    if (!target) return;
+
+    if (shouldAutoConfirmCheckpoint(checkpoint)) {
+      const autoMessage = '知识图谱已生成，系统将自动继续后续分析。';
+      setStepStatus(target.index, 'done', autoMessage);
+      appendStepLog(stepKey, {
+        title: resolveNodeLabel(checkpoint),
+        detail: autoMessage,
+        status: 'done'
+      });
+      setStepAction(stepKey, null);
+      runtimeAutoResumingCheckpoint.value = checkpoint;
+      void continueAfterUnifiedCheckpoint(stepKey, { auto: true });
+      return;
+    }
+
+    let actionMessage = message;
+    if (checkpoint === 'checkpoint_2') {
+      actionMessage = '知识图谱已完成，请确认是否生成并展示血缘树。';
+    }
+    setStepStatus(target.index, 'action_required', actionMessage);
+    appendStepLog(stepKey, {
+      title: resolveNodeLabel(checkpoint),
+      detail: actionMessage,
+      status: 'doing'
+    });
+    setStepAction(stepKey, {
+      label: resolveCheckpointActionLabel(checkpoint),
+      disabled: false
+    });
+  }
+
+  async function refreshRuntimeSnapshot({ finalize = false } = {}) {
+    const sessionId = String(researchSessionId.value || '').trim();
+    if (!sessionId) return null;
+    const snapshot = await getResearchSession(sessionId, {
+      accessToken: accessTokenRef.value || ''
+    });
+    hydrateRuntimeArtifacts(snapshot || {});
+
+    const status = String(snapshot?.status || '').trim().toLowerCase();
+    if (status === 'completed') {
+      finalizeAllRuntimeTraceStatuses();
+      setStepStatusByKey('retrieve', 'done', steps.value.find((item) => item.key === 'retrieve')?.message || '论文检索完成。');
+      setStepStatusByKey('checkpoint', 'done', steps.value.find((item) => item.key === 'checkpoint')?.message || '检查点确认完成。');
+      setStepStatusByKey('graph', 'done', steps.value.find((item) => item.key === 'graph')?.message || '知识图谱生成完成。');
+      const lineagePayload = snapshot?.lineage && typeof snapshot.lineage === 'object' ? snapshot.lineage : null;
+      const ancestors = Array.isArray(lineagePayload?.ancestors) ? lineagePayload.ancestors.length : 0;
+      const descendants = Array.isArray(lineagePayload?.descendants) ? lineagePayload.descendants.length : 0;
+      const lineageCount = ancestors + descendants;
+      if (lineagePayload) {
+        setStepStatusByKey(
+          'lineage',
+          'done',
+          lineageCount > 0 ? `血缘树已生成，关联论文 ${lineageCount} 篇。` : '血缘树已生成。'
+        );
+      } else {
+        setStepStatusByKey('lineage', 'failed', '血缘树未生成成功，请重试。');
+        appendFailureLog('lineage', '本次未产出可展示的血缘树结果。');
+      }
+      setStepAction('checkpoint', null);
+      setStepAction('lineage', lineagePayload ? null : {
+        label: '重新生成血缘树',
+        disabled: false
+      });
+      waitingResearchCheckpoint.value = '';
+      runtimeAutoResumingCheckpoint.value = '';
+      graphLoading.value = false;
+      unifiedRuntimeActive.value = false;
+      stopResearchPolling();
+      closeResearchSocket();
+      return snapshot;
+    }
+
+    if (finalize) {
+      return snapshot;
+    }
+
+    if (status === 'failed') {
+      const currentNode = String(snapshot?.current_node || '').trim().toLowerCase();
+      const stepKey = resolveStepKeyByNode(currentNode);
+      const detail = Array.isArray(snapshot?.errors) && snapshot.errors.length
+        ? String(snapshot.errors[snapshot.errors.length - 1] || '').trim()
+        : '研究流程执行失败。';
+      errorMessage.value = detail || '研究流程执行失败。';
+      setStepStatusByKey(stepKey, 'failed', errorMessage.value);
+      appendFailureLog(stepKey, errorMessage.value);
+      graphLoading.value = false;
+      unifiedRuntimeActive.value = false;
+      stopResearchPolling();
+      closeResearchSocket();
+      return snapshot;
+    }
+
+    if (status === 'stopped') {
+      setStepStatusByKey('lineage', 'failed', '流程已停止。');
+      graphLoading.value = false;
+      unifiedRuntimeActive.value = false;
+      runtimeAutoResumingCheckpoint.value = '';
+      stopResearchPolling();
+      closeResearchSocket();
+      return snapshot;
+    }
+
+    const waiting = String(snapshot?.waiting_checkpoint || '').trim().toLowerCase();
+    if (waiting) {
+      waitingResearchCheckpoint.value = waiting;
+      if (shouldAutoConfirmCheckpoint(waiting) && runtimeAutoResumingCheckpoint.value !== waiting) {
+        runtimeAutoResumingCheckpoint.value = waiting;
+        void continueAfterUnifiedCheckpoint(resolveCheckpointStepKey(waiting), { auto: true });
+      }
+      const stepKey = resolveCheckpointStepKey(waiting);
+      const target = steps.value.find((item) => item.key === stepKey);
+      if (target) {
+        if (shouldAutoConfirmCheckpoint(waiting)) {
+          setStepStatus(target.index, 'done', '知识图谱已生成，系统自动继续后续分析。');
+          setStepAction(stepKey, null);
+        } else {
+          const actionMessage = waiting === 'checkpoint_2'
+            ? '知识图谱已完成，请确认是否生成并展示血缘树。'
+            : '等待确认后继续执行。';
+          setStepStatus(target.index, 'action_required', actionMessage);
+          setStepAction(stepKey, {
+            label: resolveCheckpointActionLabel(waiting),
+            disabled: false
+          });
+        }
+      }
+    } else {
+      runtimeAutoResumingCheckpoint.value = '';
+    }
+
+    return snapshot;
+  }
+
+  function startResearchPolling() {
+    if (researchPollTimer || !researchSessionId.value) return;
+    researchPollTimer = window.setInterval(() => {
+      void refreshRuntimeSnapshot().catch(() => {
+        // keep polling silently while runtime is active
+      });
+    }, 1400);
+  }
+
+  function handleRuntimeError(event = {}) {
+    const message = String(event?.error || event?.message || '').trim() || '研究流程执行失败。';
+    errorMessage.value = message;
+    const checkpointStep = resolveCheckpointStepKey(waitingResearchCheckpoint.value);
+    const fallbackStep = checkpointStep || resolveStepKeyByNode(event?.node || 'lineage');
+    setStepStatusByKey(fallbackStep, 'failed', message);
+    appendFailureLog(fallbackStep, message);
+    graphLoading.value = false;
+    unifiedRuntimeActive.value = false;
+    stopResearchPolling();
+    closeResearchSocket();
+  }
+
+  function handleRuntimeStopped() {
+    setStepStatusByKey('lineage', 'failed', '流程已停止。');
+    graphLoading.value = false;
+    unifiedRuntimeActive.value = false;
+    waitingResearchCheckpoint.value = '';
+    stopResearchPolling();
+    closeResearchSocket();
+  }
+
+  async function handleRuntimeEvent(event = {}) {
+    const type = String(event?.type || '').trim().toLowerCase();
+    if (!type) return;
+    if (type === 'node_start') {
+      handleRuntimeNodeStart(event);
+      return;
+    }
+    if (type === 'thinking') {
+      handleRuntimeThinking(event);
+      return;
+    }
+    if (type === 'node_complete') {
+      await handleRuntimeNodeComplete(event);
+      return;
+    }
+    if (type === 'pause') {
+      handleRuntimePause(event);
+      return;
+    }
+    if (type === 'session_complete') {
+      try {
+        await refreshRuntimeSnapshot({ finalize: true });
+      } catch {
+        graphLoading.value = false;
+        unifiedRuntimeActive.value = false;
+      }
+      return;
+    }
+    if (type === 'error') {
+      handleRuntimeError(event);
+      return;
+    }
+    if (type === 'stopped') {
+      handleRuntimeStopped();
+    }
+  }
+
+  function bindResearchSocket(sessionId) {
+    closeResearchSocket();
+    const token = String(accessTokenRef.value || '').trim();
+    researchSocket = createResearchWebSocket(sessionId, token);
+
+    researchSocket.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        void handleRuntimeEvent(payload).catch(() => {
+          // keep websocket session resilient to occasional event handling failures
+        });
+      } catch {
+        // ignore malformed websocket events
+      }
+    };
+
+    researchSocket.onerror = () => {
+      if (!unifiedRuntimeActive.value) return;
+      startResearchPolling();
+    };
+
+    researchSocket.onclose = () => {
+      researchSocket = null;
+      if (unifiedRuntimeActive.value) {
+        startResearchPolling();
+      }
+    };
+  }
+
+  async function continueAfterUnifiedCheckpoint(stepKey, options = {}) {
+    const auto = Boolean(options?.auto);
+    const safeStepKey = String(stepKey || '').trim();
+    const checkpoint = String(waitingResearchCheckpoint.value || '').trim().toLowerCase();
+    if (!safeStepKey || !checkpoint) return;
+    if (resolveCheckpointStepKey(checkpoint) !== safeStepKey) return;
+    const sessionId = String(researchSessionId.value || '').trim();
+    if (!sessionId) return;
+
+    if (!auto) {
+      setStepAction(safeStepKey, {
+        label: resolveCheckpointActionLabel(checkpoint),
+        disabled: true
+      });
+    }
+
+    try {
+      const result = await resumeResearchSession(
+        sessionId,
+        '',
+        { accessToken: accessTokenRef.value || '' }
+      );
+      if (!result?.resumed) {
+        if (!auto) {
+          setStepAction(safeStepKey, {
+            label: resolveCheckpointActionLabel(checkpoint),
+            disabled: false
+          });
+        } else {
+          const target = steps.value.find((item) => item.key === safeStepKey);
+          if (target) {
+            setStepStatus(target.index, 'action_required', '自动继续失败，请手动确认后继续。');
+          }
+          setStepAction(safeStepKey, {
+            label: resolveCheckpointActionLabel(checkpoint),
+            disabled: false
+          });
+        }
+        return;
+      }
+      waitingResearchCheckpoint.value = '';
+      runtimeAutoResumingCheckpoint.value = '';
+      if (checkpoint === 'checkpoint_2') {
+        lineageRevealApproved.value = true;
+        if (pendingLineagePayload.value && typeof pendingLineagePayload.value === 'object') {
+          lineageData.value = pendingLineagePayload.value;
+          lineageErrorMessage.value = '';
+        }
+        if (lineageData.value) {
+          activeViewKey.value = 'lineage';
+        }
+      }
+      const target = steps.value.find((item) => item.key === safeStepKey);
+      if (target) {
+        if (auto && safeStepKey === 'checkpoint') {
+          setStepStatus(target.index, 'done', '知识图谱已生成，系统自动继续后续分析。');
+        } else if (checkpoint === 'checkpoint_2') {
+          setStepStatus(target.index, 'running', '已确认，正在生成血缘树...');
+          appendStepLog('lineage', {
+            title: resolveNodeLabel('parallel'),
+            detail: '正在生成血缘树...',
+            status: 'doing'
+          });
+        } else {
+          setStepStatus(
+            target.index,
+            'running',
+            auto ? '已自动确认，正在继续执行。' : '已确认，正在继续执行。'
+          );
+        }
+      }
+    } catch (error) {
+      const message = error?.message || '继续执行失败。';
+      errorMessage.value = message;
+      runtimeAutoResumingCheckpoint.value = '';
+      if (!auto) {
+        setStepAction(safeStepKey, {
+          label: resolveCheckpointActionLabel(checkpoint),
+          disabled: false
+        });
+      } else {
+        const target = steps.value.find((item) => item.key === safeStepKey);
+        if (target) {
+          setStepStatus(target.index, 'action_required', '自动继续失败，请手动确认后继续。');
+        }
+        setStepAction(safeStepKey, {
+          label: resolveCheckpointActionLabel(checkpoint),
+          disabled: false
+        });
+      }
+    }
+  }
+
+  async function stopUnifiedRuntimeSession({ silent = true } = {}) {
+    const sessionId = String(researchSessionId.value || '').trim();
+    if (!sessionId || !unifiedRuntimeActive.value) {
+      resetUnifiedRuntimeState();
+      return;
+    }
+    try {
+      await stopResearchSession(sessionId, { accessToken: accessTokenRef.value || '' });
+    } catch {
+      if (!silent) {
+        errorMessage.value = '停止流程失败。';
+      }
+    } finally {
+      resetUnifiedRuntimeState();
+      graphLoading.value = false;
+    }
+  }
+
+  async function runUnifiedWorkflow(seed) {
+    runtimeSeed.value = normalizeRuntimeSeed(seed || {});
+    const payload = {
+      input_type: runtimeSeed.value.input_type,
+      input_value: runtimeSeed.value.input_value,
+      paper_range_years: runtimeSeed.value.paper_range_years,
+      quick_mode: runtimeSeed.value.quick_mode
+    };
+    const created = await startResearchSession(payload, { accessToken: accessTokenRef.value || '' });
+    const sessionId = String(created?.session_id || '').trim();
+    if (!sessionId) {
+      throw new Error('research_session_missing');
+    }
+
+    unifiedRuntimeActive.value = true;
+    researchSessionId.value = sessionId;
+    waitingResearchCheckpoint.value = '';
+    runtimeAutoResumingCheckpoint.value = '';
+    lineageRevealApproved.value = false;
+
+    setStepStatus(1, 'running', createRetrievalRunningMessage(runtimeSeed.value.input_type));
+    setStepLogs('retrieve', []);
+    bindResearchSocket(sessionId);
+    startResearchPolling();
+    void refreshRuntimeSnapshot().catch(() => {
+      // initial snapshot is optional; websocket events are the primary source
+    });
   }
 
   async function finalizeLineageSetup({
@@ -592,11 +1419,11 @@ export function usePaperWorkflow({
     }
 
     lineageSeed.value = seedPaper;
-    setStepStatus(4, 'action_required', `已找到核心论文：${seedPaper.title || seedPaper.paperId || '未命名论文'}。`);
+    setStepStatus(4, 'action_required', `已定位血缘树起点论文：${seedPaper.title || seedPaper.paperId || '未命名论文'}。`);
     setStepLogs('lineage', [
       {
-        title: '核心论文确认',
-        detail: '已确认本次血缘树的核心论文，可继续生成。',
+        title: '起点论文确认',
+        detail: '已确认本次血缘树起点论文，可继续生成。',
         status: 'done',
         statusText: toStatusText('done'),
         metaText: ''
@@ -647,7 +1474,7 @@ export function usePaperWorkflow({
     if (!Array.isArray(result.build_steps) || !result.build_steps.length) {
       setStepLogs('graph', createFallbackBuildLogs(result));
     }
-    graphData.value = resolvedGraph;
+    commitGraphData(resolvedGraph, buildGraphSignature(resolvedGraph));
     const panoramaStats = extractPanoramaStats(resolvedGraph || result || {});
     setStepStatus(
       3,
@@ -665,7 +1492,7 @@ export function usePaperWorkflow({
     });
   }
 
-  async function continueAfterCheckpoint() {
+  async function continueAfterLegacyCheckpoint() {
     if (graphLoading.value) return;
     const context = checkpointContext.value;
     if (!context) return;
@@ -726,7 +1553,7 @@ export function usePaperWorkflow({
     }
   }
 
-  async function runWorkflow() {
+  async function runLegacyWorkflow() {
     if (graphLoading.value) return;
     resetSteps();
     resetLineageState();
@@ -738,7 +1565,7 @@ export function usePaperWorkflow({
     const inputType = String(seed?.input_type || 'domain').trim().toLowerCase();
     const quickMode = Boolean(seed?.quick_mode);
     const preferredLineageSeedPaperId = String(seed?.lineage_seed_paper_id || '').trim();
-    const shouldAutoGenerateLineage = Boolean(seed?.auto_lineage);
+    const shouldAutoGenerateLineage = false;
 
     try {
       setStepStatus(1, 'running', createRetrievalRunningMessage(inputType));
@@ -758,48 +1585,82 @@ export function usePaperWorkflow({
       if (!Array.isArray(retrieval.steps) || !retrieval.steps.length) {
         setStepLogs('retrieve', createFallbackRetrievalLogs(retrieval));
       }
+      const retrievalAuditLogs = createRetrievalAuditLogs(retrieval);
+      if (retrievalAuditLogs.length) {
+        const retrievalStep = steps.value.find((item) => item.key === 'retrieve');
+        const existingLogs = Array.isArray(retrievalStep?.logs) ? retrievalStep.logs : [];
+        setStepLogs('retrieve', [...existingLogs, ...retrievalAuditLogs]);
+      }
 
       const selectedCount = Number(retrieval?.selected_count || 0);
-      setStepStatus(1, 'done', `已筛选 ${selectedCount} 篇核心论文。`);
-      graphData.value = buildRetrievalPreviewGraph(retrievalQuery, retrieval.papers || []);
+      setStepStatus(1, 'done', `已筛选 ${selectedCount} 篇相关论文。`);
+      const previewPapers = retrieval.papers || [];
+      const previewSignature = buildPreviewGraphSignature(retrievalQuery, previewPapers);
+      commitGraphData(buildRetrievalPreviewGraph(retrievalQuery, previewPapers), previewSignature);
 
-      setStepStatus(2, 'action_required', '请确认当前需求与检索范围，然后继续。');
+      setStepStatus(2, 'done', '知识图谱生成阶段将自动继续。');
       setStepLogs('checkpoint', [
         {
-          title: '检索结果概览',
-          detail: `当前主题“${retrievalQuery}”已筛选 ${selectedCount} 篇核心论文。`,
+          title: 'Coordinator Agent',
+          detail: `已自动继续：${formatSearchRangeLabel(inputType, paperRangeYears)}，${quickMode ? '快速模式' : '普通模式'}。`,
           status: 'done',
           statusText: toStatusText('done'),
           metaText: ''
-        },
-        {
-          title: '需求确认',
-          detail: `请确认研究范围（${formatSearchRangeLabel(inputType, paperRangeYears)}，${quickMode ? '快速模式' : '普通模式'}）。`,
-          status: 'doing',
-          statusText: toStatusText('doing'),
-          metaText: ''
         }
       ]);
-      setStepAction('checkpoint', {
-        label: '确认需求并继续',
-        disabled: false
-      });
-
-      checkpointContext.value = {
-        retrieval,
-        retrievalQuery,
-        inputType,
-        seedInputValue: String(seed?.input_value || '').trim(),
-        paperRangeYears,
-        preferredLineageSeedPaperId,
-        shouldAutoGenerateLineage
-      };
+      setStepAction('checkpoint', null);
+      checkpointContext.value = null;
+      try {
+        await runGraphStage({
+          retrieval,
+          retrievalQuery,
+          inputType,
+          seedInputValue: String(seed?.input_value || '').trim(),
+          paperRangeYears,
+          preferredLineageSeedPaperId,
+          shouldAutoGenerateLineage
+        });
+      } catch (graphError) {
+        errorMessage.value = graphError?.message || '知识图谱生成失败。';
+        setStepStatus(3, 'failed', '知识图谱步骤失败。');
+        appendFailureLog('graph', errorMessage.value);
+      }
     } catch (error) {
       errorMessage.value = error?.message || '工作流执行失败。';
       setStepStatus(1, 'failed', '论文检索失败。');
       appendFailureLog('retrieve', errorMessage.value);
     } finally {
       graphLoading.value = false;
+      updateStepSignal();
+    }
+  }
+
+  async function runWorkflow() {
+    if (graphLoading.value) return;
+
+    await stopUnifiedRuntimeSession({ silent: true });
+    resetSteps();
+    resetLineageState();
+    checkpointContext.value = null;
+    errorMessage.value = '';
+    graphLoading.value = true;
+
+    const seed = seedRef.value || {};
+    try {
+      await runUnifiedWorkflow(seed);
+      errorMessage.value = '';
+    } catch (error) {
+      resetUnifiedRuntimeState();
+      if (shouldFallbackToLegacy(error)) {
+        graphLoading.value = false;
+        await runLegacyWorkflow();
+        return;
+      }
+      errorMessage.value = error?.message || '研究流程启动失败。';
+      setStepStatus(1, 'failed', '研究流程启动失败。');
+      appendFailureLog('retrieve', errorMessage.value);
+      graphLoading.value = false;
+    } finally {
       updateStepSignal();
     }
   }
@@ -840,8 +1701,8 @@ export function usePaperWorkflow({
 
     setStepStatus(4, 'running', '正在生成血缘树...');
     pushLineageLog({
-      title: '核心论文确认',
-      detail: '已确认核心论文，开始构建血缘脉络。',
+      title: '起点论文确认',
+      detail: '已确认起点论文，开始构建血缘脉络。',
       status: 'done'
     });
     const requestLogIndex = pushLineageLog({
@@ -933,10 +1794,18 @@ export function usePaperWorkflow({
   async function handleStepAction(stepKey) {
     const key = String(stepKey || '').trim().toLowerCase();
     if (key === 'checkpoint') {
-      await continueAfterCheckpoint();
+      if (unifiedRuntimeActive.value) {
+        await continueAfterUnifiedCheckpoint('checkpoint');
+        return;
+      }
+      await continueAfterLegacyCheckpoint();
       return;
     }
     if (key === 'lineage') {
+      if (unifiedRuntimeActive.value && waitingResearchCheckpoint.value === 'checkpoint_2') {
+        await continueAfterUnifiedCheckpoint('lineage');
+        return;
+      }
       await generateLineageTree();
     }
   }
@@ -948,6 +1817,11 @@ export function usePaperWorkflow({
     },
     { immediate: true }
   );
+
+  onUnmounted(() => {
+    void stopUnifiedRuntimeSession({ silent: true });
+    resetUnifiedRuntimeState();
+  });
 
   return {
     steps,

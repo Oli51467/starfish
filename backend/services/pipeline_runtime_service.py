@@ -43,7 +43,6 @@ class PipelineRuntimeService:
     def __init__(self) -> None:
         self._sessions: dict[str, _PipelineSessionRuntime] = {}
         self._sessions_lock = asyncio.Lock()
-        self._graph = None
 
     async def start_session(
         self,
@@ -84,9 +83,14 @@ class PipelineRuntimeService:
         runtime.updated_at = datetime.now(timezone.utc)
 
         try:
-            graph = self._get_graph()
-            final_state = await graph.ainvoke(runtime.state)
-            runtime.state = final_state
+            state = runtime.state
+            for node_fn in self._resolve_pipeline_nodes():
+                await self.ensure_active(session_id)
+                next_state = await node_fn(state)
+                if isinstance(next_state, dict):
+                    state = next_state
+                    runtime.state = next_state
+                    runtime.updated_at = datetime.now(timezone.utc)
 
             if runtime.stop_requested:
                 runtime.status = "stopped"
@@ -103,9 +107,9 @@ class PipelineRuntimeService:
                 {
                     "type": "session_complete",
                     "progress": int(runtime.state.get("progress") or 100),
-                    "current_node": runtime.state.get("current_node") or "save",
+                    "current_node": runtime.state.get("current_node") or "parallel",
                     "report_id": runtime.state.get("report_id"),
-                    "summary": "Pipeline 执行完成。",
+                    "summary": "研究流程执行完成。",
                 },
             )
 
@@ -139,12 +143,23 @@ class PipelineRuntimeService:
                 },
             )
 
-    def _get_graph(self):
-        if self._graph is None:
-            from agents.pipeline.graph import build_pipeline_graph
+    def _resolve_pipeline_nodes(self) -> list:
+        from agents.pipeline.nodes.checkpoints import human_checkpoint_1, human_checkpoint_2
+        from agents.pipeline.nodes.graph_build import graph_build_node
+        from agents.pipeline.nodes.parallel import parallel_analysis_node
+        from agents.pipeline.nodes.planner import planner_node
+        from agents.pipeline.nodes.router import router_node
+        from agents.pipeline.nodes.search import search_node
 
-            self._graph = build_pipeline_graph()
-        return self._graph
+        return [
+            planner_node,
+            router_node,
+            search_node,
+            graph_build_node,
+            human_checkpoint_1,
+            human_checkpoint_2,
+            parallel_analysis_node,
+        ]
 
     async def can_access(self, session_id: str, user_id: str) -> bool:
         runtime = await self._get_runtime(session_id)
@@ -199,7 +214,7 @@ class PipelineRuntimeService:
         *,
         checkpoint: str,
         message: str,
-        timeout_seconds: int = 30,
+        timeout_seconds: int | None = 30,
     ) -> str:
         runtime = await self._require_runtime(session_id)
         await self.ensure_active(session_id)
@@ -213,16 +228,22 @@ class PipelineRuntimeService:
                 "type": "pause",
                 "checkpoint": checkpoint,
                 "message": str(message or ""),
-                "timeout": max(1, int(timeout_seconds)),
+                "timeout": 0 if timeout_seconds is None or int(timeout_seconds) <= 0 else max(1, int(timeout_seconds)),
             },
         )
 
         try:
-            await asyncio.wait_for(runtime.resume_event.wait(), timeout=max(1, int(timeout_seconds)))
+            if timeout_seconds is None or int(timeout_seconds) <= 0:
+                await runtime.resume_event.wait()
+                feedback = runtime.resume_feedback
+            else:
+                await asyncio.wait_for(runtime.resume_event.wait(), timeout=max(1, int(timeout_seconds)))
+                feedback = runtime.resume_feedback
         except TimeoutError:
             feedback = ""
         else:
-            feedback = runtime.resume_feedback
+            if timeout_seconds is None or int(timeout_seconds) <= 0:
+                feedback = runtime.resume_feedback
         finally:
             runtime.waiting_checkpoint = None
             runtime.resume_event = None
@@ -279,6 +300,19 @@ class PipelineRuntimeService:
         if runtime.user_id != user_id:
             raise PipelineRuntimeError("forbidden")
         return runtime.state, runtime.status
+
+    async def get_session_snapshot(self, session_id: str, user_id: str) -> dict[str, Any]:
+        runtime = await self._require_runtime(session_id)
+        if runtime.user_id != user_id:
+            raise PipelineRuntimeError("forbidden")
+        return {
+            "session_id": runtime.session_id,
+            "status": runtime.status,
+            "waiting_checkpoint": runtime.waiting_checkpoint or "",
+            "state": runtime.state,
+            "created_at": runtime.created_at.isoformat(),
+            "updated_at": runtime.updated_at.isoformat(),
+        }
 
     async def stream_events(
         self,

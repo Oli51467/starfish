@@ -76,7 +76,19 @@ class CollectionRepository:
                        c.emoji,
                        c.created_at,
                        c.updated_at,
-                       COUNT(sp.id) AS paper_count
+                       COUNT(sp.id) AS paper_count,
+                       COUNT(
+                         CASE
+                           WHEN COALESCE(sp.paper_payload->>'save_source', 'manual') = 'manual' THEN 1
+                           ELSE NULL
+                         END
+                       ) AS manual_paper_count,
+                       COUNT(
+                         CASE
+                           WHEN COALESCE(sp.paper_payload->>'save_source', 'manual') = 'auto_research' THEN 1
+                           ELSE NULL
+                         END
+                       ) AS auto_paper_count
                 FROM collections AS c
                 LEFT JOIN collection_papers AS cp
                   ON cp.collection_id = c.id
@@ -451,6 +463,7 @@ class CollectionRepository:
         page: int,
         page_size: int,
         collection_id: str | None = None,
+        manual_only: bool = False,
         read_status: str | None = None,
         keyword: str | None = None,
         sort_by: str = "saved_at",
@@ -467,6 +480,9 @@ class CollectionRepository:
 
         conditions = ["sp.user_id = %s"]
         params: list[Any] = [str(user_id).strip()]
+
+        if manual_only:
+            conditions.append("COALESCE(sp.paper_payload->>'save_source', 'manual') = 'manual'")
 
         safe_collection_id = str(collection_id or "").strip()
         if safe_collection_id:

@@ -299,7 +299,7 @@ async function fetchCollections({ accessToken = '' } = {}) {
   collectionsLoading.value = true;
   collectionsErrorMessage.value = '';
   try {
-    const payload = await getCollections({ accessToken });
+    const payload = await getCollections({ accessToken, manualOnly: true });
     const items = Array.isArray(payload?.items) ? payload.items : [];
     collections.value = items.map((item) => ({
       collection_id: String(item?.collection_id || '').trim(),
@@ -323,6 +323,7 @@ async function querySavedPapers({
   page = 1,
   pageSize = 20,
   collectionId = '',
+  manualOnly = true,
   readStatus = '',
   keyword = '',
   sortBy = 'saved_at',
@@ -336,6 +337,7 @@ async function querySavedPapers({
       page,
       pageSize,
       collectionId,
+      manualOnly,
       readStatus,
       keyword,
       sortBy,
@@ -477,6 +479,7 @@ async function ensureBookmarkIndexLoaded({ accessToken = '', force = false } = {
         accessToken,
         page,
         pageSize: 50,
+        manualOnly: true,
         sortBy: 'saved_at',
         sortOrder: 'desc'
       });
@@ -520,7 +523,8 @@ async function togglePaperSaved({
     const created = await savePaper({
       paper_id: safePaperId,
       collection_ids: Array.isArray(collectionIds) ? collectionIds : [],
-      metadata: metadata && typeof metadata === 'object' ? metadata : undefined
+      metadata: metadata && typeof metadata === 'object' ? metadata : undefined,
+      save_source: 'manual'
     }, { accessToken });
     const normalized = normalizeSavedPaperItem(created || {});
     patchSavedPaperInLocalState(normalized);

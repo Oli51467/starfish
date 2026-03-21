@@ -40,13 +40,21 @@ async def search_node(state: PipelineState) -> PipelineState:
 
     papers = [paper.model_dump(mode="json") for paper in retrieval.papers]
     seed_paper = _resolve_seed_paper(request.input_type, papers)
+    resolved_query = str(retrieval.query or request.query).strip() or str(request.query or "").strip()
+    next_input_value = str(state.get("input_value") or "").strip()
+    if str(request.input_type or "").strip().lower() == "domain" and resolved_query:
+        next_input_value = resolved_query
 
-    summary = f"检索完成，共筛选 {len(papers)} 篇论文。"
+    if str(request.input_type or "").strip().lower() == "domain" and resolved_query and resolved_query != str(request.query or "").strip():
+        summary = f"检索完成，已将检索词标准化为“{resolved_query}”，共筛选 {len(papers)} 篇论文。"
+    else:
+        summary = f"检索完成，共筛选 {len(papers)} 篇论文。"
     await runtime.emit_thinking(session_id, _NODE, summary)
     await runtime.emit_node_complete(session_id, _NODE, 25, summary)
 
     return {
         **state,
+        "input_value": next_input_value,
         "papers": papers,
         "seed_paper": seed_paper,
         "current_node": _NODE,

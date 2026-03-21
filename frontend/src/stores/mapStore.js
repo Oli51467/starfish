@@ -6,7 +6,7 @@ const mapInput = ref({
   input_type: '',
   input_value: '',
   paper_range_years: '10',
-  quick_mode: false,
+  quick_mode: true,
   depth: 2
 });
 

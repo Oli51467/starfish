@@ -183,6 +183,15 @@ function formatBeijingTime(rawTimestamp) {
   return beijingTimeFormatter.format(parsed);
 }
 
+function formatLandscapeLogTitle(stepKey, rawTimestamp) {
+  const key = String(stepKey || '').trim().toLowerCase();
+  const timeText = formatBeijingTime(rawTimestamp);
+  if (key === 'research') return `Planner Agent ${timeText}`;
+  if (key === 'retrieve') return `Retriever Agents ${timeText}`;
+  if (key === 'graph') return `Graph Builder Agent ${timeText}`;
+  return `Coordinator Agent ${timeText}`;
+}
+
 function normalizeLandscapeMessage(stepKey, rawMessage, { running = false } = {}) {
   const key = String(stepKey || '').trim().toLowerCase();
   const message = String(rawMessage || '').trim();
@@ -257,7 +266,7 @@ function normalizeStepLogs(taskLogs) {
     const key = String(item?.step_key || '').trim();
     if (!Object.prototype.hasOwnProperty.call(grouped, key)) continue;
     const nextLog = {
-      title: formatBeijingTime(item?.timestamp),
+      title: formatLandscapeLogTitle(key, item?.timestamp),
       detail: normalizeLandscapeMessage(key, item?.message, { running: toLogStatus(item?.level) === 'doing' }),
       status: toLogStatus(item?.level),
       statusText: toLogStatusText(item?.level),

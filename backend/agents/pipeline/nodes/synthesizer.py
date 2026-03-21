@@ -64,21 +64,18 @@ def _build_fallback_report(state: PipelineState) -> str:
 ## 4. 技术演化脉络
 - 血缘节点总数：{lineage_count}
 
-## 5. 社区热度分析
-- 覆盖论文：{len(state.get('heat_reports') or [])}
-
-## 6. 研究空白与机会
+## 5. 研究空白与机会
 {chr(10).join(gap_lines) if gap_lines else '- 暂无明显空白'}
 
-## 7. 批评性审查
+## 6. 批评性审查
 {chr(10).join(critic_lines)}
 
-## 8. 研究建议
+## 7. 研究建议
 - 建议 1：补充跨时间跨度的关键文献对照。
 - 建议 2：围绕高影响论文构建可复现实验路线。
 - 建议 3：针对识别出的空白方向设计最小可验证实验。
 
-## 9. 参考文献
+## 8. 参考文献
 {chr(10).join(reference_lines) if reference_lines else '- 暂无'}
 """.strip()
     return report
@@ -91,7 +88,6 @@ async def _synthesize_with_llm(state: PipelineState) -> str:
         "graph_nodes": len(state.get("graph_nodes") or []),
         "graph_edges": len(state.get("graph_edges") or []),
         "lineage": state.get("lineage_data") or {},
-        "heat_reports": (state.get("heat_reports") or [])[:3],
         "research_gaps": (state.get("research_gaps") or [])[:3],
         "critic_notes": state.get("critic_notes") or [],
         "top_papers": sorted(
@@ -108,9 +104,9 @@ async def _synthesize_with_llm(state: PipelineState) -> str:
                     "role": "system",
                     "content": (
                         "你是科研综合分析师。"
-                        "请输出 Markdown 报告，包含 9 个章节："
+                        "请输出 Markdown 报告，包含 8 个章节："
                         "研究目标与范围、领域全景、核心论文分析、技术演化脉络、"
-                        "社区热度分析、研究空白与机会、批评性审查、研究建议、参考文献。"
+                        "研究空白与机会、批评性审查、研究建议、参考文献。"
                     ),
                 },
                 {

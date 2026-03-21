@@ -37,11 +37,7 @@ const routes = [
   },
   {
     path: '/research/pipeline',
-    name: 'research-pipeline',
-    component: HomeView,
-    meta: {
-      requiresAuth: true
-    }
+    redirect: { name: 'home' }
   },
   {
     path: '/research-history',

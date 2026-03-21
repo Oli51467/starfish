@@ -276,39 +276,39 @@ export function getLineage(
   return request(`/api/lineage/${encodeURIComponent(paperId)}?${query.toString()}`);
 }
 
-export function startPipelineSession(payload, { accessToken = '' } = {}) {
-  return request('/api/pipeline/start', {
+export function startResearchSession(payload, { accessToken = '' } = {}) {
+  return request('/api/research/start', {
     method: 'POST',
     headers: buildAuthHeaders(accessToken, { 'Content-Type': 'application/json' }),
     body: JSON.stringify(payload || {})
   });
 }
 
-export function resumePipelineSession(sessionId, feedback = '', { accessToken = '' } = {}) {
-  return request(`/api/pipeline/resume/${encodeURIComponent(sessionId)}`, {
+export function resumeResearchSession(sessionId, feedback = '', { accessToken = '' } = {}) {
+  return request(`/api/research/resume/${encodeURIComponent(sessionId)}`, {
     method: 'POST',
     headers: buildAuthHeaders(accessToken, { 'Content-Type': 'application/json' }),
     body: JSON.stringify({ feedback: String(feedback || '') })
   });
 }
 
-export function stopPipelineSession(sessionId, { accessToken = '' } = {}) {
-  return request(`/api/pipeline/stop/${encodeURIComponent(sessionId)}`, {
+export function stopResearchSession(sessionId, { accessToken = '' } = {}) {
+  return request(`/api/research/stop/${encodeURIComponent(sessionId)}`, {
     method: 'POST',
     headers: buildAuthHeaders(accessToken)
   });
 }
 
-export function getPipelineReport(sessionId, { accessToken = '' } = {}) {
-  return request(`/api/pipeline/report/${encodeURIComponent(sessionId)}`, {
+export function getResearchSession(sessionId, { accessToken = '' } = {}) {
+  return request(`/api/research/session/${encodeURIComponent(sessionId)}`, {
     headers: buildAuthHeaders(accessToken)
   });
 }
 
-export function createPipelineWebSocket(sessionId, accessToken = '') {
+export function createResearchWebSocket(sessionId, accessToken = '') {
   const token = String(accessToken || '').trim();
   const wsBase = getWsBaseUrl();
-  const url = `${wsBase}/api/pipeline/ws/${encodeURIComponent(sessionId)}?token=${encodeURIComponent(token)}`;
+  const url = `${wsBase}/api/research/ws/${encodeURIComponent(sessionId)}?token=${encodeURIComponent(token)}`;
   return new WebSocket(url);
 }
 
@@ -320,8 +320,11 @@ export function createCollection(payload, { accessToken = '' } = {}) {
   });
 }
 
-export function getCollections({ accessToken = '' } = {}) {
-  return request('/api/collections', {
+export function getCollections({ accessToken = '', manualOnly = false } = {}) {
+  const query = new URLSearchParams();
+  if (manualOnly) query.set('manual_only', 'true');
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+  return request(`/api/collections${suffix}`, {
     headers: buildAuthHeaders(accessToken)
   });
 }
@@ -354,6 +357,7 @@ export function getSavedPapers(
     page = 1,
     pageSize = 20,
     collectionId = '',
+    manualOnly = false,
     readStatus = '',
     keyword = '',
     sortBy = 'saved_at',
@@ -365,6 +369,7 @@ export function getSavedPapers(
   query.set('page', String(Math.max(1, Number(page) || 1)));
   query.set('page_size', String(Math.max(1, Math.min(50, Number(pageSize) || 20))));
   if (String(collectionId || '').trim()) query.set('collection_id', String(collectionId).trim());
+  if (manualOnly) query.set('manual_only', 'true');
   if (String(readStatus || '').trim()) query.set('read_status', String(readStatus).trim());
   if (String(keyword || '').trim()) query.set('keyword', String(keyword).trim());
   query.set('sort_by', String(sortBy || 'saved_at').trim());

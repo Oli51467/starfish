@@ -7,17 +7,6 @@
         <aside class="panel collection-sidebar">
           <div class="panel-head">
             <h2>我的论文</h2>
-            <button
-              class="btn collection-create-btn"
-              type="button"
-              aria-label="新建分组"
-              title="新建分组"
-              @click="promptCreateCollection"
-            >
-              <svg viewBox="0 0 16 16" aria-hidden="true">
-                <path d="M8 3.2v9.6M3.2 8h9.6" />
-              </svg>
-            </button>
           </div>
           <div class="panel-body">
             <div class="collection-nav">
@@ -27,8 +16,21 @@
                 type="button"
                 @click="setActiveCollection('')"
               >
-                全部论文
-                <span>{{ savedPapersTotal }}</span>
+                <span class="collection-name-wrap">
+                  <span class="collection-name">全部论文</span>
+                </span>
+                <span class="collection-nav-count">{{ allCount }}</span>
+              </button>
+              <button
+                class="collection-nav-item mono"
+                :class="{ 'is-active': activeCollectionId === CLASSIFIED_COLLECTION_ID }"
+                type="button"
+                @click="setActiveCollection(CLASSIFIED_COLLECTION_ID)"
+              >
+                <span class="collection-name-wrap">
+                  <span class="collection-name">分类论文</span>
+                </span>
+                <span class="collection-nav-count">{{ classifiedCount }}</span>
               </button>
               <button
                 class="collection-nav-item mono"
@@ -36,27 +38,10 @@
                 type="button"
                 @click="setActiveCollection(UNCLASSIFIED_COLLECTION_ID)"
               >
-                未分类
-                <span>{{ unclassifiedCount }}</span>
-              </button>
-            </div>
-
-            <LoadingState v-if="collectionsLoading" message="正在加载分组..." />
-            <ErrorBoundary v-else-if="collectionsErrorMessage" :message="collectionsErrorMessage" />
-            <div v-else-if="collections.length" class="collection-nav">
-              <button
-                v-for="item in collections"
-                :key="item.collection_id"
-                class="collection-nav-item"
-                :class="{ 'is-active': activeCollectionId === item.collection_id }"
-                type="button"
-                @click="setActiveCollection(item.collection_id)"
-              >
                 <span class="collection-name-wrap">
-                  <span class="collection-emoji" aria-hidden="true">{{ item.emoji || '📁' }}</span>
-                  <span class="collection-name">{{ item.name }}</span>
+                  <span class="collection-name">未分类论文</span>
                 </span>
-                <span>{{ item.paper_count }}</span>
+                <span class="collection-nav-count">{{ unclassifiedCount }}</span>
               </button>
             </div>
           </div>
@@ -67,7 +52,7 @@
             <h2>{{ activeCollectionTitle }}</h2>
             <div class="collection-main-head-right">
               <div class="collection-status-summary mono">
-                未读 {{ unreadCount }} · 阅读中 {{ readingCount }} · 已读 {{ completedCount }}
+                未读 {{ summaryUnreadCount }} · 阅读中 {{ summaryReadingCount }} · 已读 {{ summaryCompletedCount }}
               </div>
             </div>
           </div>
@@ -284,19 +269,15 @@ import { useRouter } from 'vue-router';
 import AppHeader from '../components/layout/AppHeader.vue';
 import ErrorBoundary from '../components/common/ErrorBoundary.vue';
 import LoadingState from '../components/common/LoadingState.vue';
-import { useGlobalInputDialog } from '../composables/useGlobalInputDialog';
 import { useAuthStore } from '../stores/authStore';
 import { useCollectionStore } from '../stores/collectionStore';
 
+const CLASSIFIED_COLLECTION_ID = '__classified__';
 const UNCLASSIFIED_COLLECTION_ID = '__unclassified__';
 
 const router = useRouter();
 const { accessToken, isAuthenticated, loadSession } = useAuthStore();
-const { askForInput } = useGlobalInputDialog();
 const {
-  collections,
-  collectionsLoading,
-  collectionsErrorMessage,
   savedPapers,
   savedPapersLoading,
   savedPapersErrorMessage,
@@ -304,16 +285,11 @@ const {
   savedPapersPageSize,
   savedPapersTotal,
   savedPapersTotalPages,
-  unreadCount,
-  readingCount,
-  completedCount,
-  unclassifiedCount,
   savedPaperIndexItems,
   notesBySavedPaperId,
   notesLoadingBySavedPaperId,
   signalEvents,
   signalRefreshing,
-  fetchCollections,
   querySavedPapers,
   fetchSignalEvents,
   refreshSavedPaperSignals,
@@ -321,7 +297,6 @@ const {
   fetchSavedPaperNotes,
   addSavedPaperNote,
   deleteSavedPaperNoteById,
-  createCollectionQuick,
   togglePaperSaved,
   ensureBookmarkIndexLoaded,
   enrichSavedPaperMetadata
@@ -336,35 +311,43 @@ const noteDraftMap = ref({});
 const noteEditorOpenMap = ref({});
 const metadataEnrichAttemptedSet = ref(new Set());
 const hasRefreshedSignals = ref(false);
-
-const collectionNameMap = computed(() => {
-  const mapped = {};
-  for (const item of collections.value) {
-    mapped[item.collection_id] = item.name;
-  }
-  return mapped;
+const allCount = computed(() => {
+  return savedPaperIndexItems.value.length || savedPapersTotal.value || 0;
+});
+const classifiedCount = computed(() => {
+  return savedPaperIndexItems.value.filter((item) => Array.isArray(item?.collection_ids) && item.collection_ids.length > 0).length;
+});
+const unclassifiedCount = computed(() => {
+  return savedPaperIndexItems.value.filter((item) => !Array.isArray(item?.collection_ids) || item.collection_ids.length === 0).length;
+});
+const summaryUnreadCount = computed(() => {
+  return savedPaperIndexItems.value.filter((item) => String(item?.read_status || '').trim().toLowerCase() === 'unread').length;
+});
+const summaryReadingCount = computed(() => {
+  return savedPaperIndexItems.value.filter((item) => String(item?.read_status || '').trim().toLowerCase() === 'reading').length;
+});
+const summaryCompletedCount = computed(() => {
+  return savedPaperIndexItems.value.filter((item) => String(item?.read_status || '').trim().toLowerCase() === 'completed').length;
 });
 
 const activeCollectionTitle = computed(() => {
   const target = String(activeCollectionId.value || '').trim();
   if (!target) return '全部论文';
+  if (target === CLASSIFIED_COLLECTION_ID) return '分类论文';
   if (target === UNCLASSIFIED_COLLECTION_ID) return '未分类';
-  return collectionNameMap.value[target] || '论文分组';
+  return '论文分组';
 });
 
 const showPagination = computed(() => {
   if (activeCollectionId.value === UNCLASSIFIED_COLLECTION_ID) return false;
+  if (activeCollectionId.value === CLASSIFIED_COLLECTION_ID) return false;
   return savedPapersTotalPages.value > 1;
 });
 
-const visiblePapers = computed(() => {
-  if (activeCollectionId.value !== UNCLASSIFIED_COLLECTION_ID) {
-    return savedPapers.value;
-  }
+const filteredIndexPapers = computed(() => {
   const keywordText = String(keyword.value || '').trim().toLowerCase();
   const status = String(readStatusFilter.value || '').trim().toLowerCase();
   const sorted = [...savedPaperIndexItems.value]
-    .filter((item) => !item.collection_ids.length)
     .filter((item) => (status ? String(item.read_status || '') === status : true))
     .filter((item) => {
       if (!keywordText) return true;
@@ -385,6 +368,20 @@ const visiblePapers = computed(() => {
     sorted.reverse();
   }
   return sorted;
+});
+
+const visiblePapers = computed(() => {
+  const target = String(activeCollectionId.value || '').trim();
+  if (!target) {
+    return savedPapers.value;
+  }
+  if (target === CLASSIFIED_COLLECTION_ID) {
+    return filteredIndexPapers.value.filter((item) => Array.isArray(item?.collection_ids) && item.collection_ids.length > 0);
+  }
+  if (target === UNCLASSIFIED_COLLECTION_ID) {
+    return filteredIndexPapers.value.filter((item) => !Array.isArray(item?.collection_ids) || item.collection_ids.length === 0);
+  }
+  return [];
 });
 
 const paperSignalLinksMap = computed(() => {
@@ -417,9 +414,27 @@ function goHome() {
 }
 
 async function reloadSavedPapers({ nextPage = 1 } = {}) {
-  const safeCollectionId = activeCollectionId.value === UNCLASSIFIED_COLLECTION_ID
-    ? ''
-    : String(activeCollectionId.value || '').trim();
+  const targetCollectionId = String(activeCollectionId.value || '').trim();
+  const useSyntheticBucket = targetCollectionId === CLASSIFIED_COLLECTION_ID
+    || targetCollectionId === UNCLASSIFIED_COLLECTION_ID;
+  if (useSyntheticBucket) {
+    await ensureBookmarkIndexLoaded({ accessToken: accessToken.value, force: false });
+    const localVisibleItems = Array.isArray(visiblePapers.value) ? visiblePapers.value : [];
+    const noteTasks = [];
+    for (const item of localVisibleItems.slice(0, 24)) {
+      if (!item?.saved_paper_id) continue;
+      noteTasks.push(
+        fetchSavedPaperNotes(item.saved_paper_id, { accessToken: accessToken.value })
+      );
+    }
+    if (noteTasks.length) {
+      await Promise.all(noteTasks);
+    }
+    void enrichMetadataForVisiblePapers(localVisibleItems);
+    return;
+  }
+
+  const safeCollectionId = targetCollectionId;
   const items = await querySavedPapers({
     accessToken: accessToken.value,
     page: nextPage,
@@ -441,10 +456,7 @@ async function reloadSavedPapers({ nextPage = 1 } = {}) {
   if (noteTasks.length) {
     await Promise.all(noteTasks);
   }
-  const pendingEnrichmentItems = activeCollectionId.value === UNCLASSIFIED_COLLECTION_ID
-    ? visiblePapers.value
-    : visibleItems;
-  void enrichMetadataForVisiblePapers(pendingEnrichmentItems);
+  void enrichMetadataForVisiblePapers(visibleItems);
 }
 
 async function changePage(nextPage) {
@@ -454,30 +466,10 @@ async function changePage(nextPage) {
 async function setActiveCollection(collectionId) {
   activeCollectionId.value = collectionId;
   metadataEnrichAttemptedSet.value = new Set();
-  if (collectionId === UNCLASSIFIED_COLLECTION_ID) {
+  if (collectionId === UNCLASSIFIED_COLLECTION_ID || collectionId === CLASSIFIED_COLLECTION_ID) {
     await ensureBookmarkIndexLoaded({ accessToken: accessToken.value, force: true });
   }
   await reloadSavedPapers({ nextPage: 1 });
-}
-
-async function promptCreateCollection() {
-  const nextName = await askForInput({
-    title: '新建分组',
-    message: '请输入分组名称。',
-    placeholder: '例如：Transformer 阅读',
-    confirmText: '创建',
-    cancelText: '取消',
-    required: true,
-    requiredMessage: '请输入分组名称。',
-    maxLength: 100
-  });
-  const safeName = String(nextName || '').trim();
-  if (!safeName) return;
-  try {
-    await createCollectionQuick(safeName, { accessToken: accessToken.value });
-  } catch {
-    // error text is already handled by store message
-  }
 }
 
 function normalizeReadStatus(status) {
@@ -511,7 +503,6 @@ async function removePaper(item) {
       metadata: item?.metadata || null
     });
     await reloadSavedPapers({ nextPage: 1 });
-    await fetchCollections({ accessToken: accessToken.value });
   } catch {
     // store keeps message
   }
@@ -827,9 +818,12 @@ async function removeNote(item, note) {
 }
 
 async function refreshSignalFeed() {
+  const targetCollectionId = String(activeCollectionId.value || '').trim();
+  const useSyntheticBucket = targetCollectionId === CLASSIFIED_COLLECTION_ID
+    || targetCollectionId === UNCLASSIFIED_COLLECTION_ID;
   await refreshSavedPaperSignals({
     accessToken: accessToken.value,
-    collectionId: activeCollectionId.value === UNCLASSIFIED_COLLECTION_ID ? '' : activeCollectionId.value,
+    collectionId: useSyntheticBucket ? '' : targetCollectionId,
     limit: 50,
     forceRefresh: false
   });
@@ -848,10 +842,8 @@ onMounted(async () => {
     router.replace({ name: 'home' });
     return;
   }
-  await Promise.all([
-    fetchCollections({ accessToken: accessToken.value }),
-    reloadSavedPapers({ nextPage: 1 })
-  ]);
+  await ensureBookmarkIndexLoaded({ accessToken: accessToken.value, force: true });
+  await reloadSavedPapers({ nextPage: 1 });
 });
 </script>
 
@@ -955,12 +947,17 @@ onMounted(async () => {
   background: var(--bg);
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 8px;
   padding: 6px 9px;
   font-size: 11px;
   cursor: pointer;
   text-align: left;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 .collection-nav-item:hover {
@@ -976,7 +973,9 @@ onMounted(async () => {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  flex: 1 1 auto;
   min-width: 0;
+  overflow: hidden;
 }
 
 .collection-emoji {
@@ -985,9 +984,17 @@ onMounted(async () => {
 }
 
 .collection-name {
+  display: block;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.collection-nav-count {
+  margin-left: auto;
+  flex: 0 0 auto;
+  text-align: right;
 }
 
 .collection-create-btn {

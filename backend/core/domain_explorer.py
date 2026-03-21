@@ -48,6 +48,20 @@ class DomainExplorer:
         "深度學習": "深度学习",
         "機器學習": "机器学习",
     }
+    _EN_QUERY_CORRECTIONS = {
+        "transfromer": "transformer",
+        "tranformer": "transformer",
+        "attension": "attention",
+        "machien learning": "machine learning",
+        "machien": "machine",
+        "leraning": "learning",
+        "reinforcment": "reinforcement",
+        "multmodial": "multimodal",
+        "multimodel": "multimodal",
+        "generatve": "generative",
+        "difusion": "diffusion",
+        "reinforcemnt": "reinforcement",
+    }
     _MECHANISM_HINTS = (
         "mechanism",
         "architecture",
@@ -175,13 +189,32 @@ class DomainExplorer:
             raise ValueError("query must not be empty")
 
         if not self._contains_cjk(safe_query):
+            corrected_query = self._heuristic_correct_en_query(safe_query)
+            translated_query = self._sanitize_english_query(corrected_query)
+            used_llm = False
+            if is_configured():
+                llm_normalized = await self._normalize_english_query_with_llm(corrected_query)
+                if llm_normalized:
+                    used_llm = True
+                    corrected_candidate = re.sub(
+                        r"\s+",
+                        " ",
+                        str(llm_normalized.get("corrected_en") or "").strip(),
+                    )
+                    if corrected_candidate:
+                        corrected_query = corrected_candidate
+                        translated_query = self._sanitize_english_query(corrected_candidate)
+            canonical_query = translated_query or corrected_query or safe_query
             return {
                 "original_query": safe_query,
-                "corrected_query": safe_query,
-                "translated_query": safe_query,
-                "canonical_query": safe_query,
-                "used_llm": False,
-                "was_corrected": False,
+                "corrected_query": corrected_query,
+                "translated_query": translated_query,
+                "canonical_query": canonical_query,
+                "used_llm": used_llm,
+                "was_corrected": (
+                    corrected_query != safe_query
+                    or canonical_query != self._sanitize_english_query(safe_query)
+                ),
             }
 
         corrected_query = self._heuristic_correct_zh_query(safe_query)
@@ -249,6 +282,33 @@ class DomainExplorer:
             return payload
         except Exception:  # noqa: BLE001
             logger.exception("Failed normalizing Chinese query with LLM, fallback to heuristic map.")
+            return {}
+
+    async def _normalize_english_query_with_llm(self, query: str) -> dict[str, Any]:
+        prompt = (
+            "You are a scientific query normalizer. Correct spelling and normalize the query"
+            " into concise lowercase academic search terms."
+            " Output JSON only.\n\n"
+            f"Input: {query}\n\n"
+            "Output format:\n"
+            "{\n"
+            '  "corrected_en": "normalized academic query in lowercase"\n'
+            "}"
+        )
+        try:
+            response = await asyncio.to_thread(
+                chat,
+                [{"role": "user", "content": prompt}],
+                max_tokens=180,
+                timeout=20,
+            )
+            raw_content = str(response.choices[0].message.content or "").strip()
+            payload = self._extract_json_payload(raw_content)
+            if not isinstance(payload, dict):
+                return {}
+            return payload
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed normalizing English query with LLM, fallback to heuristic map.")
             return {}
 
     async def generate_domain_skeleton(self, query: str) -> dict[str, Any]:
@@ -1045,6 +1105,20 @@ class DomainExplorer:
                 corrected = corrected.replace(wrong, right)
         return corrected
 
+    def _heuristic_correct_en_query(self, query: str) -> str:
+        corrected = re.sub(r"\s+", " ", str(query or "").strip().lower())
+        if not corrected:
+            return corrected
+
+        for wrong, right in self._EN_QUERY_CORRECTIONS.items():
+            corrected = re.sub(
+                rf"\b{re.escape(wrong.lower())}\b",
+                right.lower(),
+                corrected,
+            )
+        corrected = re.sub(r"\s+", " ", corrected).strip()
+        return corrected
+
     @staticmethod
     def _sanitize_english_query(text: str) -> str:
         normalized = re.sub(r"\s+", " ", str(text or "").strip().lower())
@@ -1064,7 +1138,7 @@ class DomainExplorer:
             if zh_term.lower() in lowered:
                 return en_term
         if re.search(r"[a-zA-Z]", text):
-            return text
+            return self._heuristic_correct_en_query(text)
         return text
 
     @staticmethod

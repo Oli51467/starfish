@@ -16,6 +16,7 @@ from api.pipeline import router as pipeline_router
 from api.paper_signals import router as paper_signals_router
 from api.papers import router as papers_router
 from api.reading_list import router as reading_list_router
+from api.research import router as research_router
 from api.research_history import router as research_history_router
 from api.tasks import router as tasks_router
 from core.settings import get_settings
@@ -41,6 +42,7 @@ app.include_router(auth_router)
 app.include_router(collections_router)
 app.include_router(map_router)
 app.include_router(pipeline_router)
+app.include_router(research_router)
 app.include_router(graphrag_router)
 app.include_router(landscape_router)
 app.include_router(paper_signals_router)

@@ -19,7 +19,7 @@ def _fallback_plan(state: PipelineState) -> tuple[str, list[str], list[str]]:
         execution_plan = [
             "定位核心论文与直接关联论文",
             "构建知识图谱并识别主要研究分支",
-            "并行生成血缘与热点信号",
+            "并行生成血缘脉络与研究空白",
             "汇总空白点并给出研究建议",
         ]
     else:
@@ -27,8 +27,8 @@ def _fallback_plan(state: PipelineState) -> tuple[str, list[str], list[str]]:
             "解析研究方向并扩展检索关键词",
             "检索并筛选代表性论文",
             "构建知识图谱识别子方向",
-            "并行分析脉络、热度与空白",
-            "生成结构化研究报告",
+            "并行分析血缘脉络与研究空白",
+            "输出结构化研究结论",
         ]
 
     keywords = deduplicate_keywords(extract_keywords_from_text(input_value, limit=6) or [input_value])

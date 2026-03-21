@@ -62,19 +62,19 @@ async def human_checkpoint_2(state: PipelineState) -> PipelineState:
     await runtime.ensure_active(session_id)
     await runtime.emit_node_start(session_id, node, 90)
 
-    message = "报告草稿已生成，可输入修订意见，或直接继续生成最终版本。"
+    message = "知识图谱已完成，请确认是否继续生成并展示血缘树。"
     feedback = await runtime.wait_for_checkpoint(
         session_id,
         checkpoint=node,
         message=message,
-        timeout_seconds=30,
+        timeout_seconds=0,
     )
 
     checkpoint_feedback = dict(state.get("checkpoint_feedback") or {})
     if not _is_continue_feedback(feedback):
         checkpoint_feedback[node] = feedback
 
-    summary = "报告检查点已确认，开始生成最终报告。"
+    summary = "血缘树检查点已确认，开始生成血缘树。"
     await runtime.emit_node_complete(session_id, node, 90, summary)
 
     return {

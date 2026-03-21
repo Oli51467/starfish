@@ -181,6 +181,9 @@ function isActionRequired(step) {
   grid-template-columns: 20px minmax(0, 1fr);
   align-items: start;
   gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .paper-workflow-step-item.is-active,
@@ -227,6 +230,8 @@ function isActionRequired(step) {
   font-size: 12px;
   color: var(--text);
   font-weight: 600;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .paper-workflow-trace-list {
@@ -238,6 +243,9 @@ function isActionRequired(step) {
   gap: 6px;
   margin-left: calc(var(--step-trace-edge-offset) * -1);
   margin-right: 0;
+  min-width: 0;
+  max-width: calc(100% + var(--step-trace-edge-offset));
+  box-sizing: border-box;
 }
 
 .paper-workflow-trace-item {
@@ -249,6 +257,9 @@ function isActionRequired(step) {
   align-content: start;
   gap: 4px;
   position: relative;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .paper-workflow-trace-head {
@@ -262,6 +273,8 @@ function isActionRequired(step) {
   margin: 0;
   font-size: 10px;
   color: var(--muted);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .paper-workflow-trace-badge {
@@ -298,13 +311,15 @@ function isActionRequired(step) {
   font-size: 11px;
   color: var(--text);
   line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .paper-workflow-action-btn {
   height: 30px;
   font-size: 11px;
   padding: 0 10px;
-  justify-self: start;
+  justify-self: center;
 }
 
 @media (max-width: 980px) {
