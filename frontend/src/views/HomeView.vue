@@ -10,7 +10,24 @@
     />
 
     <main class="workspace" :class="workflowActive ? 'workspace-workflow' : 'workspace-single'">
-      <InputView v-if="!workflowActive" :can-use-features="isAuthenticated" @start-analysis="enterWorkflow" />
+      <template v-if="!workflowActive">
+        <InputView :can-use-features="isAuthenticated" @start-analysis="enterWorkflow" />
+        <aside
+          v-if="activeSessionNotice"
+          class="active-session-notice panel"
+          role="button"
+          tabindex="0"
+          @click="resumeActiveSessionWorkflow"
+          @keydown.enter.prevent="resumeActiveSessionWorkflow"
+          @keydown.space.prevent="resumeActiveSessionWorkflow"
+        >
+          <p class="active-session-notice-kicker mono">进行中任务</p>
+          <p class="active-session-notice-title">{{ activeSessionNoticeTitle }}</p>
+          <p class="active-session-notice-detail">
+            {{ activeSessionNoticeDetail }}
+          </p>
+        </aside>
+      </template>
       <WorkflowView
         v-else
         :seed="workflowSeed"
@@ -28,6 +45,7 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 
+import { getActiveResearchSession } from '../api';
 import AppHeader from '../components/layout/AppHeader.vue';
 import { useAuthStore } from '../stores/authStore';
 import InputView from './InputView.vue';
@@ -41,7 +59,8 @@ const workflowSeed = ref({
   quick_mode: true,
   depth: 2,
   auto_lineage: false,
-  lineage_seed_paper_id: ''
+  lineage_seed_paper_id: '',
+  runtime_session_id: ''
 });
 const headerStep = ref({
   index: 1,
@@ -50,10 +69,12 @@ const headerStep = ref({
 });
 const paperResultView = ref('graph');
 const paperLineageEnabled = ref(false);
-const { isAuthenticated, loadSession } = useAuthStore();
+const activeSessionNotice = ref(null);
+const { isAuthenticated, loadSession, accessToken } = useAuthStore();
 const router = useRouter();
 const route = useRoute();
 const WORKFLOW_SEED_STORAGE_KEY = 'starfish:workflow-seed';
+const ACTIVE_SESSION_STORAGE_KEY = 'starfish:active-research-session';
 
 const WORKFLOW_ROUTE_NAMES = new Set([
   'research-domain-graph',
@@ -106,7 +127,8 @@ function normalizeWorkflowSeed(payload = {}) {
     quick_mode: parseBooleanLike(payload.quick_mode, true),
     depth: parseOptionalPositiveInteger(payload.depth) || 2,
     auto_lineage: parseBooleanLike(payload.auto_lineage, autoLineageDefault),
-    lineage_seed_paper_id: normalizeText(payload.lineage_seed_paper_id)
+    lineage_seed_paper_id: normalizeText(payload.lineage_seed_paper_id),
+    runtime_session_id: normalizeText(payload.runtime_session_id)
   };
 }
 
@@ -153,6 +175,107 @@ function clearPersistedWorkflowSeed() {
     // ignore storage remove failures
   }
 }
+
+function clearActiveSessionNotice() {
+  activeSessionNotice.value = null;
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(ACTIVE_SESSION_STORAGE_KEY);
+  } catch {
+    // ignore storage remove failures
+  }
+}
+
+function persistActiveSessionNotice(payload) {
+  if (!payload || typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, JSON.stringify(payload));
+  } catch {
+    // ignore storage write failures
+  }
+}
+
+function restoreActiveSessionNotice() {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return normalizeActiveSessionNotice(parsed);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeActiveSessionNotice(payload = {}) {
+  const source = payload?.session && typeof payload.session === 'object'
+    ? payload.session
+    : payload;
+  const sessionId = normalizeText(source?.session_id);
+  if (!sessionId) return null;
+  return {
+    session_id: sessionId,
+    status: normalizeText(source?.status).toLowerCase() || 'running',
+    progress: Math.max(0, Math.min(100, Number(source?.progress || 0) || 0)),
+    current_node: normalizeText(source?.current_node),
+    waiting_checkpoint: normalizeText(source?.waiting_checkpoint),
+    input_type: normalizeText(source?.input_type).toLowerCase() || 'domain',
+    input_value: normalizeText(source?.input_value),
+    paper_range_years: parseOptionalPositiveInteger(source?.paper_range_years),
+    quick_mode: parseBooleanLike(source?.quick_mode, true),
+    updated_at: normalizeText(source?.updated_at)
+  };
+}
+
+async function refreshActiveSessionNotice({ allowLocalFallback = true } = {}) {
+  if (!isAuthenticated.value) {
+    clearActiveSessionNotice();
+    return;
+  }
+  try {
+    const payload = await getActiveResearchSession({ accessToken: accessToken.value || '' });
+    const hasActive = Boolean(payload?.has_active_session);
+    const notice = hasActive ? normalizeActiveSessionNotice(payload?.session) : null;
+    if (notice) {
+      activeSessionNotice.value = notice;
+      persistActiveSessionNotice(notice);
+      return;
+    }
+    clearActiveSessionNotice();
+  } catch {
+    if (!allowLocalFallback) {
+      clearActiveSessionNotice();
+      return;
+    }
+    const localNotice = restoreActiveSessionNotice();
+    if (localNotice) {
+      activeSessionNotice.value = localNotice;
+      return;
+    }
+    clearActiveSessionNotice();
+  }
+}
+
+function resolveInputTypeLabel(inputType) {
+  const normalized = normalizeText(inputType).toLowerCase();
+  if (normalized === 'domain') return '领域检索';
+  if (normalized === 'doi') return 'DOI 检索';
+  return '论文检索';
+}
+
+const activeSessionNoticeTitle = computed(() => {
+  if (!activeSessionNotice.value) return '检测到进行中任务';
+  return `${resolveInputTypeLabel(activeSessionNotice.value.input_type)}仍在执行`;
+});
+
+const activeSessionNoticeDetail = computed(() => {
+  if (!activeSessionNotice.value) return '';
+  const inputValue = normalizeText(activeSessionNotice.value.input_value);
+  const progress = Number(activeSessionNotice.value.progress || 0);
+  const progressText = Number.isFinite(progress) ? `${Math.max(0, Math.min(100, Math.round(progress)))}%` : '进行中';
+  if (!inputValue) return `任务进度：${progressText}`;
+  return `目标：${inputValue} · 进度 ${progressText}`;
+});
 
 function applyHeaderForSeed(seed) {
   headerStep.value = {
@@ -216,7 +339,8 @@ function parseRouteSeed(routeName, queryPayload = {}) {
       input_value: query,
       paper_range_years: queryPayload.paper_range_years,
       quick_mode: queryPayload.quick_mode,
-      depth: queryPayload.depth
+      depth: queryPayload.depth,
+      runtime_session_id: queryPayload.runtime_session_id
     });
   }
 
@@ -232,7 +356,8 @@ function parseRouteSeed(routeName, queryPayload = {}) {
     quick_mode: queryPayload.quick_mode,
     depth: queryPayload.depth,
     auto_lineage: queryPayload.auto_lineage,
-    lineage_seed_paper_id: normalizeText(queryPayload.lineage_seed_paper_id || paperId)
+    lineage_seed_paper_id: normalizeText(queryPayload.lineage_seed_paper_id || paperId),
+    runtime_session_id: queryPayload.runtime_session_id
   });
 }
 
@@ -243,6 +368,11 @@ async function applyRouteToWorkflow() {
   if (routeName === 'home') {
     if (workflowActive.value) {
       resetWorkflowState();
+    }
+    if (isAuthenticated.value) {
+      await refreshActiveSessionNotice();
+    } else {
+      clearActiveSessionNotice();
     }
     return;
   }
@@ -267,6 +397,7 @@ async function applyRouteToWorkflow() {
   }
 
   workflowSeed.value = seed;
+  activeSessionNotice.value = null;
   if (routeSeed) {
     persistWorkflowSeed(routeSeed);
   }
@@ -282,6 +413,10 @@ async function applyRouteToWorkflow() {
 
 async function enterWorkflow(payload) {
   if (!isAuthenticated.value) return;
+  await refreshActiveSessionNotice({ allowLocalFallback: false });
+  if (activeSessionNotice.value) {
+    return;
+  }
 
   workflowSeed.value = normalizeWorkflowSeed(payload);
   if (!workflowSeed.value.input_value) return;
@@ -289,6 +424,27 @@ async function enterWorkflow(payload) {
   applyHeaderForSeed(workflowSeed.value);
   paperResultView.value = 'graph';
   paperLineageEnabled.value = false;
+  activeSessionNotice.value = null;
+  workflowActive.value = true;
+  await syncRouteFromWorkflow({ replace: false });
+}
+
+async function resumeActiveSessionWorkflow() {
+  const active = activeSessionNotice.value;
+  if (!active) return;
+
+  workflowSeed.value = normalizeWorkflowSeed({
+    input_type: active.input_type,
+    input_value: active.input_value,
+    paper_range_years: active.paper_range_years,
+    quick_mode: active.quick_mode,
+    runtime_session_id: active.session_id
+  });
+  persistWorkflowSeed(workflowSeed.value);
+  applyHeaderForSeed(workflowSeed.value);
+  paperResultView.value = 'graph';
+  paperLineageEnabled.value = false;
+  activeSessionNotice.value = null;
   workflowActive.value = true;
   await syncRouteFromWorkflow({ replace: false });
 }
@@ -305,6 +461,7 @@ async function exitWorkflow() {
   resetWorkflowState();
   clearPersistedWorkflowSeed();
   await syncRouteFromWorkflow({ replace: false });
+  await refreshActiveSessionNotice();
 }
 
 async function handleWorkflowResultViewChange(nextView) {
@@ -332,6 +489,13 @@ watch(isAuthenticated, (next) => {
     clearPersistedWorkflowSeed();
     void syncRouteFromWorkflow();
   }
+  if (!next) {
+    clearActiveSessionNotice();
+    return;
+  }
+  if (!workflowActive.value) {
+    void refreshActiveSessionNotice();
+  }
 });
 
 watch(
@@ -350,8 +514,82 @@ watch(
   }
 );
 
+watch(
+  () => workflowActive.value,
+  (active) => {
+    if (active) {
+      activeSessionNotice.value = null;
+      return;
+    }
+    if (isAuthenticated.value) {
+      void refreshActiveSessionNotice();
+    }
+  }
+);
+
 onMounted(async () => {
   await loadSession();
   await applyRouteToWorkflow();
+  if (!workflowActive.value && isAuthenticated.value) {
+    await refreshActiveSessionNotice();
+  }
 });
 </script>
+
+<style scoped>
+.active-session-notice {
+  position: fixed;
+  right: 14px;
+  top: 82px;
+  width: min(252px, calc(100vw - 28px));
+  border: 1px solid var(--line-2);
+  background: var(--bg);
+  padding: 8px 10px;
+  display: grid;
+  gap: 4px;
+  cursor: pointer;
+  transition: border-color 0.2s ease, background-color 0.2s ease;
+  z-index: 8;
+}
+
+.active-session-notice:hover {
+  border-color: var(--accent);
+  background: var(--panel);
+}
+
+.active-session-notice:focus-visible {
+  outline: 0;
+  border-color: var(--accent);
+}
+
+.active-session-notice-kicker {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.3;
+  color: var(--muted);
+}
+
+.active-session-notice-title {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.active-session-notice-detail {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--text);
+  word-break: break-word;
+}
+
+@media (max-width: 768px) {
+  .active-session-notice {
+    top: 68px;
+    right: 10px;
+    width: min(228px, calc(100vw - 20px));
+  }
+}
+</style>

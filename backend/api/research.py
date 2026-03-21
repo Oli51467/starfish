@@ -4,8 +4,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSock
 
 from api.dependencies import get_current_user_profile
 from models.schemas import (
+    ResearchActiveSessionResponse,
     ResearchSessionResumeRequest,
     ResearchSessionResumeResponse,
+    ResearchActiveSessionSummary,
     ResearchSessionStartRequest,
     ResearchSessionStartResponse,
     ResearchSessionStateResponse,
@@ -68,19 +70,54 @@ def _to_state_response(snapshot: dict) -> ResearchSessionStateResponse:
     )
 
 
+def _to_active_session_summary(snapshot: dict) -> ResearchActiveSessionSummary:
+    state = snapshot.get("state") or {}
+    return ResearchActiveSessionSummary(
+        session_id=str(snapshot.get("session_id") or ""),
+        status=str(snapshot.get("status") or "pending"),
+        progress=int(state.get("progress") or 0),
+        current_node=str(state.get("current_node") or ""),
+        waiting_checkpoint=str(snapshot.get("waiting_checkpoint") or ""),
+        input_type=_to_safe_input_type(state.get("input_type")),
+        input_value=str(state.get("input_value") or ""),
+        paper_range_years=state.get("paper_range_years"),
+        quick_mode=bool(state.get("quick_mode")),
+        updated_at=str(snapshot.get("updated_at") or ""),
+    )
+
+
 @router.post("/start", response_model=ResearchSessionStartResponse)
 async def start_research(
     request: ResearchSessionStartRequest,
     user: UserProfile = Depends(get_current_user_profile),
 ) -> ResearchSessionStartResponse:
-    session_id = await runtime_service.start_session(
-        user=user,
-        input_type=request.input_type,
-        input_value=request.input_value,
-        paper_range_years=request.paper_range_years,
-        quick_mode=request.quick_mode,
-    )
+    try:
+        session_id = await runtime_service.start_session(
+            user=user,
+            input_type=request.input_type,
+            input_value=request.input_value,
+            paper_range_years=request.paper_range_years,
+            quick_mode=request.quick_mode,
+        )
+    except PipelineRuntimeError as exc:
+        detail = str(exc)
+        if detail.startswith("active_session_exists:"):
+            raise HTTPException(status_code=409, detail=detail) from exc
+        raise HTTPException(status_code=400, detail=detail) from exc
     return ResearchSessionStartResponse(session_id=session_id, status="started")
+
+
+@router.get("/active", response_model=ResearchActiveSessionResponse)
+async def get_active_research_session(
+    user: UserProfile = Depends(get_current_user_profile),
+) -> ResearchActiveSessionResponse:
+    snapshot = await runtime_service.get_active_session_snapshot(user.id)
+    if not isinstance(snapshot, dict):
+        return ResearchActiveSessionResponse(has_active_session=False, session=None)
+    return ResearchActiveSessionResponse(
+        has_active_session=True,
+        session=_to_active_session_summary(snapshot),
+    )
 
 
 @router.post("/resume/{session_id}", response_model=ResearchSessionResumeResponse)

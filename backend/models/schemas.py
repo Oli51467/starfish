@@ -114,6 +114,12 @@ PipelineEventType = Literal[
     "thinking",
     "node_complete",
     "pause",
+    "negotiation_round_started",
+    "negotiation_bid_received",
+    "negotiation_contract_awarded",
+    "negotiation_budget_update",
+    "negotiation_critic_veto",
+    "negotiation_rebid_scheduled",
     "session_complete",
     "error",
     "stopped",
@@ -204,6 +210,24 @@ class ResearchSessionStateResponse(BaseModel):
 
 class ResearchSessionStopResponse(BaseModel):
     stopped: bool = False
+
+
+class ResearchActiveSessionSummary(BaseModel):
+    session_id: str
+    status: str
+    progress: int = Field(default=0, ge=0, le=100)
+    current_node: str = ""
+    waiting_checkpoint: str = ""
+    input_type: PipelineInputType = "arxiv_id"
+    input_value: str = ""
+    paper_range_years: int | None = None
+    quick_mode: bool = False
+    updated_at: str = ""
+
+
+class ResearchActiveSessionResponse(BaseModel):
+    has_active_session: bool = False
+    session: ResearchActiveSessionSummary | None = None
 
 
 class MapNode(BaseModel):

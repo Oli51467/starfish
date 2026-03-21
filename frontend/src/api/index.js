@@ -284,6 +284,12 @@ export function startResearchSession(payload, { accessToken = '' } = {}) {
   });
 }
 
+export function getActiveResearchSession({ accessToken = '' } = {}) {
+  return request('/api/research/active', {
+    headers: buildAuthHeaders(accessToken)
+  });
+}
+
 export function resumeResearchSession(sessionId, feedback = '', { accessToken = '' } = {}) {
   return request(`/api/research/resume/${encodeURIComponent(sessionId)}`, {
     method: 'POST',

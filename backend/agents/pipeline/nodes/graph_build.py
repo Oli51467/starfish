@@ -23,7 +23,7 @@ async def graph_build_node(state: PipelineState) -> PipelineState:
     session_id = state["session_id"]
 
     await runtime.ensure_active(session_id)
-    await runtime.emit_node_start(session_id, _NODE, 30)
+    await runtime.emit_node_start(session_id, _NODE, 56)
 
     graphrag_service = get_graphrag_service()
     prefetched_papers = [
@@ -50,7 +50,7 @@ async def graph_build_node(state: PipelineState) -> PipelineState:
 
     summary = f"图谱构建完成，节点 {len(nodes)} 个，关系 {len(edges)} 条。"
     await runtime.emit_thinking(session_id, _NODE, summary)
-    await runtime.emit_node_complete(session_id, _NODE, 40, summary)
+    await runtime.emit_node_complete(session_id, _NODE, 72, summary)
 
     return {
         **state,
@@ -59,6 +59,6 @@ async def graph_build_node(state: PipelineState) -> PipelineState:
         "graph_edges": edges,
         "graph_payload": graph_payload,
         "current_node": _NODE,
-        "progress": 40,
+        "progress": 72,
         "messages": append_message(state, summary),
     }

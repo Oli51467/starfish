@@ -4,8 +4,12 @@
       <PaperWorkflowPanel
         class="paper-workflow-side"
         :steps="steps"
+        :negotiation-by-step="negotiationByStep"
         :progress="workflowProgress"
+        :can-terminate="canTerminateWorkflow"
+        :terminating="terminatingWorkflow"
         @step-action="handleStepAction"
+        @terminate="handleWorkflowTerminate"
       />
 
       <article class="paper-result-side workflow-result-shell">
@@ -114,7 +118,10 @@ const lastCenteredGraphKey = ref('');
 
 const {
   steps,
+  negotiationByStep,
   graphLoading,
+  canTerminateWorkflow,
+  terminatingWorkflow,
   graphData,
   errorMessage,
   lineageLoading,
@@ -125,6 +132,7 @@ const {
   activeViewKey,
   canViewLineage,
   runWorkflow,
+  terminateWorkflow,
   handleStepAction
 } = usePaperWorkflow({
   seedRef: computed(() => props.seed),
@@ -134,6 +142,10 @@ const {
   onResultViewChange: (nextView) => emit('result-view-change', nextView),
   onLineageAvailabilityChange: (enabled) => emit('lineage-availability-change', enabled)
 });
+
+async function handleWorkflowTerminate() {
+  await terminateWorkflow();
+}
 
 const resultTabs = computed(() => ([
   {
@@ -249,12 +261,14 @@ watch(
 .paper-fixed-layout {
   height: 100%;
   min-height: 0;
-  gap: 10px;
-  grid-template-columns: minmax(380px, 430px) minmax(0, 1fr);
+  gap: 0;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 }
 
 .paper-workflow-layout::after {
-  display: none;
+  display: block;
+  left: 50%;
+  background: var(--line-2);
 }
 
 .paper-workflow-side,
@@ -264,10 +278,12 @@ watch(
 
 .paper-workflow-side {
   height: 100%;
+  padding-right: 12px;
 }
 
 .paper-result-side {
   overflow: hidden;
+  padding-left: 12px;
 }
 
 .workflow-result-shell {
@@ -377,10 +393,16 @@ watch(
   .paper-workflow-side,
   .paper-result-side {
     height: auto;
+    padding-left: 0;
+    padding-right: 0;
   }
 
   .paper-result-side {
     overflow: visible;
+  }
+
+  .paper-workflow-layout::after {
+    display: none;
   }
 }
 </style>

@@ -27,13 +27,19 @@ async def start_pipeline(
     request: PipelineStartRequest,
     user: UserProfile = Depends(get_current_user_profile),
 ) -> PipelineStartResponse:
-    session_id = await runtime_service.start_session(
-        user=user,
-        input_type=request.input_type,
-        input_value=request.input_value,
-        paper_range_years=request.paper_range_years,
-        quick_mode=request.quick_mode,
-    )
+    try:
+        session_id = await runtime_service.start_session(
+            user=user,
+            input_type=request.input_type,
+            input_value=request.input_value,
+            paper_range_years=request.paper_range_years,
+            quick_mode=request.quick_mode,
+        )
+    except PipelineRuntimeError as exc:
+        detail = str(exc)
+        if detail.startswith("active_session_exists:"):
+            raise HTTPException(status_code=409, detail=detail) from exc
+        raise HTTPException(status_code=400, detail=detail) from exc
     return PipelineStartResponse(session_id=session_id, status="started")
 
 

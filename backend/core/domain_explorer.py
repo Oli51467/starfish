@@ -802,7 +802,7 @@ class DomainExplorer:
         if normalized_range is None:
             return papers
         current_year = datetime.now(timezone.utc).year
-        from_year = max(1, current_year - normalized_range + 1)
+        from_year = max(1, current_year - normalized_range)
         filtered: list[dict[str, Any]] = []
         for item in papers:
             year = self._safe_int(item.get("year"))

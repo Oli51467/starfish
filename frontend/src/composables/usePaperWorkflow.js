@@ -388,6 +388,20 @@ const RESEARCH_NODE_LABEL = {
   checkpoint_2: 'Lineage Checkpoint'
 };
 
+const NEGOTIATION_PROFILE_LABEL = {
+  precise: '精确策略',
+  fast: '快速策略',
+  budget: '预算优先',
+  recall: '覆盖优先',
+  dense: '深度建模',
+  balanced: '平衡策略',
+  lineage: '血缘优先',
+  guarded: '稳健策略',
+  quickpass: '快速确认',
+  lean: '轻量策略',
+  stable: '稳定策略'
+};
+
 const STEP_FLOW_ORDER = ['retrieve', 'checkpoint', 'graph', 'lineage'];
 const STEP_FINAL_NODE = {
   retrieve: 'search',
@@ -395,6 +409,7 @@ const STEP_FINAL_NODE = {
   graph: 'graph_build',
   lineage: 'parallel'
 };
+const ACTIVE_RESEARCH_SESSION_STORAGE_KEY = 'starfish:active-research-session';
 
 function resolveStepKeyByNode(rawNode) {
   const node = String(rawNode || '').trim().toLowerCase();
@@ -408,6 +423,118 @@ function resolveStepKeyByNode(rawNode) {
 function resolveNodeLabel(rawNode) {
   const node = String(rawNode || '').trim().toLowerCase();
   return RESEARCH_NODE_LABEL[node] || `Agent · ${node || 'unknown'}`;
+}
+
+function resolveStepKeyByTaskKind(rawTaskKind) {
+  const taskKind = String(rawTaskKind || '').trim().toLowerCase();
+  if (!taskKind) return 'retrieve';
+  if (taskKind === 'checkpoint_1') return 'checkpoint';
+  if (taskKind === 'graph_build') return 'graph';
+  if (taskKind === 'checkpoint_2' || taskKind === 'parallel') return 'lineage';
+  return 'retrieve';
+}
+
+function resolveTaskKindLabel(rawTaskKind) {
+  const safeTaskKind = String(rawTaskKind || '').trim().toLowerCase();
+  return resolveNodeLabel(safeTaskKind || 'planner');
+}
+
+function resolveAgentRuntimeLabel(rawAgentId, rawProfile) {
+  const agentId = String(rawAgentId || '').trim().toLowerCase();
+  const profile = String(rawProfile || '').trim().toLowerCase();
+  let base = 'Coordinator Agent';
+  if (agentId.includes('planner')) base = 'Planner Agent';
+  else if (agentId.includes('router')) base = 'Router Agent';
+  else if (agentId.includes('search')) base = 'Retriever Agent';
+  else if (agentId.includes('graph')) base = 'Graph Builder Agent';
+  else if (agentId.includes('parallel')) base = 'Lineage Agent';
+  else if (agentId.includes('checkpoint_1')) base = 'Human Checkpoint';
+  else if (agentId.includes('checkpoint_2')) base = 'Lineage Checkpoint';
+  const profileLabel = NEGOTIATION_PROFILE_LABEL[profile] || NEGOTIATION_PROFILE_LABEL[agentId.split('_').at(-1)] || '';
+  if (!profileLabel) return base;
+  return `${base} · ${profileLabel}`;
+}
+
+function createNegotiationBudgetState() {
+  return {
+    spent: null,
+    limit: null,
+    remaining: null
+  };
+}
+
+function createNegotiationRoundState({
+  round = 1,
+  taskId = '',
+  taskKind = '',
+  status = 'bidding',
+  updatedAt = '',
+} = {}) {
+  return {
+    round,
+    taskId,
+    taskKind,
+    status,
+    bids: [],
+    winner: null,
+    veto: null,
+    rebid: null,
+    updatedAt
+  };
+}
+
+function createNegotiationStepState() {
+  return {
+    activeTaskKind: '',
+    activeRound: 0,
+    budget: createNegotiationBudgetState(),
+    rounds: []
+  };
+}
+
+function createNegotiationStateByStep() {
+  return {
+    retrieve: createNegotiationStepState(),
+    checkpoint: createNegotiationStepState(),
+    graph: createNegotiationStepState(),
+    lineage: createNegotiationStepState()
+  };
+}
+
+function persistActiveResearchSessionRecord(payload = {}) {
+  if (typeof window === 'undefined') return;
+  const sessionId = String(payload?.session_id || '').trim();
+  if (!sessionId) return;
+
+  const record = {
+    session_id: sessionId,
+    status: String(payload?.status || '').trim().toLowerCase(),
+    progress: Number.isFinite(Number(payload?.progress)) ? Number(payload.progress) : 0,
+    current_node: String(payload?.current_node || '').trim(),
+    waiting_checkpoint: String(payload?.waiting_checkpoint || '').trim(),
+    input_type: String(payload?.input_type || 'domain').trim().toLowerCase(),
+    input_value: String(payload?.input_value || '').trim(),
+    paper_range_years: Number.isFinite(Number(payload?.paper_range_years))
+      ? Math.max(1, Math.round(Number(payload.paper_range_years)))
+      : null,
+    quick_mode: Boolean(payload?.quick_mode),
+    updated_at: String(payload?.updated_at || new Date().toISOString()).trim() || new Date().toISOString()
+  };
+
+  try {
+    window.localStorage.setItem(ACTIVE_RESEARCH_SESSION_STORAGE_KEY, JSON.stringify(record));
+  } catch {
+    // ignore storage write failures
+  }
+}
+
+function clearActiveResearchSessionRecord() {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(ACTIVE_RESEARCH_SESSION_STORAGE_KEY);
+  } catch {
+    // ignore storage remove failures
+  }
 }
 
 export function usePaperWorkflow({
@@ -464,6 +591,7 @@ export function usePaperWorkflow({
   ]);
 
   const graphLoading = ref(false);
+  const terminatingWorkflow = ref(false);
   const graphData = ref(null);
   const errorMessage = ref('');
   const lineageSeed = ref({ paperId: '', title: '' });
@@ -481,11 +609,13 @@ export function usePaperWorkflow({
     paper_range_years: null,
     quick_mode: false,
     auto_lineage: false,
-    lineage_seed_paper_id: ''
+    lineage_seed_paper_id: '',
+    runtime_session_id: ''
   });
   let researchSocket = null;
   let researchPollTimer = null;
   const runtimeNodeLogCursor = new Map();
+  const negotiationByStep = ref(createNegotiationStateByStep());
 
   const {
     lineage: lineageData,
@@ -560,6 +690,11 @@ export function usePaperWorkflow({
     return Math.max(0, Math.min(100, percent));
   });
 
+  const canTerminateWorkflow = computed(() => (
+    Boolean(unifiedRuntimeActive.value)
+    || Boolean(graphLoading.value)
+  ));
+
   const activeStepHint = computed(() => {
     const current = activeStep.value;
     if (!current) return '工作流运行中...';
@@ -603,6 +738,10 @@ export function usePaperWorkflow({
     if (!target) return;
     target.status = status;
     target.message = message;
+    const normalizedStatus = String(status || '').trim().toLowerCase();
+    if (normalizedStatus === 'done' || normalizedStatus === 'skipped') {
+      finalizeStepLogs(target);
+    }
     updateStepSignal();
   }
 
@@ -625,14 +764,53 @@ export function usePaperWorkflow({
     target.action = action || null;
   }
 
+  function finalizeStepLogs(step) {
+    if (!step || !Array.isArray(step.logs) || !step.logs.length) return;
+    step.logs = step.logs.map((log) => {
+      const normalized = String(log?.status || '').trim().toLowerCase();
+      if (normalized === 'doing' || normalized === 'pending' || normalized === 'running') {
+        return {
+          ...log,
+          status: 'done',
+          statusText: toStatusText('done')
+        };
+      }
+      return log;
+    });
+  }
+
+  function settleStepTransientLogs(step) {
+    if (!step || !Array.isArray(step.logs) || !step.logs.length) return;
+    step.logs = step.logs.map((log) => {
+      const normalized = String(log?.status || '').trim().toLowerCase();
+      if (normalized === 'doing' || normalized === 'pending' || normalized === 'running') {
+        return {
+          ...log,
+          status: 'done',
+          statusText: toStatusText('done')
+        };
+      }
+      return log;
+    });
+  }
+
   function appendStepLog(stepKey, logItem) {
     const target = steps.value.find((item) => item.key === String(stepKey || '').trim());
     if (!target) return;
+    const stepStatus = String(target.status || '').trim().toLowerCase();
+    const requestedStatus = String(logItem?.status || 'pending').trim() || 'pending';
+    const normalizedRequestedStatus = String(requestedStatus || '').trim().toLowerCase();
+    const safeStatus = (
+      ['done', 'skipped'].includes(stepStatus)
+      && ['doing', 'pending', 'running'].includes(normalizedRequestedStatus)
+    )
+      ? 'done'
+      : requestedStatus;
     const nextLog = {
       title: String(logItem?.title || '').trim() || '执行记录',
       detail: String(logItem?.detail || '').trim() || '工作流运行中。',
-      status: String(logItem?.status || 'pending').trim() || 'pending',
-      statusText: toStatusText(logItem?.status || 'pending'),
+      status: safeStatus,
+      statusText: toStatusText(safeStatus),
       metaText: String(logItem?.metaText || '').trim()
     };
     const previous = Array.isArray(target.logs) ? target.logs[target.logs.length - 1] : null;
@@ -644,6 +822,7 @@ export function usePaperWorkflow({
     ) {
       return;
     }
+    settleStepTransientLogs(target);
     target.logs = [...(Array.isArray(target.logs) ? target.logs : []), nextLog];
   }
 
@@ -653,8 +832,17 @@ export function usePaperWorkflow({
     if (!Number.isInteger(logIndex)) return;
     const target = steps.value.find((item) => item.key === String(stepKey || '').trim());
     if (!target || !Array.isArray(target.logs) || !target.logs[logIndex]) return;
+    if (logIndex !== target.logs.length - 1) return;
 
-    const nextStatus = String(patch?.status || target.logs[logIndex].status || 'pending');
+    const requestedStatus = String(patch?.status || target.logs[logIndex].status || 'pending');
+    const stepStatus = String(target.status || '').trim().toLowerCase();
+    const normalizedRequestedStatus = String(requestedStatus || '').trim().toLowerCase();
+    const nextStatus = (
+      ['done', 'skipped'].includes(stepStatus)
+      && ['doing', 'pending', 'running'].includes(normalizedRequestedStatus)
+    )
+      ? 'done'
+      : requestedStatus;
     target.logs[logIndex] = {
       ...target.logs[logIndex],
       ...patch,
@@ -668,6 +856,7 @@ export function usePaperWorkflow({
     const title = resolveNodeLabel(node);
     const target = steps.value.find((item) => item.key === stepKey);
     if (!target) return;
+    settleStepTransientLogs(target);
     const logs = Array.isArray(target.logs) ? [...target.logs] : [];
     const logIndex = logs.length;
     logs.push({
@@ -681,6 +870,190 @@ export function usePaperWorkflow({
     runtimeNodeLogCursor.set(`${stepKey}::${String(node || '').trim()}`, logIndex);
   }
 
+  function resetNegotiationState() {
+    negotiationByStep.value = createNegotiationStateByStep();
+  }
+
+  function resolveNegotiationTimestamp(event = {}) {
+    const ts = String(event?.ts || '').trim();
+    return ts || new Date().toISOString();
+  }
+
+  function normalizeNegotiationRound(rawRound) {
+    const parsed = Number(rawRound);
+    if (!Number.isFinite(parsed) || parsed <= 0) return 1;
+    return Math.max(1, Math.round(parsed));
+  }
+
+  function toFiniteNegotiationNumber(rawValue) {
+    if (rawValue === null || rawValue === undefined) return null;
+    if (typeof rawValue === 'string' && !rawValue.trim()) return null;
+    const parsed = Number(rawValue);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function hasNegotiationMetricValue(rawValue) {
+    if (rawValue === null || rawValue === undefined) return false;
+    if (typeof rawValue === 'string' && !rawValue.trim()) return false;
+    const parsed = Number(rawValue);
+    return Number.isFinite(parsed) && parsed > 0;
+  }
+
+  function ensureNegotiationStepState(stepKey) {
+    const safeKey = STEP_FLOW_ORDER.includes(stepKey) ? stepKey : 'retrieve';
+    const existing = negotiationByStep.value[safeKey];
+    if (existing && typeof existing === 'object' && Array.isArray(existing.rounds)) {
+      return existing;
+    }
+    negotiationByStep.value[safeKey] = createNegotiationStepState();
+    return negotiationByStep.value[safeKey];
+  }
+
+  function ensureNegotiationRoundState({
+    stepKey,
+    event = {},
+    defaultStatus = 'bidding'
+  }) {
+    const safeTaskId = String(event?.task_id || '').trim();
+    const safeTaskKind = String(event?.task_kind || '').trim().toLowerCase();
+    const roundIndex = normalizeNegotiationRound(event?.round);
+    const stepState = ensureNegotiationStepState(stepKey);
+    const updatedAt = resolveNegotiationTimestamp(event);
+
+    let roundState = stepState.rounds.find((item) => {
+      if (Number(item?.round) !== roundIndex) return false;
+      if (!safeTaskId) return true;
+      if (!String(item?.taskId || '').trim()) return true;
+      return String(item.taskId || '').trim() === safeTaskId;
+    });
+    if (!roundState) {
+      roundState = createNegotiationRoundState({
+        round: roundIndex,
+        taskId: safeTaskId,
+        taskKind: safeTaskKind,
+        status: defaultStatus,
+        updatedAt
+      });
+      stepState.rounds.push(roundState);
+    } else {
+      if (safeTaskId && !String(roundState.taskId || '').trim()) {
+        roundState.taskId = safeTaskId;
+      }
+      if (safeTaskKind) {
+        roundState.taskKind = safeTaskKind;
+      }
+      if (!String(roundState.status || '').trim()) {
+        roundState.status = defaultStatus;
+      }
+      roundState.updatedAt = updatedAt;
+    }
+
+    stepState.activeRound = roundIndex;
+    if (safeTaskKind) {
+      stepState.activeTaskKind = safeTaskKind;
+    }
+    return {
+      stepState,
+      roundState
+    };
+  }
+
+  function buildNegotiationBid(event = {}) {
+    const agentId = String(event?.agent_id || '').trim();
+    const profile = String(event?.profile || '').trim().toLowerCase();
+    return {
+      agentId,
+      profile,
+      label: resolveAgentRuntimeLabel(agentId, profile),
+      confidence: toFiniteNegotiationNumber(event?.confidence),
+      estimatedLatencyMs: toFiniteNegotiationNumber(event?.estimated_latency_ms),
+      estimatedCost: toFiniteNegotiationNumber(event?.estimated_cost),
+      rationale: String(event?.rationale || '').trim(),
+      status: 'bid'
+    };
+  }
+
+  function mergeWinnerBidMetrics(existingBid = {}, incomingBid = {}) {
+    const merged = {
+      ...existingBid,
+      ...incomingBid
+    };
+    if (!hasNegotiationMetricValue(incomingBid?.confidence) && hasNegotiationMetricValue(existingBid?.confidence)) {
+      merged.confidence = existingBid.confidence;
+    }
+    if (!hasNegotiationMetricValue(incomingBid?.estimatedLatencyMs) && hasNegotiationMetricValue(existingBid?.estimatedLatencyMs)) {
+      merged.estimatedLatencyMs = existingBid.estimatedLatencyMs;
+    }
+    if (!hasNegotiationMetricValue(incomingBid?.estimatedCost) && hasNegotiationMetricValue(existingBid?.estimatedCost)) {
+      merged.estimatedCost = existingBid.estimatedCost;
+    }
+    return merged;
+  }
+
+  function upsertNegotiationBid(roundState, nextBid) {
+    if (!roundState || !nextBid) return;
+    const safeAgentId = String(nextBid.agentId || '').trim();
+    const safeProfile = String(nextBid.profile || '').trim().toLowerCase();
+    if (!safeAgentId) return;
+    const index = roundState.bids.findIndex((item) => (
+      String(item?.agentId || '').trim() === safeAgentId
+      && String(item?.profile || '').trim().toLowerCase() === safeProfile
+    ));
+    if (index >= 0) {
+      roundState.bids[index] = {
+        ...roundState.bids[index],
+        ...nextBid
+      };
+      return;
+    }
+    roundState.bids.push(nextBid);
+  }
+
+  function assignNegotiationWinner(roundState, winnerBid) {
+    if (!roundState || !winnerBid) return;
+    const safeAgentId = String(winnerBid.agentId || '').trim();
+    const safeProfile = String(winnerBid.profile || '').trim().toLowerCase();
+    if (!safeAgentId) return;
+
+    let winnerRef = null;
+    for (const bid of roundState.bids) {
+      const bidAgentId = String(bid?.agentId || '').trim();
+      const bidProfile = String(bid?.profile || '').trim().toLowerCase();
+      const matched = bidAgentId === safeAgentId && (!safeProfile || bidProfile === safeProfile);
+      if (matched) {
+        bid.status = 'winner';
+        winnerRef = bid;
+      } else if (String(bid?.status || '').trim().toLowerCase() === 'winner') {
+        bid.status = 'bid';
+      }
+    }
+
+    if (!winnerRef) {
+      winnerRef = {
+        ...winnerBid,
+        status: 'winner'
+      };
+      roundState.bids.push(winnerRef);
+    } else {
+      Object.assign(
+        winnerRef,
+        mergeWinnerBidMetrics(winnerRef, winnerBid),
+        { status: 'winner' }
+      );
+    }
+
+    roundState.winner = {
+      agentId: winnerRef.agentId,
+      profile: winnerRef.profile,
+      label: winnerRef.label,
+      confidence: winnerRef.confidence,
+      estimatedLatencyMs: winnerRef.estimatedLatencyMs,
+      estimatedCost: winnerRef.estimatedCost,
+      rationale: winnerRef.rationale,
+      status: winnerRef.status
+    };
+  }
+
   function resetUnifiedRuntimeState() {
     stopResearchPolling();
     closeResearchSocket();
@@ -692,6 +1065,7 @@ export function usePaperWorkflow({
     pendingLineagePayload.value = null;
     graphSnapshotSignature.value = '';
     runtimeNodeLogCursor.clear();
+    resetNegotiationState();
   }
 
   async function playRetrievalTrace(rawSteps) {
@@ -731,6 +1105,7 @@ export function usePaperWorkflow({
 
   function resetSteps() {
     runtimeNodeLogCursor.clear();
+    resetNegotiationState();
     for (const step of steps.value) {
       step.status = 'pending';
       step.message = '';
@@ -775,7 +1150,8 @@ export function usePaperWorkflow({
       paper_range_years: parsePaperRangeYears(seed?.paper_range_years),
       quick_mode: Boolean(seed?.quick_mode),
       auto_lineage: Boolean(seed?.auto_lineage),
-      lineage_seed_paper_id: String(seed?.lineage_seed_paper_id || '').trim()
+      lineage_seed_paper_id: String(seed?.lineage_seed_paper_id || '').trim(),
+      runtime_session_id: String(seed?.runtime_session_id || '').trim()
     };
   }
 
@@ -794,6 +1170,30 @@ export function usePaperWorkflow({
     );
   }
 
+  function persistActiveRuntimeSessionSnapshot(snapshot = {}) {
+    const sessionId = String(snapshot?.session_id || researchSessionId.value || '').trim();
+    if (!sessionId) return;
+    const snapshotProgress = Number(snapshot?.progress);
+    const doneCount = steps.value.filter((item) => item.status === 'done').length;
+    const fallbackProgress = Math.max(0, Math.min(100, doneCount * 25));
+    persistActiveResearchSessionRecord({
+      session_id: sessionId,
+      status: String(snapshot?.status || 'running').trim().toLowerCase(),
+      progress: Number.isFinite(snapshotProgress) ? snapshotProgress : fallbackProgress,
+      current_node: String(snapshot?.current_node || '').trim(),
+      waiting_checkpoint: String(snapshot?.waiting_checkpoint || waitingResearchCheckpoint.value || '').trim(),
+      input_type: String(snapshot?.input_type || runtimeSeed.value.input_type || 'domain').trim().toLowerCase(),
+      input_value: String(snapshot?.input_value || runtimeSeed.value.input_value || '').trim(),
+      paper_range_years: snapshot?.paper_range_years ?? runtimeSeed.value.paper_range_years,
+      quick_mode: Boolean(
+        snapshot?.quick_mode !== undefined
+          ? snapshot.quick_mode
+          : runtimeSeed.value.quick_mode
+      ),
+      updated_at: new Date().toISOString()
+    });
+  }
+
   function resolveCheckpointStepKey(checkpointNode) {
     const normalized = String(checkpointNode || '').trim().toLowerCase();
     if (normalized === 'checkpoint_1') return 'checkpoint';
@@ -806,7 +1206,18 @@ export function usePaperWorkflow({
     if (normalized === 'checkpoint_2') {
       return '确认生成血缘树';
     }
-    return '确认需求并继续';
+    return '继续执行';
+  }
+
+  function resolveAutoCheckpointDoneMessage(checkpointNode) {
+    const normalized = String(checkpointNode || '').trim().toLowerCase();
+    if (normalized === 'checkpoint_1') {
+      return '检索阶段已确认，系统自动继续生成知识图谱。';
+    }
+    if (normalized === 'checkpoint_2') {
+      return '血缘树阶段已确认，系统自动继续后续分析。';
+    }
+    return '已自动确认，正在继续执行。';
   }
 
   function shouldAutoConfirmCheckpoint(checkpointNode) {
@@ -845,8 +1256,27 @@ export function usePaperWorkflow({
       const status = String(step.status || '').trim().toLowerCase();
       if (!['done', 'skipped'].includes(status)) {
         step.status = 'done';
+        if (!String(step.message || '').trim()) {
+          step.message = `${step.title}已完成。`;
+        }
+      }
+      finalizeStepLogs(step);
+    }
+  }
+
+  function resolveFailureStepKey(message, currentNode = '', waitingCheckpoint = '') {
+    const errorText = String(message || '').trim().toLowerCase();
+    if (errorText) {
+      const matchedTask = errorText.match(
+        /(?:negotiation_budget_exhausted|no_agent_bid_for_task|critic_rejected|agent_execution_failed):([a-z0-9_]+)/i
+      );
+      if (matchedTask && matchedTask[1]) {
+        return resolveStepKeyByTaskKind(matchedTask[1]);
       }
     }
+    const checkpointStep = resolveCheckpointStepKey(waitingCheckpoint);
+    if (checkpointStep) return checkpointStep;
+    return resolveStepKeyByNode(currentNode || 'lineage');
   }
 
   function buildGraphSignature(rawGraph = {}) {
@@ -1024,7 +1454,7 @@ export function usePaperWorkflow({
     if (!target) return;
 
     if (shouldAutoConfirmCheckpoint(checkpoint)) {
-      const autoMessage = '知识图谱已生成，系统将自动继续后续分析。';
+      const autoMessage = resolveAutoCheckpointDoneMessage(checkpoint);
       setStepStatus(target.index, 'done', autoMessage);
       appendStepLog(stepKey, {
         title: resolveNodeLabel(checkpoint),
@@ -1053,6 +1483,184 @@ export function usePaperWorkflow({
     });
   }
 
+  function handleNegotiationRoundStarted(event = {}) {
+    const taskKind = String(event?.task_kind || '').trim().toLowerCase();
+    const stepKey = resolveStepKeyByTaskKind(taskKind);
+    const round = normalizeNegotiationRound(event?.round);
+    const taskLabel = resolveTaskKindLabel(taskKind);
+    markEarlierStepsDone(stepKey);
+    const { roundState } = ensureNegotiationRoundState({
+      stepKey,
+      event,
+      defaultStatus: 'bidding'
+    });
+    roundState.status = 'bidding';
+    roundState.updatedAt = resolveNegotiationTimestamp(event);
+    setStepStatusByKey(stepKey, 'running', `协商中：正在为 ${taskLabel} 选择执行方案。`);
+    appendStepLog(stepKey, {
+      title: 'Coordinator Agent',
+      detail: `第 ${round} 轮协商已启动：正在评估 ${taskLabel} 的执行候选。`,
+      status: 'doing'
+    });
+  }
+
+  function handleNegotiationBidReceived(event = {}) {
+    const taskKind = String(event?.task_kind || '').trim().toLowerCase();
+    const stepKey = resolveStepKeyByTaskKind(taskKind);
+    markEarlierStepsDone(stepKey);
+    const { roundState } = ensureNegotiationRoundState({
+      stepKey,
+      event,
+      defaultStatus: 'bidding'
+    });
+    upsertNegotiationBid(roundState, buildNegotiationBid(event));
+    if (!['awarded', 'vetoed', 'rebid'].includes(String(roundState.status || '').trim().toLowerCase())) {
+      roundState.status = 'bidding';
+    }
+    roundState.updatedAt = resolveNegotiationTimestamp(event);
+    const agentLabel = resolveAgentRuntimeLabel(event?.agent_id, event?.profile);
+    const confidence = toFiniteNegotiationNumber(event?.confidence);
+    const estimatedLatencyMs = toFiniteNegotiationNumber(event?.estimated_latency_ms);
+    const estimatedCost = toFiniteNegotiationNumber(event?.estimated_cost);
+    const confidenceText = Number.isFinite(confidence) ? confidence.toFixed(3) : '计算中';
+    const latencyText = Number.isFinite(estimatedLatencyMs) ? `${Math.max(1, Math.round(estimatedLatencyMs))}ms` : '计算中';
+    const costText = Number.isFinite(estimatedCost) ? estimatedCost.toFixed(3) : '计算中';
+    appendStepLog(stepKey, {
+      title: 'Coordinator Agent',
+      detail: `收到候选方案：${agentLabel}（置信度 ${confidenceText}，预计耗时 ${latencyText}，预计成本 ${costText}）。`,
+      status: 'pending'
+    });
+  }
+
+  function handleNegotiationContractAwarded(event = {}) {
+    const taskKind = String(event?.task_kind || '').trim().toLowerCase();
+    const stepKey = resolveStepKeyByTaskKind(taskKind);
+    markEarlierStepsDone(stepKey);
+    const { roundState } = ensureNegotiationRoundState({
+      stepKey,
+      event,
+      defaultStatus: 'bidding'
+    });
+    assignNegotiationWinner(roundState, buildNegotiationBid(event));
+    roundState.status = 'awarded';
+    roundState.updatedAt = resolveNegotiationTimestamp(event);
+    const agentLabel = resolveAgentRuntimeLabel(event?.agent_id, event?.profile);
+    setStepStatusByKey(stepKey, 'running', `已确认执行方案：${agentLabel}。`);
+    appendStepLog(stepKey, {
+      title: 'Coordinator Agent',
+      detail: `已授予执行合约：${agentLabel}。`,
+      status: 'doing'
+    });
+  }
+
+  function handleNegotiationBudgetUpdate(event = {}) {
+    const taskKind = String(event?.task_kind || '').trim().toLowerCase();
+    const stepKey = resolveStepKeyByTaskKind(taskKind);
+    markEarlierStepsDone(stepKey);
+    const stepState = ensureNegotiationStepState(stepKey);
+    stepState.budget.spent = toFiniteNegotiationNumber(event?.spent);
+    stepState.budget.limit = toFiniteNegotiationNumber(event?.limit);
+    stepState.budget.remaining = toFiniteNegotiationNumber(event?.remaining);
+    if (Number.isFinite(Number(event?.round))) {
+      const { roundState } = ensureNegotiationRoundState({
+        stepKey,
+        event,
+        defaultStatus: 'bidding'
+      });
+      roundState.updatedAt = resolveNegotiationTimestamp(event);
+    }
+    const safeTaskKind = String(event?.task_kind || '').trim().toLowerCase();
+    if (safeTaskKind) {
+      stepState.activeTaskKind = safeTaskKind;
+    }
+    const spent = Number(event?.spent);
+    const limit = Number(event?.limit);
+    const remaining = Number(event?.remaining);
+    const spentText = Number.isFinite(spent) ? spent.toFixed(3) : '-';
+    const limitText = Number.isFinite(limit) ? limit.toFixed(3) : '-';
+    const remainingText = Number.isFinite(remaining) ? remaining.toFixed(3) : '-';
+    appendStepLog(stepKey, {
+      title: 'Coordinator Agent',
+      detail: `预算更新：已使用 ${spentText} / ${limitText}，剩余 ${remainingText}。`,
+      status: 'done'
+    });
+  }
+
+  function handleNegotiationCriticVeto(event = {}) {
+    const taskKind = String(event?.task_kind || '').trim().toLowerCase();
+    const stepKey = resolveStepKeyByTaskKind(taskKind);
+    const reason = String(event?.reason || '').trim() || '执行结果未通过质量审核。';
+    markEarlierStepsDone(stepKey);
+    const { roundState } = ensureNegotiationRoundState({
+      stepKey,
+      event,
+      defaultStatus: 'bidding'
+    });
+    const vetoedAgentId = String(event?.agent_id || '').trim();
+    const vetoedProfile = String(event?.profile || '').trim().toLowerCase();
+    roundState.status = 'vetoed';
+    roundState.veto = {
+      reason,
+      severity: String(event?.severity || '').trim().toLowerCase(),
+      at: resolveNegotiationTimestamp(event)
+    };
+    roundState.updatedAt = resolveNegotiationTimestamp(event);
+    if (vetoedAgentId) {
+      let matched = false;
+      for (const bid of roundState.bids) {
+        const bidAgentId = String(bid?.agentId || '').trim();
+        const bidProfile = String(bid?.profile || '').trim().toLowerCase();
+        if (bidAgentId === vetoedAgentId && (!vetoedProfile || bidProfile === vetoedProfile)) {
+          bid.status = 'vetoed';
+          matched = true;
+        } else if (String(bid?.status || '').trim().toLowerCase() === 'winner') {
+          bid.status = 'bid';
+        }
+      }
+      if (!matched) {
+        roundState.bids.push({
+          ...buildNegotiationBid(event),
+          status: 'vetoed'
+        });
+      }
+      if (roundState.winner && String(roundState.winner.agentId || '').trim() === vetoedAgentId) {
+        roundState.winner.status = 'vetoed';
+      }
+    }
+    setStepStatusByKey(stepKey, 'running', '质量审核未通过，准备重新协商执行方案。');
+    appendStepLog(stepKey, {
+      title: 'Quality SubAgent',
+      detail: `审核结论：${reason}`,
+      status: 'fallback'
+    });
+  }
+
+  function handleNegotiationRebidScheduled(event = {}) {
+    const taskKind = String(event?.task_kind || '').trim().toLowerCase();
+    const stepKey = resolveStepKeyByTaskKind(taskKind);
+    const retryCount = Number(event?.retry_count);
+    const reason = String(event?.reason || '').trim();
+    markEarlierStepsDone(stepKey);
+    const { roundState } = ensureNegotiationRoundState({
+      stepKey,
+      event,
+      defaultStatus: 'bidding'
+    });
+    roundState.status = 'rebid';
+    roundState.rebid = {
+      reason: reason || '正在重新发起竞标。',
+      retryCount: Number.isFinite(retryCount) ? Math.max(1, Math.round(retryCount)) : null,
+      at: resolveNegotiationTimestamp(event)
+    };
+    roundState.updatedAt = resolveNegotiationTimestamp(event);
+    const retryText = Number.isFinite(retryCount) ? `第 ${Math.max(1, Math.round(retryCount))} 次重试` : '已触发重试';
+    appendStepLog(stepKey, {
+      title: 'Coordinator Agent',
+      detail: `${retryText}：${reason || '正在重新发起竞标。'}`,
+      status: 'doing'
+    });
+  }
+
   async function refreshRuntimeSnapshot({ finalize = false } = {}) {
     const sessionId = String(researchSessionId.value || '').trim();
     if (!sessionId) return null;
@@ -1060,6 +1668,17 @@ export function usePaperWorkflow({
       accessToken: accessTokenRef.value || ''
     });
     hydrateRuntimeArtifacts(snapshot || {});
+    persistActiveRuntimeSessionSnapshot({
+      session_id: sessionId,
+      status: snapshot?.status,
+      progress: snapshot?.progress,
+      current_node: snapshot?.current_node,
+      waiting_checkpoint: snapshot?.waiting_checkpoint,
+      input_type: snapshot?.input_type,
+      input_value: snapshot?.input_value,
+      paper_range_years: snapshot?.paper_range_years,
+      quick_mode: snapshot?.quick_mode
+    });
 
     const status = String(snapshot?.status || '').trim().toLowerCase();
     if (status === 'completed') {
@@ -1090,6 +1709,7 @@ export function usePaperWorkflow({
       runtimeAutoResumingCheckpoint.value = '';
       graphLoading.value = false;
       unifiedRuntimeActive.value = false;
+      clearActiveResearchSessionRecord();
       stopResearchPolling();
       closeResearchSocket();
       return snapshot;
@@ -1101,15 +1721,16 @@ export function usePaperWorkflow({
 
     if (status === 'failed') {
       const currentNode = String(snapshot?.current_node || '').trim().toLowerCase();
-      const stepKey = resolveStepKeyByNode(currentNode);
       const detail = Array.isArray(snapshot?.errors) && snapshot.errors.length
         ? String(snapshot.errors[snapshot.errors.length - 1] || '').trim()
         : '研究流程执行失败。';
       errorMessage.value = detail || '研究流程执行失败。';
+      const stepKey = resolveFailureStepKey(errorMessage.value, currentNode, waitingResearchCheckpoint.value);
       setStepStatusByKey(stepKey, 'failed', errorMessage.value);
       appendFailureLog(stepKey, errorMessage.value);
       graphLoading.value = false;
       unifiedRuntimeActive.value = false;
+      clearActiveResearchSessionRecord();
       stopResearchPolling();
       closeResearchSocket();
       return snapshot;
@@ -1120,6 +1741,7 @@ export function usePaperWorkflow({
       graphLoading.value = false;
       unifiedRuntimeActive.value = false;
       runtimeAutoResumingCheckpoint.value = '';
+      clearActiveResearchSessionRecord();
       stopResearchPolling();
       closeResearchSocket();
       return snapshot;
@@ -1136,7 +1758,7 @@ export function usePaperWorkflow({
       const target = steps.value.find((item) => item.key === stepKey);
       if (target) {
         if (shouldAutoConfirmCheckpoint(waiting)) {
-          setStepStatus(target.index, 'done', '知识图谱已生成，系统自动继续后续分析。');
+          setStepStatus(target.index, 'done', resolveAutoCheckpointDoneMessage(waiting));
           setStepAction(stepKey, null);
         } else {
           const actionMessage = waiting === 'checkpoint_2'
@@ -1168,12 +1790,16 @@ export function usePaperWorkflow({
   function handleRuntimeError(event = {}) {
     const message = String(event?.error || event?.message || '').trim() || '研究流程执行失败。';
     errorMessage.value = message;
-    const checkpointStep = resolveCheckpointStepKey(waitingResearchCheckpoint.value);
-    const fallbackStep = checkpointStep || resolveStepKeyByNode(event?.node || 'lineage');
+    const fallbackStep = resolveFailureStepKey(
+      message,
+      String(event?.node || '').trim().toLowerCase(),
+      waitingResearchCheckpoint.value
+    );
     setStepStatusByKey(fallbackStep, 'failed', message);
     appendFailureLog(fallbackStep, message);
     graphLoading.value = false;
     unifiedRuntimeActive.value = false;
+    clearActiveResearchSessionRecord();
     stopResearchPolling();
     closeResearchSocket();
   }
@@ -1183,6 +1809,7 @@ export function usePaperWorkflow({
     graphLoading.value = false;
     unifiedRuntimeActive.value = false;
     waitingResearchCheckpoint.value = '';
+    clearActiveResearchSessionRecord();
     stopResearchPolling();
     closeResearchSocket();
   }
@@ -1204,6 +1831,30 @@ export function usePaperWorkflow({
     }
     if (type === 'pause') {
       handleRuntimePause(event);
+      return;
+    }
+    if (type === 'negotiation_round_started') {
+      handleNegotiationRoundStarted(event);
+      return;
+    }
+    if (type === 'negotiation_bid_received') {
+      handleNegotiationBidReceived(event);
+      return;
+    }
+    if (type === 'negotiation_contract_awarded') {
+      handleNegotiationContractAwarded(event);
+      return;
+    }
+    if (type === 'negotiation_budget_update') {
+      handleNegotiationBudgetUpdate(event);
+      return;
+    }
+    if (type === 'negotiation_critic_veto') {
+      handleNegotiationCriticVeto(event);
+      return;
+    }
+    if (type === 'negotiation_rebid_scheduled') {
+      handleNegotiationRebidScheduled(event);
       return;
     }
     if (type === 'session_complete') {
@@ -1269,6 +1920,22 @@ export function usePaperWorkflow({
       });
     }
 
+    const scheduleCheckpointAutoRetry = () => {
+      const target = steps.value.find((item) => item.key === 'checkpoint');
+      if (target) {
+        setStepStatus(target.index, 'running', '自动继续失败，正在重试...');
+      }
+      setStepAction('checkpoint', null);
+      runtimeAutoResumingCheckpoint.value = '';
+      window.setTimeout(() => {
+        if (!unifiedRuntimeActive.value) return;
+        const waiting = String(waitingResearchCheckpoint.value || '').trim().toLowerCase();
+        if (waiting !== checkpoint) return;
+        runtimeAutoResumingCheckpoint.value = checkpoint;
+        void continueAfterUnifiedCheckpoint('checkpoint', { auto: true });
+      }, 1200);
+    };
+
     try {
       const result = await resumeResearchSession(
         sessionId,
@@ -1281,6 +1948,8 @@ export function usePaperWorkflow({
             label: resolveCheckpointActionLabel(checkpoint),
             disabled: false
           });
+        } else if (safeStepKey === 'checkpoint') {
+          scheduleCheckpointAutoRetry();
         } else {
           const target = steps.value.find((item) => item.key === safeStepKey);
           if (target) {
@@ -1308,7 +1977,7 @@ export function usePaperWorkflow({
       const target = steps.value.find((item) => item.key === safeStepKey);
       if (target) {
         if (auto && safeStepKey === 'checkpoint') {
-          setStepStatus(target.index, 'done', '知识图谱已生成，系统自动继续后续分析。');
+          setStepStatus(target.index, 'done', resolveAutoCheckpointDoneMessage(checkpoint));
         } else if (checkpoint === 'checkpoint_2') {
           setStepStatus(target.index, 'running', '已确认，正在生成血缘树...');
           appendStepLog('lineage', {
@@ -1326,13 +1995,17 @@ export function usePaperWorkflow({
       }
     } catch (error) {
       const message = error?.message || '继续执行失败。';
-      errorMessage.value = message;
+      if (!(auto && safeStepKey === 'checkpoint')) {
+        errorMessage.value = message;
+      }
       runtimeAutoResumingCheckpoint.value = '';
       if (!auto) {
         setStepAction(safeStepKey, {
           label: resolveCheckpointActionLabel(checkpoint),
           disabled: false
         });
+      } else if (safeStepKey === 'checkpoint') {
+        scheduleCheckpointAutoRetry();
       } else {
         const target = steps.value.find((item) => item.key === safeStepKey);
         if (target) {
@@ -1361,6 +2034,54 @@ export function usePaperWorkflow({
     } finally {
       resetUnifiedRuntimeState();
       graphLoading.value = false;
+      clearActiveResearchSessionRecord();
+    }
+  }
+
+  function markWorkflowTerminated(message = '流程已终止。') {
+    const safeMessage = String(message || '').trim() || '流程已终止。';
+    const runningStep = steps.value.find((item) => {
+      const status = String(item?.status || '').trim().toLowerCase();
+      return status === 'running' || status === 'action_required';
+    });
+    const targetStep = runningStep || activeStep.value || steps.value[0] || null;
+    if (targetStep) {
+      setStepStatus(targetStep.index, 'failed', safeMessage);
+      appendFailureLog(targetStep.key, safeMessage);
+    }
+    setStepAction('checkpoint', null);
+    setStepAction('lineage', null);
+    waitingResearchCheckpoint.value = '';
+    runtimeAutoResumingCheckpoint.value = '';
+    errorMessage.value = safeMessage;
+    graphLoading.value = false;
+    unifiedRuntimeActive.value = false;
+  }
+
+  async function terminateWorkflow() {
+    if (terminatingWorkflow.value || !canTerminateWorkflow.value) {
+      return false;
+    }
+    terminatingWorkflow.value = true;
+    try {
+      const hasRuntimeSession = Boolean(String(researchSessionId.value || '').trim());
+      if (hasRuntimeSession && unifiedRuntimeActive.value) {
+        await stopUnifiedRuntimeSession({ silent: false });
+      } else {
+        stopResearchPolling();
+        closeResearchSocket();
+        resetUnifiedRuntimeState();
+        graphLoading.value = false;
+      }
+      clearActiveResearchSessionRecord();
+      markWorkflowTerminated('流程已终止。');
+      return true;
+    } catch (error) {
+      errorMessage.value = String(error?.message || '').trim() || '终止流程失败。';
+      return false;
+    } finally {
+      terminatingWorkflow.value = false;
+      updateStepSignal();
     }
   }
 
@@ -1383,6 +2104,14 @@ export function usePaperWorkflow({
     waitingResearchCheckpoint.value = '';
     runtimeAutoResumingCheckpoint.value = '';
     lineageRevealApproved.value = false;
+    persistActiveRuntimeSessionSnapshot({
+      session_id: sessionId,
+      status: 'running',
+      input_type: runtimeSeed.value.input_type,
+      input_value: runtimeSeed.value.input_value,
+      paper_range_years: runtimeSeed.value.paper_range_years,
+      quick_mode: runtimeSeed.value.quick_mode
+    });
 
     setStepStatus(1, 'running', createRetrievalRunningMessage(runtimeSeed.value.input_type));
     setStepLogs('retrieve', []);
@@ -1390,6 +2119,36 @@ export function usePaperWorkflow({
     startResearchPolling();
     void refreshRuntimeSnapshot().catch(() => {
       // initial snapshot is optional; websocket events are the primary source
+    });
+  }
+
+  async function attachUnifiedWorkflowSession(seed) {
+    runtimeSeed.value = normalizeRuntimeSeed(seed || {});
+    const sessionId = String(runtimeSeed.value.runtime_session_id || '').trim();
+    if (!sessionId) {
+      throw new Error('research_session_missing');
+    }
+
+    unifiedRuntimeActive.value = true;
+    researchSessionId.value = sessionId;
+    waitingResearchCheckpoint.value = '';
+    runtimeAutoResumingCheckpoint.value = '';
+    lineageRevealApproved.value = false;
+    persistActiveRuntimeSessionSnapshot({
+      session_id: sessionId,
+      status: 'running',
+      input_type: runtimeSeed.value.input_type,
+      input_value: runtimeSeed.value.input_value,
+      paper_range_years: runtimeSeed.value.paper_range_years,
+      quick_mode: runtimeSeed.value.quick_mode
+    });
+
+    setStepStatus(1, 'running', '检测到已有进行中任务，正在恢复执行状态...');
+    setStepLogs('retrieve', []);
+    bindResearchSocket(sessionId);
+    startResearchPolling();
+    void refreshRuntimeSnapshot().catch(() => {
+      // keep websocket-driven recoveries resilient when snapshot fetch is transiently unavailable
     });
   }
 
@@ -1497,10 +2256,7 @@ export function usePaperWorkflow({
     const context = checkpointContext.value;
     if (!context) return;
 
-    setStepAction('checkpoint', {
-      label: '确认需求并继续',
-      disabled: true
-    });
+    setStepAction('checkpoint', null);
     const checkpointLogs = Array.isArray(steps.value.find((item) => item.key === 'checkpoint')?.logs)
       ? [...(steps.value.find((item) => item.key === 'checkpoint')?.logs || [])]
       : [];
@@ -1638,16 +2394,26 @@ export function usePaperWorkflow({
   async function runWorkflow() {
     if (graphLoading.value) return;
 
-    await stopUnifiedRuntimeSession({ silent: true });
+    const seed = seedRef.value || {};
+    const resumeSessionId = String(seed?.runtime_session_id || '').trim();
+    if (unifiedRuntimeActive.value && !resumeSessionId) {
+      await stopUnifiedRuntimeSession({ silent: true });
+    } else {
+      resetUnifiedRuntimeState();
+    }
+    resetNegotiationState();
     resetSteps();
     resetLineageState();
     checkpointContext.value = null;
     errorMessage.value = '';
     graphLoading.value = true;
 
-    const seed = seedRef.value || {};
     try {
-      await runUnifiedWorkflow(seed);
+      if (resumeSessionId) {
+        await attachUnifiedWorkflowSession(seed);
+      } else {
+        await runUnifiedWorkflow(seed);
+      }
       errorMessage.value = '';
     } catch (error) {
       resetUnifiedRuntimeState();
@@ -1656,7 +2422,22 @@ export function usePaperWorkflow({
         await runLegacyWorkflow();
         return;
       }
-      errorMessage.value = error?.message || '研究流程启动失败。';
+      const rawMessage = String(error?.message || '').trim();
+      const activeSessionMatch = rawMessage.match(/^active_session_exists:([a-z0-9-]+)$/i);
+      if (activeSessionMatch && activeSessionMatch[1]) {
+        const activeSessionId = String(activeSessionMatch[1]).trim();
+        persistActiveResearchSessionRecord({
+          session_id: activeSessionId,
+          status: 'running',
+          input_type: String(seed?.input_type || 'domain').trim().toLowerCase(),
+          input_value: String(seed?.input_value || '').trim(),
+          paper_range_years: seed?.paper_range_years ?? null,
+          quick_mode: Boolean(seed?.quick_mode)
+        });
+        errorMessage.value = '当前已有进行中的任务，请先恢复该任务或等待其完成。';
+      } else {
+        errorMessage.value = rawMessage || '研究流程启动失败。';
+      }
       setStepStatus(1, 'failed', '研究流程启动失败。');
       appendFailureLog('retrieve', errorMessage.value);
       graphLoading.value = false;
@@ -1716,8 +2497,8 @@ export function usePaperWorkflow({
     });
 
     const payload = await loadLineage(seedPaperId, {
-      ancestorDepth: 2,
-      descendantDepth: 2,
+      ancestorDepth: 3,
+      descendantDepth: 3,
       forceRefresh: true
     });
 
@@ -1819,13 +2600,16 @@ export function usePaperWorkflow({
   );
 
   onUnmounted(() => {
-    void stopUnifiedRuntimeSession({ silent: true });
-    resetUnifiedRuntimeState();
+    stopResearchPolling();
+    closeResearchSocket();
   });
 
   return {
     steps,
+    negotiationByStep,
     graphLoading,
+    canTerminateWorkflow,
+    terminatingWorkflow,
     graphData,
     errorMessage,
     lineageLoading,
@@ -1839,6 +2623,7 @@ export function usePaperWorkflow({
     activeViewKey,
     canViewLineage,
     runWorkflow,
+    terminateWorkflow,
     handleStepAction
   };
 }

@@ -25,6 +25,9 @@ class PipelineState(TypedDict):
     # search
     papers: list[dict[str, Any]]
     seed_paper: dict[str, Any] | None
+    search_fallback_applied: bool
+    search_fallback_from_years: int | None
+    search_fallback_to_years: int | None
 
     # graph
     graph_id: str | None
@@ -87,6 +90,9 @@ def build_initial_state(
         search_keywords=[],
         papers=[],
         seed_paper=None,
+        search_fallback_applied=False,
+        search_fallback_from_years=None,
+        search_fallback_to_years=None,
         graph_id=None,
         graph_nodes=[],
         graph_edges=[],

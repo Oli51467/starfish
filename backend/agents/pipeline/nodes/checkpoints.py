@@ -19,9 +19,8 @@ async def human_checkpoint_1(state: PipelineState) -> PipelineState:
     await runtime.emit_node_start(session_id, node, 45)
 
     message = (
-        f"图谱构建完成：节点 {len(state.get('graph_nodes') or [])}，"
-        f"关系 {len(state.get('graph_edges') or [])}。"
-        "请确认是否继续深度分析。"
+        f"论文检索完成：已筛选 {len(state.get('papers') or [])} 篇论文。"
+        "请确认是否继续生成知识图谱。"
     )
     feedback = await runtime.wait_for_checkpoint(
         session_id,
@@ -39,7 +38,7 @@ async def human_checkpoint_1(state: PipelineState) -> PipelineState:
             search_keywords + extract_keywords_from_text(feedback, limit=4)
         )
 
-    summary = "检查点确认完成，进入并行分析阶段。"
+    summary = "检查点确认完成，进入知识图谱构建阶段。"
     await runtime.emit_node_complete(session_id, node, 45, summary)
 
     return {

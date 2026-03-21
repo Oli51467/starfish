@@ -917,7 +917,7 @@ class GraphRAGService:
             return papers
 
         current_year = datetime.now(timezone.utc).year
-        target_years = list(range(max(1, current_year - normalized_range + 1), current_year + 1))
+        target_years = list(range(max(1, current_year - normalized_range), current_year + 1))
         merged = self._merge_candidate_lists(
             primary=[],
             secondary=list(papers or []),
@@ -1794,7 +1794,7 @@ class GraphRAGService:
             return papers, {"applied": False, "removed": 0, "from_year": None}
 
         current_year = datetime.now(timezone.utc).year
-        from_year = max(1, current_year - normalized_range + 1)
+        from_year = max(1, current_year - normalized_range)
         preserve_key = self._paper_key(preserve_paper_id)
         filtered: list[dict[str, Any]] = []
         removed = 0
@@ -1945,7 +1945,7 @@ class GraphRAGService:
             return [item for _score, _representative, item in ranked[:max_papers]]
 
         current_year = datetime.now(timezone.utc).year
-        target_years = list(range(max(1, current_year - normalized_range + 1), current_year + 1))
+        target_years = list(range(max(1, current_year - normalized_range), current_year + 1))
         selected: list[dict[str, Any]] = []
         selected_ids: set[str] = set()
 
