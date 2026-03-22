@@ -271,6 +271,17 @@ watch(
   background: var(--line-2);
 }
 
+.paper-workflow-layout.is-graph-fullscreen .paper-workflow-side,
+.paper-workflow-layout.is-lineage-fullscreen .paper-workflow-side {
+  display: none;
+}
+
+.paper-workflow-layout.is-graph-fullscreen .paper-result-side,
+.paper-workflow-layout.is-lineage-fullscreen .paper-result-side {
+  padding-left: 0;
+  grid-column: 1 / -1;
+}
+
 .paper-workflow-side,
 .paper-result-side {
   min-height: 0;
@@ -287,11 +298,11 @@ watch(
 }
 
 .workflow-result-shell {
+  display: grid;
   min-height: 0;
   height: 100%;
   max-height: 100%;
   grid-template-rows: minmax(0, 1fr);
-  gap: 0;
 }
 
 .workflow-result-tabbar {

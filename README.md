@@ -2,14 +2,14 @@
   <img src="frontend/public/assets/brand/logo-light.png" alt="Starfish Logo" width="280" />
 </p>
 
-<h3 align="center">Starfish <span style="font-size:0.62em;font-weight:400;">· <a href="./README.zh.md">中文</a>｜<a href="./README.md"><strong>English</strong></a></span></h3>
+<p align="center"><strong>Starfish</strong> · <a href="./README.zh.md">中文</a>｜<a href="./README.md"><strong>English</strong></a></p>
 <p align="center">
-  <img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&size=17&speed=80&pause=220&deleteSpeed=90&color=111111&center=true&vCenter=true&repeat=true&width=980&lines=Science+Research+Engine+%C2%B7+Multi-Agent+Knowledge+Graph+Workbench;%20" alt="Typing Subtitle" />
+  <img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&size=17&speed=45&pause=80&deleteSpeed=120&color=111111&center=true&vCenter=true&repeat=true&width=980&lines=Science+Research+Engine+%C2%B7+Multi-Agent+Knowledge+Graph+Workbench;%20" alt="Typing Subtitle" />
 </p>
 
 ## ⚡ Project Overview
 
-**Starfish** is designed to turn research exploration from a one-off tool into a continuously evolving system. Through autonomous multi-agent collaboration, it can proactively retrieve evidence, generate insights, and iteratively refine strategies after each execution cycle. It is ready to use out of the box, yet not a static pipeline: it grows with evolving agent skills, toolsets, and memory bases. Compared with traditional human-in-the-loop workflows, Starfish follows a more human-on-the-loop paradigm, where researchers steer direction and judgment boundaries while AI co-evolves as a long-term research partner.
+**Starfish** is designed to turn research exploration from a one-off tool into a continuously evolving system. Through autonomous **multi-agent collaboration**, it can proactively retrieve evidence, generate insights, and iteratively refine strategies after each execution cycle. It is ready to use out of the box, yet not a static pipeline: it grows with evolving agent skills, toolsets, and memory bases. Compared with traditional human-in-the-loop workflows, Starfish follows a more human-on-the-loop paradigm, where researchers steer direction and judgment boundaries while AI co-evolves as a long-term research partner.
 
 ## ✨ Features
 

@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router';
 
 import { useAuthStore } from '../stores/authStore';
+import { useGlobalConfirmDialog } from '../composables/useGlobalConfirmDialog';
 import HomeView from '../views/HomeView.vue';
 import CollectionWorkbenchView from '../views/CollectionWorkbenchView.vue';
 import ResearchHistoryView from '../views/ResearchHistoryView.vue';
@@ -62,15 +63,77 @@ const router = createRouter({
   routes
 });
 
-router.beforeEach(async (to) => {
-  if (!to.meta?.requiresAuth) return true;
+const WORKFLOW_ROUTE_NAMES = new Set([
+  'research-domain-graph',
+  'research-paper-graph',
+  'research-paper-lineage'
+]);
+const ACTIVE_RESEARCH_SESSION_STORAGE_KEY = 'starfish:active-research-session';
+const TERMINAL_SESSION_STATUSES = new Set(['completed', 'failed', 'stopped', 'error', 'cancelled', 'canceled']);
+let leaveWorkflowConfirmPending = false;
 
-  const authStore = useAuthStore();
-  await authStore.loadSession();
-  if (authStore.isAuthenticated.value) {
-    return true;
+function normalizeActiveSessionFromStorage(payload = {}) {
+  const source = payload?.session && typeof payload.session === 'object' ? payload.session : payload;
+  const sessionId = String(source?.session_id || '').trim();
+  const status = String(source?.status || '').trim().toLowerCase();
+  return {
+    sessionId,
+    status
+  };
+}
+
+function hasRunningWorkflowSession() {
+  if (typeof window === 'undefined') return false;
+  try {
+    const raw = window.localStorage.getItem(ACTIVE_RESEARCH_SESSION_STORAGE_KEY);
+    if (!raw) return false;
+    const parsed = JSON.parse(raw);
+    const normalized = normalizeActiveSessionFromStorage(parsed || {});
+    if (!normalized.sessionId) return false;
+    if (!normalized.status) return true;
+    return !TERMINAL_SESSION_STATUSES.has(normalized.status);
+  } catch {
+    return false;
   }
-  return { name: 'home' };
+}
+
+function shouldConfirmLeavingWorkflow(to, from) {
+  const fromName = String(from?.name || '').trim();
+  const toName = String(to?.name || '').trim();
+  if (!WORKFLOW_ROUTE_NAMES.has(fromName)) return false;
+  if (WORKFLOW_ROUTE_NAMES.has(toName)) return false;
+  return hasRunningWorkflowSession();
+}
+
+router.beforeEach(async (to, from) => {
+  if (to.meta?.requiresAuth) {
+    const authStore = useAuthStore();
+    await authStore.loadSession();
+    if (!authStore.isAuthenticated.value) {
+      return { name: 'home' };
+    }
+  }
+
+  if (shouldConfirmLeavingWorkflow(to, from)) {
+    if (leaveWorkflowConfirmPending) return false;
+    leaveWorkflowConfirmPending = true;
+    try {
+      const { askForConfirm } = useGlobalConfirmDialog();
+      const confirmed = await askForConfirm({
+        title: '任务仍在执行',
+        message: '当前工作流正在后台执行，离开后可在首页继续查看进度。是否继续跳转？',
+        confirmText: '继续离开',
+        cancelText: '留在当前页'
+      });
+      if (!confirmed) {
+        return false;
+      }
+    } finally {
+      leaveWorkflowConfirmPending = false;
+    }
+  }
+
+  return true;
 });
 
 export default router;

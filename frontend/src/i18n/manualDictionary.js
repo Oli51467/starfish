@@ -108,6 +108,10 @@ export const MANUAL_ZH_EN = {
   '确认': 'Confirm',
   '确认操作': 'Confirm Action',
   '是否继续执行该操作？': 'Do you want to continue?',
+  '任务仍在执行': 'Task Still Running',
+  '当前工作流正在后台执行，离开后可在首页继续查看进度。是否继续跳转？': 'The workflow is still running in the background. You can continue tracking it from the home page after leaving. Continue navigating?',
+  '继续离开': 'Leave Anyway',
+  '留在当前页': 'Stay Here',
   '请输入内容': 'Please enter content',
   '请输入内容。': 'Please enter content.',
   '输入内容不可超过': 'Input cannot exceed',
@@ -158,7 +162,11 @@ export const MANUAL_EN_ZH = {
   'Active Task': '进行中任务',
   'Domain Research': '领域研究',
   'Paper Retrieval': '论文检索',
-  'Domain Survey': '领域调研'
+  'Domain Survey': '领域调研',
+  'Task Still Running': '任务仍在执行',
+  'The workflow is still running in the background. You can continue tracking it from the home page after leaving. Continue navigating?': '当前工作流正在后台执行，离开后可在首页继续查看进度。是否继续跳转？',
+  'Leave Anyway': '继续离开',
+  'Stay Here': '留在当前页'
 };
 
 export const TOKEN_ZH_EN = {

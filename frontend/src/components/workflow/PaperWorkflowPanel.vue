@@ -22,6 +22,8 @@
       </button>
     </div>
 
+    <WorkflowStageStrip class="paper-workflow-stage-strip" :steps="steps" />
+
     <div class="paper-workflow-step-list">
       <article
         v-for="(step, index) in steps"
@@ -174,6 +176,7 @@
 
 <script setup>
 import { computed, ref } from 'vue';
+import WorkflowStageStrip from './WorkflowStageStrip.vue';
 
 const NEGOTIATION_TASK_LABEL = {
   planner: '任务规划协商',
@@ -310,7 +313,13 @@ function resolveNegotiationTaskLabel(stepKey) {
 
 function resolveNegotiationStatus(stepKey) {
   const roundState = resolveStepRound(stepKey);
-  return normalizeNegotiationStatus(roundState?.status);
+  const status = normalizeNegotiationStatus(roundState?.status);
+  const step = props.steps.find((item) => String(item?.key || '').trim() === String(stepKey || '').trim());
+  const stepStatus = String(step?.status || '').trim().toLowerCase();
+  if ((stepStatus === 'done' || stepStatus === 'completed' || stepStatus === 'skipped') && status === 'bidding') {
+    return 'awarded';
+  }
+  return status;
 }
 
 function resolveNegotiationStatusText(stepKey) {
@@ -474,7 +483,7 @@ function isActionRequired(step) {
   height: 100%;
   overflow-y: auto;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   align-content: start;
   gap: 8px;
 }
@@ -554,6 +563,10 @@ function isActionRequired(step) {
   gap: 9px;
   margin: 0;
   padding-top: 4px;
+}
+
+.paper-workflow-stage-strip {
+  margin: 0 0 2px;
 }
 
 .paper-workflow-step-item {

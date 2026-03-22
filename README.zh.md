@@ -2,14 +2,14 @@
   <img src="frontend/public/assets/brand/logo-light.png" alt="Starfish Logo" width="280" />
 </p>
 
-<h3 align="center">Starfish <span style="font-size:0.62em;font-weight:400;">· <a href="./README.zh.md"><strong>中文</strong></a>｜<a href="./README.md">English</a></span></h3>
+<p align="center"><strong>Starfish</strong> · <a href="./README.zh.md"><strong>中文</strong></a>｜<a href="./README.md">English</a></p>
 <p align="center">
-  <img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&size=17&speed=80&pause=220&deleteSpeed=90&color=111111&center=true&vCenter=true&repeat=true&width=980&lines=%E9%9D%A2%E5%90%91%E7%A7%91%E7%A0%94%E6%8E%A2%E7%B4%A2%E7%9A%84+Multi-Agent+%E7%9F%A5%E8%AF%86%E5%9B%BE%E8%B0%B1%E5%B7%A5%E4%BD%9C%E5%8F%B0;%20" alt="Typing Subtitle" />
+  <img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&size=17&speed=45&pause=80&deleteSpeed=120&color=111111&center=true&vCenter=true&repeat=true&width=980&lines=%E9%9D%A2%E5%90%91%E7%A7%91%E7%A0%94%E6%8E%A2%E7%B4%A2%E7%9A%84+Multi-Agent+%E7%9F%A5%E8%AF%86%E5%9B%BE%E8%B0%B1%E5%B7%A5%E4%BD%9C%E5%8F%B0;%20" alt="Typing Subtitle" />
 </p>
 
 ## ⚡ 项目简介
 
-**Starfish** 旨在把“科研探索”从一次性工具升级为可持续演进的研究系统：通过可自治协作的多智能体，系统能够主动检索、生成洞察，并在每轮执行后持续迭代策略。它开箱即用，但不是静态流水线，而是会随着 Agent 能力、工具集与记忆库演化不断成长。相较传统 human-in-the-loop，Starfish 更接近 human-on-the-loop：研究者把控方向与判断边界，AI 作为长期协作的研究伙伴共同进化。
+**Starfish** 旨在把“科研探索”从一次性工具升级为可持续演进的研究系统：通过可自治的**多智能体协作**，系统能够主动检索、生成洞察，并在每轮执行后持续迭代策略。它开箱即用，但不是静态流水线，而是会随着 Agent 能力、工具集与记忆库演化不断成长。相较传统 human-in-the-loop，Starfish 更接近 human-on-the-loop：研究者把控方向与判断边界，AI 作为长期协作的研究伙伴共同进化。
 
 ## ✨ Features
 

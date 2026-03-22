@@ -410,6 +410,57 @@ const STEP_FINAL_NODE = {
   lineage: 'parallel'
 };
 const ACTIVE_RESEARCH_SESSION_STORAGE_KEY = 'starfish:active-research-session';
+const COMPLETED_WORKFLOW_SNAPSHOT_STORAGE_KEY = 'starfish:workflow-completed-snapshot';
+
+function safeJsonClone(value, fallback = null) {
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return fallback;
+  }
+}
+
+function readCompletedWorkflowSnapshot() {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.sessionStorage.getItem(COMPLETED_WORKFLOW_SNAPSHOT_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCompletedWorkflowSnapshot(payload = {}) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.setItem(
+      COMPLETED_WORKFLOW_SNAPSHOT_STORAGE_KEY,
+      JSON.stringify(payload)
+    );
+  } catch {
+    // ignore storage write failures
+  }
+}
+
+function clearCompletedWorkflowSnapshot() {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.removeItem(COMPLETED_WORKFLOW_SNAPSHOT_STORAGE_KEY);
+  } catch {
+    // ignore storage remove failures
+  }
+}
+
+function buildWorkflowSeedFingerprint(seed = {}) {
+  const inputType = String(seed?.input_type || 'domain').trim().toLowerCase();
+  const inputValue = String(seed?.input_value || '').trim().toLowerCase();
+  const rangeYears = parsePaperRangeYears(seed?.paper_range_years);
+  const rangeKey = rangeYears ? String(rangeYears) : 'all';
+  const quickMode = seed?.quick_mode === undefined ? true : Boolean(seed.quick_mode);
+  return `${inputType}|${inputValue}|${rangeKey}|q${quickMode ? 1 : 0}`;
+}
 
 function resolveStepKeyByNode(rawNode) {
   const node = String(rawNode || '').trim().toLowerCase();
@@ -725,6 +776,34 @@ export function usePaperWorkflow({
     return '本轮流程已完成，可继续查看或切换结果视图。';
   });
 
+  function buildCompletedStepSummary(step) {
+    const key = String(step?.key || '').trim();
+    const defaultTitleByKey = {
+      retrieve: 'Retriever Agent',
+      checkpoint: 'Coordinator Agent',
+      graph: 'Graph Builder Agent',
+      lineage: 'Lineage Agent'
+    };
+    const defaultDetailByKey = {
+      retrieve: '论文检索已完成。',
+      checkpoint: '需求确认已完成。',
+      graph: '知识图谱生成已完成。',
+      lineage: '血缘树生成已完成。'
+    };
+    return {
+      title: defaultTitleByKey[key] || 'Coordinator Agent',
+      detail: String(step?.message || '').trim() || defaultDetailByKey[key] || `${step?.title || '步骤'}已完成。`,
+      status: 'done',
+      statusText: toStatusText('done'),
+      metaText: ''
+    };
+  }
+
+  function ensureStepHasVisibleDetails(step) {
+    if (!step || !Array.isArray(step.logs) || step.logs.length) return;
+    step.logs = [buildCompletedStepSummary(step)];
+  }
+
   function updateStepSignal() {
     notifyStepChange({
       index: activeStep.value.index,
@@ -741,6 +820,7 @@ export function usePaperWorkflow({
     const normalizedStatus = String(status || '').trim().toLowerCase();
     if (normalizedStatus === 'done' || normalizedStatus === 'skipped') {
       finalizeStepLogs(target);
+      ensureStepHasVisibleDetails(target);
     }
     updateStepSignal();
   }
@@ -1259,6 +1339,153 @@ export function usePaperWorkflow({
     }
   }
 
+  function ensureCompletedWorkflowStepLogs() {
+    for (const step of steps.value) {
+      const status = String(step?.status || '').trim().toLowerCase();
+      if (!['done', 'completed', 'skipped'].includes(status)) continue;
+      finalizeStepLogs(step);
+      ensureStepHasVisibleDetails(step);
+    }
+  }
+
+  function normalizeNegotiationStateForCompletedWorkflow() {
+    for (const stepKey of STEP_FLOW_ORDER) {
+      const step = steps.value.find((item) => item.key === stepKey);
+      if (!step) continue;
+      const stepStatus = String(step.status || '').trim().toLowerCase();
+      if (!['done', 'skipped'].includes(stepStatus)) continue;
+
+      const stepState = negotiationByStep.value?.[stepKey];
+      if (!stepState || !Array.isArray(stepState.rounds) || !stepState.rounds.length) continue;
+      if (!Number.isFinite(Number(stepState.activeRound)) || Number(stepState.activeRound) <= 0) {
+        const lastRound = stepState.rounds[stepState.rounds.length - 1];
+        stepState.activeRound = Number(lastRound?.round || 1);
+      }
+
+      for (const round of stepState.rounds) {
+        const bids = Array.isArray(round?.bids) ? round.bids : [];
+        const winnerFromBids = bids.find((item) => String(item?.status || '').trim().toLowerCase() === 'winner') || null;
+        if (!round.winner && winnerFromBids) {
+          round.winner = {
+            ...winnerFromBids,
+            status: 'winner'
+          };
+        }
+        if (!round.winner && bids.length) {
+          const fallbackWinner = bids[0];
+          fallbackWinner.status = 'winner';
+          round.winner = {
+            ...fallbackWinner,
+            status: 'winner'
+          };
+        }
+
+        const normalizedRoundStatus = String(round?.status || '').trim().toLowerCase();
+        if (normalizedRoundStatus === 'bidding' || !normalizedRoundStatus) {
+          round.status = round?.veto ? 'vetoed' : (round?.rebid ? 'rebid' : 'awarded');
+        }
+      }
+    }
+  }
+
+  function persistCompletedWorkflowSnapshotFromState() {
+    const seedPayload = runtimeSeed.value?.input_value
+      ? runtimeSeed.value
+      : normalizeRuntimeSeed(seedRef.value || {});
+    const stepsPayload = steps.value.map((step) => ({
+      index: Number(step?.index || 0),
+      key: String(step?.key || '').trim(),
+      status: String(step?.status || '').trim().toLowerCase(),
+      message: String(step?.message || '').trim(),
+      logs: safeJsonClone(Array.isArray(step?.logs) ? step.logs : [], []),
+      action: null
+    }));
+
+    writeCompletedWorkflowSnapshot({
+      status: 'completed',
+      seed_fingerprint: buildWorkflowSeedFingerprint(seedPayload),
+      saved_at: new Date().toISOString(),
+      steps: stepsPayload,
+      negotiation_by_step: safeJsonClone(negotiationByStep.value, createNegotiationStateByStep()),
+      graph: graphData.value && typeof graphData.value === 'object'
+        ? safeJsonClone(graphData.value, null)
+        : null,
+      lineage: lineageData.value && typeof lineageData.value === 'object'
+        ? safeJsonClone(lineageData.value, null)
+        : null
+    });
+  }
+
+  function restoreCompletedWorkflowSnapshotFromStorage() {
+    const snapshot = readCompletedWorkflowSnapshot();
+    if (!snapshot || typeof snapshot !== 'object') return false;
+    if (String(snapshot?.status || '').trim().toLowerCase() !== 'completed') return false;
+
+    const currentSeed = normalizeRuntimeSeed(seedRef.value || {});
+    const expectedFingerprint = buildWorkflowSeedFingerprint(currentSeed);
+    if (String(snapshot?.seed_fingerprint || '').trim() !== expectedFingerprint) return false;
+
+    const stepRecords = Array.isArray(snapshot?.steps) ? snapshot.steps : [];
+    const stepRecordByKey = new Map();
+    for (const item of stepRecords) {
+      const key = String(item?.key || '').trim();
+      if (!key) continue;
+      stepRecordByKey.set(key, item);
+    }
+
+    for (const step of steps.value) {
+      const record = stepRecordByKey.get(String(step?.key || '').trim()) || {};
+      step.status = 'done';
+      step.message = String(record?.message || step?.message || `${step.title}已完成。`).trim();
+      step.logs = safeJsonClone(Array.isArray(record?.logs) ? record.logs : (Array.isArray(step.logs) ? step.logs : []), []);
+      if (!Array.isArray(step.logs)) {
+        step.logs = [];
+      }
+      if (Object.prototype.hasOwnProperty.call(step, 'action')) {
+        step.action = null;
+      }
+      finalizeStepLogs(step);
+    }
+
+    const restoredNegotiation = snapshot?.negotiation_by_step;
+    negotiationByStep.value = safeJsonClone(
+      restoredNegotiation && typeof restoredNegotiation === 'object'
+        ? restoredNegotiation
+        : createNegotiationStateByStep(),
+      createNegotiationStateByStep()
+    );
+    normalizeNegotiationStateForCompletedWorkflow();
+    finalizeAllRuntimeTraceStatuses();
+    ensureCompletedWorkflowStepLogs();
+
+    const restoredGraph = snapshot?.graph;
+    if (restoredGraph && typeof restoredGraph === 'object') {
+      commitGraphData(restoredGraph, buildGraphSignature(restoredGraph));
+    }
+
+    const restoredLineage = snapshot?.lineage;
+    if (restoredLineage && typeof restoredLineage === 'object') {
+      lineageRevealApproved.value = true;
+      pendingLineagePayload.value = restoredLineage;
+      lineageData.value = restoredLineage;
+      lineageErrorMessage.value = '';
+      if (shouldAutoRevealLineageView()) {
+        activeViewKey.value = 'lineage';
+      }
+    }
+
+    waitingResearchCheckpoint.value = '';
+    runtimeAutoResumingCheckpoint.value = '';
+    graphLoading.value = false;
+    unifiedRuntimeActive.value = false;
+    errorMessage.value = '';
+    clearActiveResearchSessionRecord();
+    stopResearchPolling();
+    closeResearchSocket();
+    updateStepSignal();
+    return true;
+  }
+
   function markEarlierStepsDone(stepKey) {
     const targetIndex = STEP_FLOW_ORDER.indexOf(String(stepKey || '').trim());
     if (targetIndex <= 0) return;
@@ -1274,6 +1501,7 @@ export function usePaperWorkflow({
         }
       }
       finalizeStepLogs(step);
+      ensureStepHasVisibleDetails(step);
     }
   }
 
@@ -1732,6 +1960,9 @@ export function usePaperWorkflow({
         label: '重新生成血缘树',
         disabled: false
       });
+      normalizeNegotiationStateForCompletedWorkflow();
+      ensureCompletedWorkflowStepLogs();
+      persistCompletedWorkflowSnapshotFromState();
       waitingResearchCheckpoint.value = '';
       runtimeAutoResumingCheckpoint.value = '';
       graphLoading.value = false;
@@ -2433,6 +2664,12 @@ export function usePaperWorkflow({
     resetLineageState();
     checkpointContext.value = null;
     errorMessage.value = '';
+    if (restoreCompletedWorkflowSnapshotFromStorage()) {
+      return;
+    }
+    if (!resumeSessionId) {
+      clearCompletedWorkflowSnapshot();
+    }
     graphLoading.value = true;
 
     try {

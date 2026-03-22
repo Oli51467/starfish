@@ -75,6 +75,7 @@ const router = useRouter();
 const route = useRoute();
 const WORKFLOW_SEED_STORAGE_KEY = 'starfish:workflow-seed';
 const ACTIVE_SESSION_STORAGE_KEY = 'starfish:active-research-session';
+const COMPLETED_WORKFLOW_SNAPSHOT_STORAGE_KEY = 'starfish:workflow-completed-snapshot';
 
 const WORKFLOW_ROUTE_NAMES = new Set([
   'research-domain-graph',
@@ -171,6 +172,15 @@ function clearPersistedWorkflowSeed() {
   if (typeof window === 'undefined') return;
   try {
     window.sessionStorage.removeItem(WORKFLOW_SEED_STORAGE_KEY);
+  } catch {
+    // ignore storage remove failures
+  }
+}
+
+function clearCompletedWorkflowSnapshotCache() {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.removeItem(COMPLETED_WORKFLOW_SNAPSHOT_STORAGE_KEY);
   } catch {
     // ignore storage remove failures
   }
@@ -418,6 +428,7 @@ async function enterWorkflow(payload) {
     return;
   }
 
+  clearCompletedWorkflowSnapshotCache();
   workflowSeed.value = normalizeWorkflowSeed(payload);
   if (!workflowSeed.value.input_value) return;
   persistWorkflowSeed(workflowSeed.value);
@@ -433,6 +444,7 @@ async function resumeActiveSessionWorkflow() {
   const active = activeSessionNotice.value;
   if (!active) return;
 
+  clearCompletedWorkflowSnapshotCache();
   workflowSeed.value = normalizeWorkflowSeed({
     input_type: active.input_type,
     input_value: active.input_value,
@@ -458,10 +470,10 @@ function updateHeaderStep(payload) {
 }
 
 async function exitWorkflow() {
-  resetWorkflowState();
-  clearPersistedWorkflowSeed();
-  await syncRouteFromWorkflow({ replace: false });
-  await refreshActiveSessionNotice();
+  await router.push({ name: 'home' });
+  if (String(route.name || '') === 'home') {
+    clearPersistedWorkflowSeed();
+  }
 }
 
 async function handleWorkflowResultViewChange(nextView) {
