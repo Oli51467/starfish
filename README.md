@@ -2,13 +2,9 @@
   <img src="frontend/public/assets/brand/logo-light.png" alt="Starfish Logo" width="280" />
 </p>
 
+<h3 align="center">Starfish <span style="font-size:0.62em;font-weight:400;">· <a href="./README.zh.md">中文</a>｜<a href="./README.md"><strong>English</strong></a></span></h3>
 <p align="center">
-  <a href="./README.zh.md">中文</a> | <a href="./README.md"><strong>English</strong></a>
-</p>
-
-<h3 align="center">Starfish</h3>
-<p align="center">
-  <img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&size=17&pause=500&deleteSpeed=40&color=111111&center=true&vCenter=true&repeat=true&width=980&lines=Science+Research+Engine+%C2%B7+Multi-Agent+Knowledge+Graph+Workbench;%20" alt="Typing Subtitle" />
+  <img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&size=17&speed=80&pause=220&deleteSpeed=90&color=111111&center=true&vCenter=true&repeat=true&width=980&lines=Science+Research+Engine+%C2%B7+Multi-Agent+Knowledge+Graph+Workbench;%20" alt="Typing Subtitle" />
 </p>
 
 ## ⚡ Project Overview
@@ -22,6 +18,35 @@
 - **Workflow**: Retrieval, checkpointing, graph building, and lineage analysis are connected into an observable and replayable flow.
 - **Knowledge Graph**: Automatically extracts papers, concepts, and relations into a structured research graph.
 - **Lineage Tree**: Expands from a key paper to ancestors and descendants for tracing scientific evolution.
+
+## 🖼️ System Snapshot
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/landpage.png" alt="Landing Page" width="100%" />
+      <br />
+      <sub>Homepage with bilingual entry and research input.</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/thesis_info.png" alt="Workflow Panel" width="100%" />
+      <br />
+      <sub>Workflow panel with paper retrieval and progress logs.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/knowledge_graph.png" alt="Knowledge Graph" width="100%" />
+      <br />
+      <sub>Knowledge graph canvas for entities and relations.</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/blood_tree.png" alt="Lineage Tree" width="100%" />
+      <br />
+      <sub>Lineage tree view for ancestry and descendants.</sub>
+    </td>
+  </tr>
+</table>
 
 ## 📦 Installation
 

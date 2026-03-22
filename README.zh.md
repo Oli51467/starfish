@@ -2,13 +2,9 @@
   <img src="frontend/public/assets/brand/logo-light.png" alt="Starfish Logo" width="280" />
 </p>
 
+<h3 align="center">Starfish <span style="font-size:0.62em;font-weight:400;">· <a href="./README.zh.md"><strong>中文</strong></a>｜<a href="./README.md">English</a></span></h3>
 <p align="center">
-  <a href="./README.zh.md"><strong>中文</strong></a> | <a href="./README.md">English</a>
-</p>
-
-<h3 align="center">Starfish</h3>
-<p align="center">
-  <img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&size=17&pause=500&deleteSpeed=40&color=111111&center=true&vCenter=true&repeat=true&width=980&lines=%E9%9D%A2%E5%90%91%E7%A7%91%E7%A0%94%E6%8E%A2%E7%B4%A2%E7%9A%84+Multi-Agent+%E7%9F%A5%E8%AF%86%E5%9B%BE%E8%B0%B1%E5%B7%A5%E4%BD%9C%E5%8F%B0;%20" alt="Typing Subtitle" />
+  <img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&size=17&speed=80&pause=220&deleteSpeed=90&color=111111&center=true&vCenter=true&repeat=true&width=980&lines=%E9%9D%A2%E5%90%91%E7%A7%91%E7%A0%94%E6%8E%A2%E7%B4%A2%E7%9A%84+Multi-Agent+%E7%9F%A5%E8%AF%86%E5%9B%BE%E8%B0%B1%E5%B7%A5%E4%BD%9C%E5%8F%B0;%20" alt="Typing Subtitle" />
 </p>
 
 ## ⚡ 项目简介
@@ -22,6 +18,35 @@
 - **工作流**：把检索、确认、建图、血缘等阶段串成可观测、可回放的流程。
 - **知识图谱**：自动抽取论文、概念与关系，构建结构化科研知识网络。
 - **血缘树**：围绕关键论文展开祖先与后代脉络，追踪研究演化路径。
+
+## 🖼️ 系统预览
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/landpage.png" alt="首页" width="100%" />
+      <br />
+      <sub>首页支持中英文切换与研究主题输入。</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/thesis_info.png" alt="工作流面板" width="100%" />
+      <br />
+      <sub>工作流面板展示检索过程与阶段进度。</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/knowledge_graph.png" alt="知识图谱" width="100%" />
+      <br />
+      <sub>知识图谱画布展示论文实体与关系连接。</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/blood_tree.png" alt="血缘树" width="100%" />
+      <br />
+      <sub>血缘树视图展示祖先与后代演化脉络。</sub>
+    </td>
+  </tr>
+</table>
 
 ## 📦 Installation
 
