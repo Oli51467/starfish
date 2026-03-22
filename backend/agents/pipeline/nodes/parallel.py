@@ -454,7 +454,7 @@ async def parallel_analysis_node(state: PipelineState) -> PipelineState:
         f"研究空白 {len(research_gaps)}。"
     )
     await runtime.emit_thinking(session_id, _NODE, summary)
-    await runtime.emit_node_complete(session_id, _NODE, 100, summary)
+    await runtime.emit_node_complete(session_id, _NODE, 96, summary)
 
     return {
         **state,
@@ -463,6 +463,6 @@ async def parallel_analysis_node(state: PipelineState) -> PipelineState:
         "critic_notes": merged_critic_notes,
         "errors": safe_errors,
         "current_node": _NODE,
-        "progress": 100,
+        "progress": 96,
         "messages": append_message(state, summary),
     }

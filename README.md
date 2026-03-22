@@ -6,7 +6,7 @@
   <a href="./README.zh.md">中文</a> | <a href="./README.md"><strong>English</strong></a>
 </p>
 
-<h1 align="center">Starfish</h1>
+<h3 align="center">Starfish</h3>
 <p align="center">
   <img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&size=17&pause=500&deleteSpeed=40&color=111111&center=true&vCenter=true&repeat=true&width=980&lines=Science+Research+Engine+%C2%B7+Multi-Agent+Knowledge+Graph+Workbench;%20" alt="Typing Subtitle" />
 </p>

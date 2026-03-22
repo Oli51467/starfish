@@ -456,6 +456,7 @@ class PipelineRuntimeService:
                 return
 
             await self._persist_completed_history(runtime)
+            runtime.state["progress"] = 100
             runtime.status = "completed"
             runtime.updated_at = datetime.now(timezone.utc)
             await self._publish_event(

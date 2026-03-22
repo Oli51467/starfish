@@ -1229,6 +1229,19 @@ export function usePaperWorkflow({
     return lineageRevealApproved.value;
   }
 
+  function shouldRevealLineageFromSnapshot(snapshot = {}) {
+    const status = String(snapshot?.status || '').trim().toLowerCase();
+    if (status === 'completed') return true;
+
+    const waitingCheckpoint = String(snapshot?.waiting_checkpoint || '').trim().toLowerCase();
+    if (waitingCheckpoint === 'checkpoint_2') return false;
+
+    const currentNode = String(snapshot?.current_node || '').trim().toLowerCase();
+    if (currentNode === 'checkpoint_2') return true;
+    if (['parallel', 'synthesizer', 'report', 'save'].includes(currentNode)) return true;
+    return false;
+  }
+
   function finalizeAllRuntimeTraceStatuses() {
     for (const step of steps.value) {
       if (!Array.isArray(step.logs) || !step.logs.length) continue;
@@ -1345,6 +1358,10 @@ export function usePaperWorkflow({
   }
 
   function hydrateRuntimeArtifacts(snapshot = {}) {
+    if (shouldRevealLineageFromSnapshot(snapshot)) {
+      lineageRevealApproved.value = true;
+    }
+
     if (snapshot?.graph && typeof snapshot.graph === 'object') {
       commitGraphData(snapshot.graph, buildGraphSignature(snapshot.graph));
     } else if (Array.isArray(snapshot?.papers) && snapshot.papers.length) {
@@ -1387,6 +1404,9 @@ export function usePaperWorkflow({
       void refreshRuntimeSnapshot().catch(() => {
         // keep graph-building stage resilient when snapshot fetch is transiently unavailable
       });
+    }
+    if (node === 'parallel') {
+      lineageRevealApproved.value = true;
     }
     setStepAction('checkpoint', null);
     if (node !== 'checkpoint_2') {
@@ -1432,7 +1452,10 @@ export function usePaperWorkflow({
       setStepStatus(target.index, 'running', summary);
     }
 
-    if (node === 'search' || node === 'graph_build' || node === 'parallel') {
+    if (node === 'search' || node === 'graph_build' || node === 'parallel' || node === 'checkpoint_2') {
+      if (node === 'parallel' || node === 'checkpoint_2') {
+        lineageRevealApproved.value = true;
+      }
       try {
         const snapshot = await getResearchSession(researchSessionId.value, {
           accessToken: accessTokenRef.value || ''
@@ -1691,6 +1714,10 @@ export function usePaperWorkflow({
       const descendants = Array.isArray(lineagePayload?.descendants) ? lineagePayload.descendants.length : 0;
       const lineageCount = ancestors + descendants;
       if (lineagePayload) {
+        lineageRevealApproved.value = true;
+        pendingLineagePayload.value = lineagePayload;
+        lineageData.value = lineagePayload;
+        lineageErrorMessage.value = '';
         setStepStatusByKey(
           'lineage',
           'done',

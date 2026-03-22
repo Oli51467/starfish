@@ -39,101 +39,132 @@
         <div class="paper-workflow-step-main">
           <div class="paper-workflow-step-head">
             <p class="paper-workflow-step-label">{{ step.title || `步骤 ${index + 1}` }}</p>
+            <button
+              class="paper-workflow-step-toggle-btn"
+              :class="{ 'is-collapsed': isStepCollapsed(step, index) }"
+              type="button"
+              :aria-label="isStepCollapsed(step, index) ? '展开步骤' : '折叠步骤'"
+              :title="isStepCollapsed(step, index) ? '展开步骤' : '折叠步骤'"
+              @click="toggleStepCollapsed(step, index)"
+            >
+              <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
+                <path
+                  v-if="isStepCollapsed(step, index)"
+                  d="M2.5 4.2 6 7.8l3.5-3.6"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.4"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+                <path
+                  v-else
+                  d="M2.5 7.8 6 4.2l3.5 3.6"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.4"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
           </div>
 
-          <section
-            v-if="hasNegotiationState(step?.key)"
-            class="paper-workflow-negotiation"
-          >
-            <div class="paper-workflow-negotiation-head">
-              <p class="paper-workflow-negotiation-round mono">
-                协商轮次 R{{ resolveNegotiationRound(step?.key) }}
-              </p>
-              <span
-                class="paper-workflow-negotiation-status mono"
-                :class="`is-${resolveNegotiationStatus(step?.key)}`"
-              >
-                {{ resolveNegotiationStatusText(step?.key) }}
-              </span>
-            </div>
+          <template v-if="!isStepCollapsed(step, index)">
+            <section
+              v-if="hasNegotiationState(step?.key)"
+              class="paper-workflow-negotiation"
+            >
+              <div class="paper-workflow-negotiation-head">
+                <p class="paper-workflow-negotiation-round mono">
+                  协商轮次 R{{ resolveNegotiationRound(step?.key) }}
+                </p>
+                <span
+                  class="paper-workflow-negotiation-status mono"
+                  :class="`is-${resolveNegotiationStatus(step?.key)}`"
+                >
+                  {{ resolveNegotiationStatusText(step?.key) }}
+                </span>
+              </div>
 
-            <p class="paper-workflow-negotiation-task">{{ resolveNegotiationTaskLabel(step?.key) }}</p>
+              <p class="paper-workflow-negotiation-task">{{ resolveNegotiationTaskLabel(step?.key) }}</p>
 
-            <div class="paper-workflow-negotiation-flow mono">
-              <span>Coordinator</span>
-              <span class="paper-workflow-negotiation-arrow">→</span>
-              <span>候选 Agent</span>
-            </div>
+              <div class="paper-workflow-negotiation-flow mono">
+                <span>Coordinator</span>
+                <span class="paper-workflow-negotiation-arrow">→</span>
+                <span>候选 Agent</span>
+              </div>
 
-            <div class="paper-workflow-negotiation-bids">
-              <article
-                v-for="(bid, bidIndex) in resolveNegotiationBids(step?.key)"
-                :key="`${step?.key || 'unknown'}-bid-${bidIndex}-${String(bid?.agentId || '')}`"
-                class="paper-workflow-negotiation-bid"
-                :class="`is-${resolveBidStatus(bid?.status)}`"
-              >
-                <div class="paper-workflow-negotiation-bid-head">
-                  <p class="paper-workflow-negotiation-bid-title mono">
-                    {{ String(bidIndex + 1).padStart(2, '0') }} {{ resolveBidLabel(bid) }}
+              <div class="paper-workflow-negotiation-bids">
+                <article
+                  v-for="(bid, bidIndex) in resolveNegotiationBids(step?.key)"
+                  :key="`${step?.key || 'unknown'}-bid-${bidIndex}-${String(bid?.agentId || '')}`"
+                  class="paper-workflow-negotiation-bid"
+                  :class="`is-${resolveBidStatus(bid?.status)}`"
+                >
+                  <div class="paper-workflow-negotiation-bid-head">
+                    <p class="paper-workflow-negotiation-bid-title mono">
+                      {{ String(bidIndex + 1).padStart(2, '0') }} {{ resolveBidLabel(bid) }}
+                    </p>
+                    <span class="paper-workflow-negotiation-bid-badge mono" :class="`is-${resolveBidStatus(bid?.status)}`">
+                      {{ resolveBidStatusText(bid?.status) }}
+                    </span>
+                  </div>
+                  <p class="paper-workflow-negotiation-bid-metrics mono">
+                    置信度 {{ formatBidConfidenceMetric(bid?.confidence) }} · 耗时 {{ formatBidLatencyMetric(bid?.estimatedLatencyMs) }} · 成本 {{ formatBidCostMetric(bid?.estimatedCost) }}
                   </p>
-                  <span class="paper-workflow-negotiation-bid-badge mono" :class="`is-${resolveBidStatus(bid?.status)}`">
-                    {{ resolveBidStatusText(bid?.status) }}
+                </article>
+              </div>
+
+              <div v-if="hasNegotiationResult(step?.key)" class="paper-workflow-negotiation-result">
+                <p v-if="resolveNegotiationWinner(step?.key)" class="paper-workflow-negotiation-result-item is-winner">
+                  中标：{{ resolveBidLabel(resolveNegotiationWinner(step?.key)) }}
+                </p>
+                <p v-if="resolveNegotiationVeto(step?.key)" class="paper-workflow-negotiation-result-item is-veto">
+                  否决：{{ resolveNegotiationVeto(step?.key)?.reason || '执行结果未通过质量审核。' }}
+                </p>
+                <p v-if="resolveNegotiationRebid(step?.key)" class="paper-workflow-negotiation-result-item is-rebid">
+                  重投标：{{ resolveNegotiationRebidText(step?.key) }}
+                </p>
+              </div>
+
+              <div v-if="hasNegotiationBudget(step?.key)" class="paper-workflow-negotiation-budget">
+                <div class="paper-workflow-negotiation-budget-track">
+                  <div
+                    class="paper-workflow-negotiation-budget-fill"
+                    :style="{ width: `${resolveNegotiationBudgetPercent(step?.key)}%` }"
+                  ></div>
+                </div>
+                <p class="paper-workflow-negotiation-budget-text mono">{{ resolveNegotiationBudgetText(step?.key) }}</p>
+              </div>
+            </section>
+
+            <div v-if="step.logs && step.logs.length" class="paper-workflow-trace-list">
+              <article
+                v-for="(log, logIndex) in step.logs"
+                :key="`${step.key || index}-log-${logIndex}`"
+                class="paper-workflow-trace-item"
+              >
+                <div class="paper-workflow-trace-head">
+                  <p class="paper-workflow-trace-title mono">{{ String(logIndex + 1).padStart(2, '0') }} {{ log.title }}</p>
+                  <span class="paper-workflow-trace-badge mono" :class="`is-${traceStatus(log.status)}`">
+                    {{ traceStatusText(log.status) }}
                   </span>
                 </div>
-                <p class="paper-workflow-negotiation-bid-metrics mono">
-                  置信度 {{ formatBidConfidenceMetric(bid?.confidence) }} · 耗时 {{ formatBidLatencyMetric(bid?.estimatedLatencyMs) }} · 成本 {{ formatBidCostMetric(bid?.estimatedCost) }}
-                </p>
+                <p class="paper-workflow-trace-detail">{{ log.detail }}</p>
               </article>
             </div>
 
-            <div v-if="hasNegotiationResult(step?.key)" class="paper-workflow-negotiation-result">
-              <p v-if="resolveNegotiationWinner(step?.key)" class="paper-workflow-negotiation-result-item is-winner">
-                中标：{{ resolveBidLabel(resolveNegotiationWinner(step?.key)) }}
-              </p>
-              <p v-if="resolveNegotiationVeto(step?.key)" class="paper-workflow-negotiation-result-item is-veto">
-                否决：{{ resolveNegotiationVeto(step?.key)?.reason || '执行结果未通过质量审核。' }}
-              </p>
-              <p v-if="resolveNegotiationRebid(step?.key)" class="paper-workflow-negotiation-result-item is-rebid">
-                重投标：{{ resolveNegotiationRebidText(step?.key) }}
-              </p>
-            </div>
-
-            <div v-if="hasNegotiationBudget(step?.key)" class="paper-workflow-negotiation-budget">
-              <div class="paper-workflow-negotiation-budget-track">
-                <div
-                  class="paper-workflow-negotiation-budget-fill"
-                  :style="{ width: `${resolveNegotiationBudgetPercent(step?.key)}%` }"
-                ></div>
-              </div>
-              <p class="paper-workflow-negotiation-budget-text mono">{{ resolveNegotiationBudgetText(step?.key) }}</p>
-            </div>
-          </section>
-
-          <div v-if="step.logs && step.logs.length" class="paper-workflow-trace-list">
-            <article
-              v-for="(log, logIndex) in step.logs"
-              :key="`${step.key || index}-log-${logIndex}`"
-              class="paper-workflow-trace-item"
+            <button
+              v-if="isActionRequired(step)"
+              class="btn btn-accent mono paper-workflow-action-btn"
+              type="button"
+              :disabled="Boolean(step?.action?.disabled)"
+              @click="$emit('step-action', step.key)"
             >
-              <div class="paper-workflow-trace-head">
-                <p class="paper-workflow-trace-title mono">{{ String(logIndex + 1).padStart(2, '0') }} {{ log.title }}</p>
-                <span class="paper-workflow-trace-badge mono" :class="`is-${traceStatus(log.status)}`">
-                  {{ traceStatusText(log.status) }}
-                </span>
-              </div>
-              <p class="paper-workflow-trace-detail">{{ log.detail }}</p>
-            </article>
-          </div>
-
-          <button
-            v-if="isActionRequired(step)"
-            class="btn btn-accent mono paper-workflow-action-btn"
-            type="button"
-            :disabled="Boolean(step?.action?.disabled)"
-            @click="$emit('step-action', step.key)"
-          >
-            {{ String(step?.action?.label || '继续执行') }}
-          </button>
+              {{ String(step?.action?.label || '继续执行') }}
+            </button>
+          </template>
         </div>
       </article>
     </div>
@@ -142,7 +173,7 @@
 </template>
 
 <script setup>
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 
 const NEGOTIATION_TASK_LABEL = {
   planner: '任务规划协商',
@@ -184,6 +215,27 @@ const safeProgress = computed(() => {
   if (!Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(100, Math.round(value)));
 });
+
+const collapsedStepState = ref(Object.create(null));
+
+function resolveStepCollapseKey(step, index) {
+  const stepKey = String(step?.key || '').trim();
+  if (stepKey) return stepKey;
+  return `step-${Number(index) || 0}`;
+}
+
+function isStepCollapsed(step, index) {
+  const stepKey = resolveStepCollapseKey(step, index);
+  return Boolean(collapsedStepState.value?.[stepKey]);
+}
+
+function toggleStepCollapsed(step, index) {
+  const stepKey = resolveStepCollapseKey(step, index);
+  collapsedStepState.value = {
+    ...collapsedStepState.value,
+    [stepKey]: !collapsedStepState.value?.[stepKey]
+  };
+}
 
 function normalizeStatus(rawStatus) {
   const status = String(rawStatus || '').trim().toLowerCase();
@@ -554,10 +606,10 @@ function isActionRequired(step) {
 
 .paper-workflow-step-head {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   min-height: 20px;
-  gap: 8px;
+  gap: 6px;
 }
 
 .paper-workflow-step-label {
@@ -567,6 +619,44 @@ function isActionRequired(step) {
   font-weight: 600;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.paper-workflow-step-toggle-btn {
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  cursor: pointer;
+  transition: border-color 0.2s ease, background-color 0.2s ease, color 0.2s ease;
+}
+
+.paper-workflow-step-toggle-btn svg {
+  width: 12px;
+  height: 12px;
+  display: block;
+  flex: 0 0 auto;
+}
+
+.paper-workflow-step-toggle-btn:hover {
+  background: var(--panel);
+  border-color: var(--line-2);
+  color: var(--text);
+}
+
+.paper-workflow-step-toggle-btn:focus-visible {
+  outline: 1px solid var(--line-2);
+  outline-offset: 1px;
+}
+
+.paper-workflow-step-toggle-btn.is-collapsed {
+  border-color: var(--line-2);
+  color: var(--text);
 }
 
 .paper-workflow-negotiation {
