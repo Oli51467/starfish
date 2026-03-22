@@ -23,9 +23,7 @@ _TASK_TRANSITIONS: dict[str, tuple[str, ...]] = {
     "router": ("search",),
     "search": ("checkpoint_1",),
     "checkpoint_1": ("graph_build",),
-    "graph_build": ("checkpoint_2",),
-    "checkpoint_2": ("parallel",),
-    "parallel": (),
+    "graph_build": (),
 }
 
 _TASK_PRIORITY: dict[str, int] = {
@@ -34,8 +32,6 @@ _TASK_PRIORITY: dict[str, int] = {
     "search": 8,
     "checkpoint_1": 7,
     "graph_build": 6,
-    "checkpoint_2": 5,
-    "parallel": 4,
 }
 
 _TASK_ESTIMATED_LATENCY_MS: dict[str, int] = {
@@ -44,8 +40,6 @@ _TASK_ESTIMATED_LATENCY_MS: dict[str, int] = {
     "search": 4800,
     "graph_build": 5200,
     "checkpoint_1": 600,
-    "checkpoint_2": 600,
-    "parallel": 6500,
 }
 
 _TASK_ESTIMATED_COST: dict[str, float] = {
@@ -54,8 +48,6 @@ _TASK_ESTIMATED_COST: dict[str, float] = {
     "search": 1.2,
     "graph_build": 1.4,
     "checkpoint_1": 0.2,
-    "checkpoint_2": 0.2,
-    "parallel": 1.6,
 }
 
 _TASK_BASE_CONFIDENCE: dict[str, float] = {
@@ -64,8 +56,6 @@ _TASK_BASE_CONFIDENCE: dict[str, float] = {
     "search": 0.82,
     "graph_build": 0.80,
     "checkpoint_1": 0.96,
-    "checkpoint_2": 0.96,
-    "parallel": 0.78,
 }
 
 NodeCallable = Callable[[PipelineState], Awaitable[PipelineState]]
@@ -464,7 +454,7 @@ class PipelineRuntimeService:
                 {
                     "type": "session_complete",
                     "progress": int(runtime.state.get("progress") or 100),
-                    "current_node": runtime.state.get("current_node") or "parallel",
+                    "current_node": runtime.state.get("current_node") or "graph_build",
                     "report_id": runtime.state.get("report_id"),
                     "summary": "研究流程执行完成。",
                 },
@@ -518,33 +508,16 @@ class PipelineRuntimeService:
 
     @staticmethod
     def _build_history_pipeline_payload(state: PipelineState) -> dict[str, Any]:
-        lineage = state.get("lineage_data") if isinstance(state.get("lineage_data"), dict) else {}
-        lineage_nodes = len(lineage.get("ancestors") or []) + len(lineage.get("descendants") or [])
         return {
             "research_goal": state.get("research_goal") or "",
             "execution_plan": list(state.get("execution_plan") or []),
             "final_report": state.get("final_report") or "",
             "checkpoint_feedback": dict(state.get("checkpoint_feedback") or {}),
             "parallel_outputs_summary": {
-                "lineage_nodes": lineage_nodes,
                 "research_gaps": len(state.get("research_gaps") or []),
                 "critic_notes": len(state.get("critic_notes") or []),
             },
         }
-
-    @staticmethod
-    def _resolve_history_seed_paper_id(state: PipelineState) -> str:
-        seed = state.get("seed_paper") if isinstance(state.get("seed_paper"), dict) else {}
-        seed_paper_id = str(seed.get("paper_id") or "").strip()
-        if seed_paper_id:
-            return seed_paper_id
-        for paper in state.get("papers") or []:
-            if not isinstance(paper, dict):
-                continue
-            paper_id = str(paper.get("paper_id") or "").strip()
-            if paper_id:
-                return paper_id
-        return str(state.get("input_value") or "").strip()
 
     async def _persist_completed_history(self, runtime: _PipelineSessionRuntime) -> None:
         state = runtime.state
@@ -590,20 +563,6 @@ class PipelineRuntimeService:
                 state["history_id"] = None
                 state["report_id"] = None
                 return
-
-            lineage_payload = state.get("lineage_data")
-            if isinstance(lineage_payload, dict):
-                ancestor_count = len(lineage_payload.get("ancestors") or [])
-                descendant_count = len(lineage_payload.get("descendants") or [])
-                await asyncio.to_thread(
-                    history_service.record_lineage_status,
-                    user=user,
-                    graph_id=str(graph.graph_id or "").strip(),
-                    seed_paper_id=self._resolve_history_seed_paper_id(state),
-                    ancestor_count=ancestor_count,
-                    descendant_count=descendant_count,
-                    lineage_payload=lineage_payload,
-                )
 
             await asyncio.to_thread(
                 history_service.update_pipeline_payload,
@@ -653,9 +612,8 @@ class PipelineRuntimeService:
             runtime.state["report_id"] = None
 
     def _resolve_agent_registry(self) -> dict[str, _AgentRegistration]:
-        from agents.pipeline.nodes.checkpoints import human_checkpoint_1, human_checkpoint_2
+        from agents.pipeline.nodes.checkpoints import human_checkpoint_1
         from agents.pipeline.nodes.graph_build import graph_build_node
-        from agents.pipeline.nodes.parallel import parallel_analysis_node
         from agents.pipeline.nodes.planner import planner_node
         from agents.pipeline.nodes.router import router_node
         from agents.pipeline.nodes.search import search_node
@@ -781,56 +739,6 @@ class PipelineRuntimeService:
                 latency_multiplier=0.85,
                 critic_strictness=0.92,
             ),
-            "checkpoint_2_guarded": _AgentRegistration(
-                agent_id="checkpoint_2_guarded",
-                task_kinds=("checkpoint_2",),
-                node_fn=human_checkpoint_2,
-                profile="guarded",
-                confidence_bias=0.03,
-                cost_multiplier=1.05,
-                latency_multiplier=1.08,
-                critic_strictness=1.08,
-            ),
-            "checkpoint_2_quickpass": _AgentRegistration(
-                agent_id="checkpoint_2_quickpass",
-                task_kinds=("checkpoint_2",),
-                node_fn=human_checkpoint_2,
-                profile="quickpass",
-                confidence_bias=-0.03,
-                cost_multiplier=0.86,
-                latency_multiplier=0.85,
-                critic_strictness=0.92,
-            ),
-            "parallel_lineage": _AgentRegistration(
-                agent_id="parallel_lineage",
-                task_kinds=("parallel",),
-                node_fn=self._build_profiled_node_fn(parallel_analysis_node, profile="lineage"),
-                profile="lineage",
-                confidence_bias=0.04,
-                cost_multiplier=1.12,
-                latency_multiplier=1.14,
-                critic_strictness=1.08,
-            ),
-            "parallel_balanced": _AgentRegistration(
-                agent_id="parallel_balanced",
-                task_kinds=("parallel",),
-                node_fn=self._build_profiled_node_fn(parallel_analysis_node, profile="balanced"),
-                profile="balanced",
-                confidence_bias=0.01,
-                cost_multiplier=1.0,
-                latency_multiplier=1.0,
-                critic_strictness=1.0,
-            ),
-            "parallel_budget": _AgentRegistration(
-                agent_id="parallel_budget",
-                task_kinds=("parallel",),
-                node_fn=self._build_profiled_node_fn(parallel_analysis_node, profile="budget"),
-                profile="budget",
-                confidence_bias=-0.06,
-                cost_multiplier=0.72,
-                latency_multiplier=0.8,
-                critic_strictness=0.88,
-            ),
         }
 
     def _build_task_intent(self, *, kind: str, metadata: dict[str, Any] | None = None) -> _TaskIntent:
@@ -874,15 +782,6 @@ class PipelineRuntimeService:
             else:
                 execution_state["papers"] = papers[:24] if len(papers) > 24 else papers
 
-        if task_kind == "parallel":
-            papers = self._sort_papers_by_signal(execution_state.get("papers") or [])
-            if profile == "budget":
-                execution_state["papers"] = papers[:18] if len(papers) > 18 else papers
-            elif profile == "lineage":
-                execution_state["papers"] = papers[:24] if len(papers) > 24 else papers
-            else:
-                execution_state["papers"] = papers[:22] if len(papers) > 22 else papers
-
         return execution_state
 
     def _normalize_agent_output_state(
@@ -902,8 +801,8 @@ class PipelineRuntimeService:
         normalized_state["quick_mode"] = bool(baseline_state.get("quick_mode"))
         normalized_state["paper_range_years"] = baseline_state.get("paper_range_years")
 
-        # Preserve full retrieval corpus for downstream stages when graph/parallel choose lean subsets.
-        if task_kind in {"graph_build", "parallel"}:
+        # Preserve full retrieval corpus for downstream stages when graph build chooses lean subsets.
+        if task_kind == "graph_build":
             normalized_state["papers"] = list(baseline_state.get("papers") or [])
             normalized_state["seed_paper"] = baseline_state.get("seed_paper")
 
@@ -925,8 +824,6 @@ class PipelineRuntimeService:
     @staticmethod
     def _normalize_profile_alias(profile: str) -> str:
         safe_profile = str(profile or "").strip().lower()
-        if safe_profile in {"lineage", "lineage_first"}:
-            return "lineage"
         if safe_profile in {"fast", "quick", "quickpass"}:
             return "fast"
         if safe_profile in {"balanced", "stable"}:
@@ -1044,7 +941,6 @@ class PipelineRuntimeService:
     def _state_alignment_delta(self, *, task_kind: str, state: PipelineState) -> float:
         safe_kind = str(task_kind or "").strip().lower()
         papers = list(state.get("papers") or [])
-        has_graph = isinstance(state.get("graph_payload"), dict)
 
         if safe_kind == "planner":
             return 0.02 if str(state.get("input_value") or "").strip() else -0.20
@@ -1056,10 +952,6 @@ class PipelineRuntimeService:
             return 0.06 if papers else -0.15
         if safe_kind == "checkpoint_1":
             return 0.04 if papers else -0.10
-        if safe_kind == "checkpoint_2":
-            return 0.03 if has_graph else -0.07
-        if safe_kind == "parallel":
-            return 0.03 if papers else -0.10
         return 0.0
 
     def _estimate_bid_cost(
@@ -1076,7 +968,7 @@ class PipelineRuntimeService:
         keyword_count = len(runtime.state.get("search_keywords") or [])
         complexity = 1.0
 
-        if task_kind in {"graph_build", "parallel"}:
+        if task_kind == "graph_build":
             complexity += min(0.60, float(paper_count) / 60.0)
         elif task_kind == "search":
             complexity += min(0.30, float(keyword_count) / 20.0)
@@ -1100,7 +992,7 @@ class PipelineRuntimeService:
         retry_count = int(intent.metadata.get("retry_count") or runtime.task_retry_count.get(task_kind) or 0)
         paper_count = len(runtime.state.get("papers") or [])
         multiplier = float(registration.latency_multiplier) * (1.0 + min(0.40, retry_count * 0.16))
-        if task_kind in {"graph_build", "parallel"}:
+        if task_kind == "graph_build":
             multiplier += min(0.35, float(paper_count) / 80.0)
         return max(1, int(base_latency * multiplier))
 
@@ -1120,17 +1012,6 @@ class PipelineRuntimeService:
             if self._is_bid_budget_feasible(runtime=runtime, intent=intent, bid=item)
         ]
         task_kind = str(intent.kind or "").strip().lower()
-        if not affordable and task_kind == "parallel":
-            fallback_bid = min(
-                bids,
-                key=lambda item: (
-                    float(item.estimated_cost),
-                    int(item.estimated_latency_ms),
-                    -float(item.confidence),
-                    item.agent_id,
-                ),
-            )
-            affordable = [fallback_bid]
         if not affordable and task_kind == "search":
             affordable = [
                 item
@@ -1178,7 +1059,7 @@ class PipelineRuntimeService:
     ) -> bool:
         task_kind = str(intent.kind or "").strip().lower()
         spend_after_award = float(runtime.budget_spent) + float(bid.estimated_cost)
-        if task_kind in {"checkpoint_1", "checkpoint_2"}:
+        if task_kind == "checkpoint_1":
             return self._is_bid_within_hard_budget(runtime=runtime, bid=bid)
         reserve = self._estimate_reserved_downstream_cost(task_kind=intent.kind)
         return spend_after_award + reserve <= float(runtime.budget_limit) + 1e-9
@@ -1336,25 +1217,12 @@ class PipelineRuntimeService:
                 return _CriticVerdict(False, "检查点状态未更新。", "warning")
             return _CriticVerdict(True, "检查点确认完成。")
 
-        if task_kind == "checkpoint_2":
-            if str(state_after.get("current_node") or "").strip().lower() != "checkpoint_2":
-                return _CriticVerdict(False, "血缘树检查点状态未更新。", "warning")
-            return _CriticVerdict(True, "血缘树检查点确认完成。")
-
-        if task_kind == "parallel":
-            gaps = list(state_after.get("research_gaps") or [])
-            notes = list(state_after.get("critic_notes") or [])
-            min_outputs = 1 if strictness < 1.0 else 2
-            if (len(gaps) + len(notes)) < min_outputs:
-                return _CriticVerdict(False, "并行分析缺少关键产物。", "warning")
-            return _CriticVerdict(True, "并行分析产物可用。")
-
         return _CriticVerdict(True, "无需审核。")
 
     @staticmethod
     def _resolve_profile_strictness(profile: str) -> float:
         safe_profile = str(profile or "").strip().lower()
-        if safe_profile in {"dense", "recall", "lineage", "precise", "guarded"}:
+        if safe_profile in {"dense", "recall", "precise", "guarded"}:
             return 1.12
         if safe_profile in {"lean", "budget", "fast", "quickpass"}:
             return 0.9

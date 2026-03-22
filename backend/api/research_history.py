@@ -8,8 +8,6 @@ from models.schemas import (
     ResearchHistoryBatchDeleteResponse,
     ResearchHistoryDeleteResponse,
     ResearchHistoryDetailResponse,
-    ResearchHistoryLineageUpdateRequest,
-    ResearchHistoryLineageUpdateResponse,
     ResearchHistoryListResponse,
     UserProfile,
 )
@@ -29,23 +27,6 @@ def list_research_history(
     history_service: ResearchHistoryService = Depends(get_research_history_service),
 ) -> ResearchHistoryListResponse:
     return history_service.list_history(user=user, page=page, page_size=page_size)
-
-
-@router.post("/lineage-status", response_model=ResearchHistoryLineageUpdateResponse)
-def update_research_history_lineage_status(
-    request: ResearchHistoryLineageUpdateRequest,
-    user: UserProfile = Depends(get_current_user_profile),
-    history_service: ResearchHistoryService = Depends(get_research_history_service),
-) -> ResearchHistoryLineageUpdateResponse:
-    updated = history_service.record_lineage_status(
-        user=user,
-        graph_id=request.graph_id,
-        seed_paper_id=request.seed_paper_id,
-        ancestor_count=request.ancestor_count,
-        descendant_count=request.descendant_count,
-        lineage_payload=request.lineage_payload,
-    )
-    return ResearchHistoryLineageUpdateResponse(updated=updated)
 
 
 @router.post("/batch-delete", response_model=ResearchHistoryBatchDeleteResponse)

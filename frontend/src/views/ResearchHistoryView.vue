@@ -146,30 +146,6 @@
           <LoadingState v-if="detailLoading" message="正在加载图谱详情..." />
           <p v-else-if="!selectedDetail" class="muted history-empty">请选择一条记录查看知识图谱。</p>
           <div v-else class="history-detail-content">
-            <div v-if="showDetailTabs" class="history-detail-tabbar" role="tablist" aria-label="历史详情视图切换">
-              <div class="history-detail-tabs">
-                <button
-                  class="history-detail-tab mono"
-                  :class="{ 'is-active': activeDetailTab === 'graph' }"
-                  type="button"
-                  role="tab"
-                  :aria-selected="activeDetailTab === 'graph'"
-                  @click="activeDetailTab = 'graph'"
-                >
-                  知识图谱
-                </button>
-                <button
-                  class="history-detail-tab mono"
-                  :class="{ 'is-active': activeDetailTab === 'lineage' }"
-                  type="button"
-                  role="tab"
-                  :aria-selected="activeDetailTab === 'lineage'"
-                  @click="activeDetailTab = 'lineage'"
-                >
-                  血缘树
-                </button>
-              </div>
-            </div>
             <section v-if="showSignalPanel" class="history-signal-panel">
               <header class="history-signal-head">
                 <p class="history-signal-title">相关研究动态</p>
@@ -191,14 +167,8 @@
               </div>
             </section>
             <div class="history-detail-stage">
-              <BloodLineageTree
-                v-if="activeDetailTab === 'lineage' && historyLineageData"
-                ref="historyLineageViewRef"
-                :lineage="historyLineageData"
-                :stretch-timeline="true"
-              />
               <KnowledgeGraphView
-                v-else-if="historyKnowledgeGraphData"
+                v-if="historyKnowledgeGraphData"
                 ref="historyGraphViewRef"
                 :graph-data="historyKnowledgeGraphData"
                 mode="panorama_only"
@@ -221,7 +191,6 @@ import { useRouter } from 'vue-router';
 
 import AppHeader from '../components/layout/AppHeader.vue';
 import ErrorBoundary from '../components/common/ErrorBoundary.vue';
-import BloodLineageTree from '../components/lineage/BloodLineageTree.vue';
 import KnowledgeGraphCanvas from '../components/graph/KnowledgeGraphCanvas.vue';
 import KnowledgeGraphView from '../components/graph/KnowledgeGraphView.vue';
 import { adaptDomainGraphFromHistoryGraph } from '../components/history/historyGraphAdapter';
@@ -254,9 +223,7 @@ const {
   clearSelectedDetail
 } = useResearchHistoryStore();
 
-const activeDetailTab = ref('graph');
 const historyGraphViewRef = ref(null);
-const historyLineageViewRef = ref(null);
 const selectedHistoryIds = ref([]);
 const batchSelectMode = ref(false);
 const historySignalEvents = ref([]);
@@ -283,13 +250,6 @@ const domainGraphData = computed(() => {
 
   return adaptDomainGraphFromHistoryGraph(detail.graph, detail.search_record);
 });
-const historyLineageData = computed(() => {
-  const raw = selectedDetail.value?.lineage_graph;
-  if (!raw || typeof raw !== 'object') return null;
-  const root = raw.root || raw.root_paper;
-  if (!root || typeof root !== 'object') return null;
-  return raw;
-});
 const historyKnowledgeGraphData = computed(() => {
   const graph = selectedDetail.value?.graph;
   if (!graph || typeof graph !== 'object') return null;
@@ -298,7 +258,6 @@ const historyKnowledgeGraphData = computed(() => {
   if (!nodes.length && !edges.length) return null;
   return graph;
 });
-const showDetailTabs = computed(() => Boolean(historyLineageData.value));
 const showSignalPanel = computed(() => {
   const researchType = String(selectedDetail.value?.research_type || '').trim().toLowerCase();
   if (!selectedDetail.value) return false;
@@ -361,7 +320,6 @@ function syncSelectionWithCurrentPage() {
 async function openDetail(historyId) {
   await fetchHistoryDetail(historyId, { accessToken: accessToken.value });
   await autoCenterPaperHistoryGraph();
-  await autoCenterPaperHistoryLineage();
 }
 
 async function reloadHistoryAfterDelete({ deletedIds = [] } = {}) {
@@ -443,31 +401,16 @@ async function changePage(nextPage) {
 }
 
 async function autoCenterPaperHistoryGraph() {
-  const detail = selectedDetail.value;
-  if (!detail) return;
-  if (activeDetailTab.value !== 'graph') return;
+  if (!selectedDetail.value) return;
   await nextTick();
   await nextTick();
   if (!historyGraphViewRef.value?.refreshGraphDisplay) return;
   await historyGraphViewRef.value.refreshGraphDisplay();
 }
 
-async function autoCenterPaperHistoryLineage() {
-  const detail = selectedDetail.value;
-  if (!detail || !historyLineageData.value) return;
-  if (activeDetailTab.value !== 'lineage') return;
-  await nextTick();
-  await nextTick();
-  if (historyLineageViewRef.value?.refreshLineageToMinOverview) {
-    await historyLineageViewRef.value.refreshLineageToMinOverview();
-    return;
-  }
-  await historyLineageViewRef.value?.refreshLineageDisplay?.();
-}
-
 function formatSignalEventType(eventType) {
   const normalized = String(eventType || '').trim().toLowerCase();
-  if (normalized === 'lineage_expanded') return '血缘扩展';
+  if (normalized === 'lineage_expanded') return '关联扩展';
   if (normalized === 'controversy_rise') return '争议上升';
   if (normalized === 'citation_delta') return '引用变化';
   if (normalized === 'metadata_enriched') return '信息补全';
@@ -477,9 +420,7 @@ function formatSignalEventType(eventType) {
 function resolveSignalPaperIdFromDetail(detail) {
   if (!detail || typeof detail !== 'object') return '';
   const searchRecord = String(detail.search_record || '').trim();
-  const lineageSeedPaperId = String(detail?.lineage?.seed_paper_id || '').trim();
-  const lineageRootPaperId = String(detail?.lineage_graph?.root?.paper_id || detail?.lineage_graph?.root?.id || '').trim();
-  return lineageSeedPaperId || lineageRootPaperId || searchRecord;
+  return searchRecord;
 }
 
 async function loadHistorySignalEvents() {
@@ -530,10 +471,8 @@ onMounted(async () => {
 watch(
   () => selectedDetail.value?.history_id,
   async () => {
-    activeDetailTab.value = 'graph';
     await loadHistorySignalEvents();
     await autoCenterPaperHistoryGraph();
-    await autoCenterPaperHistoryLineage();
   }
 );
 
@@ -543,19 +482,6 @@ watch(
     syncSelectionWithCurrentPage();
     if (records.value.length === 0) {
       cancelBatchSelectMode();
-    }
-  }
-);
-
-watch(
-  () => activeDetailTab.value,
-  async (nextTab) => {
-    if (nextTab === 'graph') {
-      await autoCenterPaperHistoryGraph();
-      return;
-    }
-    if (nextTab === 'lineage') {
-      await autoCenterPaperHistoryLineage();
     }
   }
 );

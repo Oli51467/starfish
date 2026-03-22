@@ -10,7 +10,6 @@ from api.collections import router as collections_router
 from api.gaps import router as gaps_router
 from api.graphrag import router as graphrag_router
 from api.landscape import router as landscape_router
-from api.lineage import router as lineage_router
 from api.map import router as map_router
 from api.pipeline import router as pipeline_router
 from api.paper_signals import router as paper_signals_router
@@ -51,7 +50,6 @@ app.include_router(tasks_router)
 app.include_router(reading_list_router)
 app.include_router(research_history_router)
 app.include_router(gaps_router)
-app.include_router(lineage_router)
 
 
 @app.get("/health", response_model=HealthResponse)

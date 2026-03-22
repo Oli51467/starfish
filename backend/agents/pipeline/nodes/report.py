@@ -52,7 +52,7 @@ async def report_node(state: PipelineState) -> PipelineState:
     if not draft:
         draft = "# AutoResearch Report\n\n暂无可用内容。"
 
-    feedback = str((state.get("checkpoint_feedback") or {}).get("checkpoint_2") or state.get("human_feedback") or "").strip()
+    feedback = str((state.get("checkpoint_feedback") or {}).get("checkpoint_1") or state.get("human_feedback") or "").strip()
     final_report = draft
 
     if _is_effective_feedback(feedback):

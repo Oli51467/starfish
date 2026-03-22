@@ -1,4 +1,4 @@
-import { computed, onUnmounted, ref, watch } from 'vue';
+import { computed, onUnmounted, ref } from 'vue';
 
 import {
   buildKnowledgeGraph,
@@ -9,10 +9,8 @@ import {
   resumeResearchSession,
   startResearchSession,
   stopResearchSession,
-  updateResearchHistoryLineageStatus
 } from '../api';
 import { buildKnowledgeGraphSets } from '../components/graph/knowledgeGraphModel';
-import { usePaperStore } from '../stores/paperStore';
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -57,6 +55,27 @@ function normalizeTraceStep(step, inputType = 'domain') {
   return {
     title: phaseCopy.title,
     detail,
+    status,
+    statusText: toStatusText(status),
+    metaText: ''
+  };
+}
+
+function normalizeBuildTraceStep(step) {
+  const phase = String(step?.phase || '').trim().toLowerCase();
+  const status = String(step?.status || '').toLowerCase() === 'fallback' ? 'fallback' : 'done';
+  if (phase === 'store_graph') {
+    return {
+      title: 'Verifier Agent',
+      detail: status === 'fallback' ? '图谱保存阶段出现波动，已保留当前结果。' : '图谱结构已整理完成。',
+      status,
+      statusText: toStatusText(status),
+      metaText: ''
+    };
+  }
+  return {
+    title: 'Graph Builder Agent',
+    detail: status === 'fallback' ? '关系整理阶段出现波动，已继续后续流程。' : '论文与主题关系已完成整理。',
     status,
     statusText: toStatusText(status),
     metaText: ''
@@ -180,27 +199,6 @@ function createRetrievalAuditLogs(retrieval) {
   return logs;
 }
 
-function normalizeBuildTraceStep(step) {
-  const phase = String(step?.phase || '').trim().toLowerCase();
-  const status = String(step?.status || '').toLowerCase() === 'fallback' ? 'fallback' : 'done';
-  if (phase === 'store_graph') {
-    return {
-      title: 'Verifier Agent',
-      detail: status === 'fallback' ? '图谱保存阶段出现波动，已保留当前结果。' : '图谱结构已整理完成。',
-      status,
-      statusText: toStatusText(status),
-      metaText: ''
-    };
-  }
-  return {
-    title: 'Graph Builder Agent',
-    detail: status === 'fallback' ? '关系整理阶段出现波动，已继续后续流程。' : '论文与主题关系已完成整理。',
-    status,
-    statusText: toStatusText(status),
-    metaText: ''
-  };
-}
-
 function createRunningBuildLogs() {
   return [
     {
@@ -301,70 +299,6 @@ function buildRetrievalPreviewGraph(query, papers) {
   };
 }
 
-function normalizeLineageSeedId(seedInputType, seedInputValue) {
-  const inputType = String(seedInputType || '').trim().toLowerCase();
-  let value = String(seedInputValue || '').trim();
-  if (!value) return '';
-
-  if (inputType === 'arxiv_id') {
-    value = value.replace(/^arxiv:/i, '').trim();
-    value = value.replace(/^https?:\/\/arxiv\.org\/(?:abs|pdf)\//i, '').trim();
-    value = value.replace(/\.pdf$/i, '').trim();
-    return value;
-  }
-  if (inputType === 'doi') {
-    value = value.replace(/^doi:\s*/i, '').trim();
-    value = value.replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, '').trim();
-    return value;
-  }
-  return value;
-}
-
-function resolveLineageSeed({
-  seedInputType,
-  seedInputValue,
-  retrieval,
-  graphResult
-}) {
-  const normalizedInputType = String(seedInputType || '').trim().toLowerCase();
-  const normalizedSeedId = normalizeLineageSeedId(normalizedInputType, seedInputValue);
-  const papers = Array.isArray(retrieval?.papers) ? retrieval.papers : [];
-
-  if ((normalizedInputType === 'arxiv_id' || normalizedInputType === 'doi') && normalizedSeedId) {
-    const byRetrieval = papers.find((item) => String(item?.title || '').trim());
-    return {
-      paperId: normalizedSeedId,
-      title: String(byRetrieval?.title || normalizedSeedId).trim()
-    };
-  }
-
-  const byRetrieval = papers.find((item) => String(item?.paper_id || '').trim());
-  if (byRetrieval) {
-    return {
-      paperId: String(byRetrieval.paper_id || '').trim(),
-      title: String(byRetrieval.title || '').trim()
-    };
-  }
-
-  const nodes = Array.isArray(graphResult?.nodes) ? graphResult.nodes : [];
-  const byGraph = nodes.find((node) => {
-    if (String(node?.type || '').toLowerCase() !== 'paper') return false;
-    return Boolean(String(node?.paper_id || '').trim());
-  });
-  if (byGraph) {
-    return {
-      paperId: String(byGraph.paper_id || '').trim(),
-      title: String(byGraph.label || '').trim()
-    };
-  }
-
-  const fallback = normalizedSeedId || String(seedInputValue || '').trim();
-  return {
-    paperId: fallback,
-    title: fallback
-  };
-}
-
 function extractPanoramaStats(rawGraph) {
   const graphSets = buildKnowledgeGraphSets(rawGraph || {});
   const panorama = graphSets.panorama || {};
@@ -383,9 +317,7 @@ const RESEARCH_NODE_LABEL = {
   router: 'Router Agent',
   search: 'Retriever Agent',
   graph_build: 'Graph Builder Agent',
-  checkpoint_1: 'Human Checkpoint',
-  parallel: 'Lineage Agent',
-  checkpoint_2: 'Lineage Checkpoint'
+  checkpoint_1: 'Human Checkpoint'
 };
 
 const NEGOTIATION_PROFILE_LABEL = {
@@ -395,20 +327,19 @@ const NEGOTIATION_PROFILE_LABEL = {
   recall: '覆盖优先',
   dense: '深度建模',
   balanced: '平衡策略',
-  lineage: '血缘优先',
   guarded: '稳健策略',
   quickpass: '快速确认',
   lean: '轻量策略',
   stable: '稳定策略'
 };
 
-const STEP_FLOW_ORDER = ['retrieve', 'checkpoint', 'graph', 'lineage'];
+const STEP_FLOW_ORDER = ['retrieve', 'checkpoint', 'graph'];
 const STEP_FINAL_NODE = {
   retrieve: 'search',
   checkpoint: 'checkpoint_1',
-  graph: 'graph_build',
-  lineage: 'parallel'
+  graph: 'graph_build'
 };
+
 const ACTIVE_RESEARCH_SESSION_STORAGE_KEY = 'starfish:active-research-session';
 const COMPLETED_WORKFLOW_SNAPSHOT_STORAGE_KEY = 'starfish:workflow-completed-snapshot';
 
@@ -418,6 +349,15 @@ function safeJsonClone(value, fallback = null) {
   } catch {
     return fallback;
   }
+}
+
+function buildWorkflowSeedFingerprint(seed = {}) {
+  const inputType = String(seed?.input_type || 'domain').trim().toLowerCase();
+  const inputValue = String(seed?.input_value || '').trim().toLowerCase();
+  const rangeYears = parsePaperRangeYears(seed?.paper_range_years);
+  const rangeKey = rangeYears ? String(rangeYears) : 'all';
+  const quickMode = seed?.quick_mode === undefined ? true : Boolean(seed.quick_mode);
+  return `${inputType}|${inputValue}|${rangeKey}|q${quickMode ? 1 : 0}`;
 }
 
 function readCompletedWorkflowSnapshot() {
@@ -435,10 +375,7 @@ function readCompletedWorkflowSnapshot() {
 function writeCompletedWorkflowSnapshot(payload = {}) {
   if (typeof window === 'undefined') return;
   try {
-    window.sessionStorage.setItem(
-      COMPLETED_WORKFLOW_SNAPSHOT_STORAGE_KEY,
-      JSON.stringify(payload)
-    );
+    window.sessionStorage.setItem(COMPLETED_WORKFLOW_SNAPSHOT_STORAGE_KEY, JSON.stringify(payload));
   } catch {
     // ignore storage write failures
   }
@@ -451,105 +388,6 @@ function clearCompletedWorkflowSnapshot() {
   } catch {
     // ignore storage remove failures
   }
-}
-
-function buildWorkflowSeedFingerprint(seed = {}) {
-  const inputType = String(seed?.input_type || 'domain').trim().toLowerCase();
-  const inputValue = String(seed?.input_value || '').trim().toLowerCase();
-  const rangeYears = parsePaperRangeYears(seed?.paper_range_years);
-  const rangeKey = rangeYears ? String(rangeYears) : 'all';
-  const quickMode = seed?.quick_mode === undefined ? true : Boolean(seed.quick_mode);
-  return `${inputType}|${inputValue}|${rangeKey}|q${quickMode ? 1 : 0}`;
-}
-
-function resolveStepKeyByNode(rawNode) {
-  const node = String(rawNode || '').trim().toLowerCase();
-  if (!node) return 'retrieve';
-  if (node === 'checkpoint_1') return 'checkpoint';
-  if (node === 'graph_build') return 'graph';
-  if (['parallel', 'synthesizer', 'checkpoint_2', 'report', 'save'].includes(node)) return 'lineage';
-  return 'retrieve';
-}
-
-function resolveNodeLabel(rawNode) {
-  const node = String(rawNode || '').trim().toLowerCase();
-  return RESEARCH_NODE_LABEL[node] || `Agent · ${node || 'unknown'}`;
-}
-
-function resolveStepKeyByTaskKind(rawTaskKind) {
-  const taskKind = String(rawTaskKind || '').trim().toLowerCase();
-  if (!taskKind) return 'retrieve';
-  if (taskKind === 'checkpoint_1') return 'checkpoint';
-  if (taskKind === 'graph_build') return 'graph';
-  if (taskKind === 'checkpoint_2' || taskKind === 'parallel') return 'lineage';
-  return 'retrieve';
-}
-
-function resolveTaskKindLabel(rawTaskKind) {
-  const safeTaskKind = String(rawTaskKind || '').trim().toLowerCase();
-  return resolveNodeLabel(safeTaskKind || 'planner');
-}
-
-function resolveAgentRuntimeLabel(rawAgentId, rawProfile) {
-  const agentId = String(rawAgentId || '').trim().toLowerCase();
-  const profile = String(rawProfile || '').trim().toLowerCase();
-  let base = 'Coordinator Agent';
-  if (agentId.includes('planner')) base = 'Planner Agent';
-  else if (agentId.includes('router')) base = 'Router Agent';
-  else if (agentId.includes('search')) base = 'Retriever Agent';
-  else if (agentId.includes('graph')) base = 'Graph Builder Agent';
-  else if (agentId.includes('parallel')) base = 'Lineage Agent';
-  else if (agentId.includes('checkpoint_1')) base = 'Human Checkpoint';
-  else if (agentId.includes('checkpoint_2')) base = 'Lineage Checkpoint';
-  const profileLabel = NEGOTIATION_PROFILE_LABEL[profile] || NEGOTIATION_PROFILE_LABEL[agentId.split('_').at(-1)] || '';
-  if (!profileLabel) return base;
-  return `${base} · ${profileLabel}`;
-}
-
-function createNegotiationBudgetState() {
-  return {
-    spent: null,
-    limit: null,
-    remaining: null
-  };
-}
-
-function createNegotiationRoundState({
-  round = 1,
-  taskId = '',
-  taskKind = '',
-  status = 'bidding',
-  updatedAt = '',
-} = {}) {
-  return {
-    round,
-    taskId,
-    taskKind,
-    status,
-    bids: [],
-    winner: null,
-    veto: null,
-    rebid: null,
-    updatedAt
-  };
-}
-
-function createNegotiationStepState() {
-  return {
-    activeTaskKind: '',
-    activeRound: 0,
-    budget: createNegotiationBudgetState(),
-    rounds: []
-  };
-}
-
-function createNegotiationStateByStep() {
-  return {
-    retrieve: createNegotiationStepState(),
-    checkpoint: createNegotiationStepState(),
-    graph: createNegotiationStepState(),
-    lineage: createNegotiationStepState()
-  };
 }
 
 function persistActiveResearchSessionRecord(payload = {}) {
@@ -588,17 +426,122 @@ function clearActiveResearchSessionRecord() {
   }
 }
 
+function createNegotiationBudgetState() {
+  return {
+    spent: null,
+    limit: null,
+    remaining: null
+  };
+}
+
+function createNegotiationRoundState({
+  round = 1,
+  taskId = '',
+  taskKind = '',
+  status = 'bidding',
+  updatedAt = ''
+} = {}) {
+  return {
+    round,
+    taskId,
+    taskKind,
+    status,
+    bids: [],
+    winner: null,
+    veto: null,
+    rebid: null,
+    updatedAt
+  };
+}
+
+function createNegotiationStepState() {
+  return {
+    activeTaskKind: '',
+    activeRound: 0,
+    budget: createNegotiationBudgetState(),
+    rounds: []
+  };
+}
+
+function createNegotiationStateByStep() {
+  return {
+    retrieve: createNegotiationStepState(),
+    checkpoint: createNegotiationStepState(),
+    graph: createNegotiationStepState()
+  };
+}
+
+function resolveStepKeyByNode(rawNode) {
+  const node = String(rawNode || '').trim().toLowerCase();
+  if (!node) return 'retrieve';
+  if (node === 'planner' || node === 'router' || node === 'search') return 'retrieve';
+  if (node === 'checkpoint_1') return 'checkpoint';
+  if (node === 'graph_build' || node === 'synthesizer' || node === 'report' || node === 'save') return 'graph';
+  return 'retrieve';
+}
+
+function resolveStepKeyByTaskKind(rawTaskKind) {
+  const taskKind = String(rawTaskKind || '').trim().toLowerCase();
+  if (!taskKind) return 'retrieve';
+  if (taskKind === 'checkpoint_1') return 'checkpoint';
+  if (taskKind === 'graph_build') return 'graph';
+  if (taskKind === 'planner' || taskKind === 'router' || taskKind === 'search') return 'retrieve';
+  return 'retrieve';
+}
+
+function resolveNodeLabel(rawNode) {
+  const node = String(rawNode || '').trim().toLowerCase();
+  return RESEARCH_NODE_LABEL[node] || `Agent · ${node || 'unknown'}`;
+}
+
+function resolveTaskKindLabel(rawTaskKind) {
+  const taskKind = String(rawTaskKind || '').trim().toLowerCase();
+  return resolveNodeLabel(taskKind || 'planner');
+}
+
+function normalizeRuntimeSeed(seed = {}) {
+  return {
+    input_type: String(seed?.input_type || 'domain').trim().toLowerCase() === 'domain'
+      ? 'domain'
+      : (String(seed?.input_type || '').trim().toLowerCase() === 'doi' ? 'doi' : 'arxiv_id'),
+    input_value: String(seed?.input_value || '').trim(),
+    paper_range_years: parsePaperRangeYears(seed?.paper_range_years),
+    quick_mode: Boolean(seed?.quick_mode),
+    runtime_session_id: String(seed?.runtime_session_id || '').trim()
+  };
+}
+
+function toFiniteNegotiationNumber(rawValue) {
+  if (rawValue === null || rawValue === undefined) return null;
+  if (typeof rawValue === 'string' && !rawValue.trim()) return null;
+  const parsed = Number(rawValue);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function hasNegotiationMetricValue(rawValue) {
+  const parsed = toFiniteNegotiationNumber(rawValue);
+  return Number.isFinite(parsed) && parsed > 0;
+}
+
+function shouldFallbackToLegacy(error) {
+  const message = String(error?.message || '').trim().toLowerCase();
+  if (!message) return false;
+  if (message.includes('403') || message.includes('401') || message.includes('forbidden')) return false;
+  return (
+    message.includes('404')
+    || message.includes('session_not_found')
+    || message.includes('/api/research')
+    || message.includes('not found')
+    || message.includes('connection')
+  );
+}
+
 export function usePaperWorkflow({
   seedRef,
-  resultViewRef,
   accessTokenRef,
-  onStepChange,
-  onResultViewChange,
-  onLineageAvailabilityChange
+  onStepChange
 }) {
   const notifyStepChange = typeof onStepChange === 'function' ? onStepChange : () => {};
-  const notifyResultViewChange = typeof onResultViewChange === 'function' ? onResultViewChange : () => {};
-  const notifyLineageAvailability = typeof onLineageAvailabilityChange === 'function' ? onLineageAvailabilityChange : () => {};
 
   const steps = ref([
     {
@@ -614,7 +557,7 @@ export function usePaperWorkflow({
       index: 2,
       key: 'checkpoint',
       title: '需求确认',
-      description: '确认当前检索范围与研究目标，再继续生成知识图谱。',
+      description: '检索结果确认后自动继续生成知识图谱。',
       status: 'pending',
       message: '',
       logs: [],
@@ -628,16 +571,6 @@ export function usePaperWorkflow({
       status: 'pending',
       message: '',
       logs: []
-    },
-    {
-      index: 4,
-      key: 'lineage',
-      title: '生成血缘树',
-      description: '围绕起点论文展开祖先与后代演化脉络。',
-      status: 'pending',
-      message: '',
-      logs: [],
-      action: null
     }
   ]);
 
@@ -645,68 +578,17 @@ export function usePaperWorkflow({
   const terminatingWorkflow = ref(false);
   const graphData = ref(null);
   const errorMessage = ref('');
-  const lineageSeed = ref({ paperId: '', title: '' });
-  const checkpointContext = ref(null);
   const researchSessionId = ref('');
   const unifiedRuntimeActive = ref(false);
   const waitingResearchCheckpoint = ref('');
   const runtimeAutoResumingCheckpoint = ref('');
-  const lineageRevealApproved = ref(false);
-  const pendingLineagePayload = ref(null);
   const graphSnapshotSignature = ref('');
-  const runtimeSeed = ref({
-    input_type: 'domain',
-    input_value: '',
-    paper_range_years: null,
-    quick_mode: false,
-    auto_lineage: false,
-    lineage_seed_paper_id: '',
-    runtime_session_id: ''
-  });
+  const runtimeSeed = ref(normalizeRuntimeSeed({}));
+  const negotiationByStep = ref(createNegotiationStateByStep());
+
   let researchSocket = null;
   let researchPollTimer = null;
   const runtimeNodeLogCursor = new Map();
-  const negotiationByStep = ref(createNegotiationStateByStep());
-
-  const {
-    lineage: lineageData,
-    lineageLoading,
-    lineageErrorMessage,
-    loadLineage,
-    clearLineage
-  } = usePaperStore();
-
-  const canViewLineage = computed(() => Boolean(lineageLoading.value || lineageData.value));
-
-  function closeResearchSocket() {
-    if (researchSocket) {
-      researchSocket.close();
-      researchSocket = null;
-    }
-  }
-
-  function stopResearchPolling() {
-    if (researchPollTimer) {
-      window.clearInterval(researchPollTimer);
-      researchPollTimer = null;
-    }
-  }
-
-  const activeViewKey = computed({
-    get() {
-      const normalized = String(resultViewRef.value || '').trim().toLowerCase();
-      if (normalized === 'lineage' && !canViewLineage.value) return 'graph';
-      return normalized === 'lineage' ? 'lineage' : 'graph';
-    },
-    set(nextView) {
-      const normalized = String(nextView || '').trim().toLowerCase();
-      if (normalized === 'lineage' && !canViewLineage.value) {
-        notifyResultViewChange('graph');
-        return;
-      }
-      notifyResultViewChange(normalized === 'lineage' ? 'lineage' : 'graph');
-    }
-  });
 
   const graphStats = computed(() => {
     const stats = extractPanoramaStats(graphData.value || {});
@@ -761,9 +643,7 @@ export function usePaperWorkflow({
     const current = activeStep.value;
     if (!current) return '等待下一步执行。';
     const status = String(current.status || '').toLowerCase();
-    if (status === 'action_required') {
-      return '确认后将继续生成知识图谱。';
-    }
+    if (status === 'action_required') return '确认后将继续生成知识图谱。';
 
     const currentIndex = steps.value.findIndex((item) => item.index === current.index);
     for (let index = currentIndex + 1; index < steps.value.length; index += 1) {
@@ -773,22 +653,47 @@ export function usePaperWorkflow({
         return `${item.title}：${item.description}`;
       }
     }
-    return '本轮流程已完成，可继续查看或切换结果视图。';
+    return '本轮流程已完成，可继续查看知识图谱结果。';
   });
+
+  function closeResearchSocket() {
+    if (researchSocket) {
+      researchSocket.close();
+      researchSocket = null;
+    }
+  }
+
+  function stopResearchPolling() {
+    if (researchPollTimer) {
+      window.clearInterval(researchPollTimer);
+      researchPollTimer = null;
+    }
+  }
+
+  function resetNegotiationState() {
+    negotiationByStep.value = createNegotiationStateByStep();
+  }
+
+  function updateStepSignal() {
+    const step = activeStep.value || steps.value[0] || { index: 1, title: '论文检索' };
+    notifyStepChange({
+      index: Number(step.index || 1),
+      total: steps.value.length,
+      title: String(step.title || '论文检索')
+    });
+  }
 
   function buildCompletedStepSummary(step) {
     const key = String(step?.key || '').trim();
     const defaultTitleByKey = {
       retrieve: 'Retriever Agent',
       checkpoint: 'Coordinator Agent',
-      graph: 'Graph Builder Agent',
-      lineage: 'Lineage Agent'
+      graph: 'Graph Builder Agent'
     };
     const defaultDetailByKey = {
       retrieve: '论文检索已完成。',
       checkpoint: '需求确认已完成。',
-      graph: '知识图谱生成已完成。',
-      lineage: '血缘树生成已完成。'
+      graph: '知识图谱生成已完成。'
     };
     return {
       title: defaultTitleByKey[key] || 'Coordinator Agent',
@@ -799,16 +704,38 @@ export function usePaperWorkflow({
     };
   }
 
+  function finalizeStepLogs(step) {
+    if (!step || !Array.isArray(step.logs) || !step.logs.length) return;
+    step.logs = step.logs.map((log) => {
+      const normalized = String(log?.status || '').trim().toLowerCase();
+      if (normalized === 'doing' || normalized === 'pending' || normalized === 'running') {
+        return {
+          ...log,
+          status: 'done',
+          statusText: toStatusText('done')
+        };
+      }
+      return log;
+    });
+  }
+
   function ensureStepHasVisibleDetails(step) {
     if (!step || !Array.isArray(step.logs) || step.logs.length) return;
     step.logs = [buildCompletedStepSummary(step)];
   }
 
-  function updateStepSignal() {
-    notifyStepChange({
-      index: activeStep.value.index,
-      total: steps.value.length,
-      title: activeStep.value.title
+  function settleStepTransientLogs(step) {
+    if (!step || !Array.isArray(step.logs) || !step.logs.length) return;
+    step.logs = step.logs.map((log) => {
+      const normalized = String(log?.status || '').trim().toLowerCase();
+      if (normalized === 'doing' || normalized === 'pending' || normalized === 'running') {
+        return {
+          ...log,
+          status: 'done',
+          statusText: toStatusText('done')
+        };
+      }
+      return log;
     });
   }
 
@@ -839,39 +766,8 @@ export function usePaperWorkflow({
 
   function setStepAction(stepKey, action) {
     const target = steps.value.find((item) => item.key === String(stepKey || '').trim());
-    if (!target) return;
-    if (!Object.prototype.hasOwnProperty.call(target, 'action')) return;
+    if (!target || !Object.prototype.hasOwnProperty.call(target, 'action')) return;
     target.action = action || null;
-  }
-
-  function finalizeStepLogs(step) {
-    if (!step || !Array.isArray(step.logs) || !step.logs.length) return;
-    step.logs = step.logs.map((log) => {
-      const normalized = String(log?.status || '').trim().toLowerCase();
-      if (normalized === 'doing' || normalized === 'pending' || normalized === 'running') {
-        return {
-          ...log,
-          status: 'done',
-          statusText: toStatusText('done')
-        };
-      }
-      return log;
-    });
-  }
-
-  function settleStepTransientLogs(step) {
-    if (!step || !Array.isArray(step.logs) || !step.logs.length) return;
-    step.logs = step.logs.map((log) => {
-      const normalized = String(log?.status || '').trim().toLowerCase();
-      if (normalized === 'doing' || normalized === 'pending' || normalized === 'running') {
-        return {
-          ...log,
-          status: 'done',
-          statusText: toStatusText('done')
-        };
-      }
-      return log;
-    });
   }
 
   function appendStepLog(stepKey, logItem) {
@@ -886,6 +782,7 @@ export function usePaperWorkflow({
     )
       ? 'done'
       : requestedStatus;
+
     const nextLog = {
       title: String(logItem?.title || '').trim() || '执行记录',
       detail: String(logItem?.detail || '').trim() || '工作流运行中。',
@@ -893,6 +790,7 @@ export function usePaperWorkflow({
       statusText: toStatusText(safeStatus),
       metaText: String(logItem?.metaText || '').trim()
     };
+
     const previous = Array.isArray(target.logs) ? target.logs[target.logs.length - 1] : null;
     if (
       previous
@@ -902,8 +800,45 @@ export function usePaperWorkflow({
     ) {
       return;
     }
+
     settleStepTransientLogs(target);
     target.logs = [...(Array.isArray(target.logs) ? target.logs : []), nextLog];
+  }
+
+  function appendFailureLog(stepKey, detail) {
+    const target = steps.value.find((item) => item.key === String(stepKey || '').trim());
+    if (!target) return;
+    const nextLogs = [
+      ...(target.logs || []),
+      {
+        title: '执行异常',
+        detail: String(detail || '').trim() || '步骤执行失败。',
+        status: 'fallback',
+        statusText: toStatusText('error'),
+        metaText: ''
+      }
+    ];
+    setStepLogs(stepKey, nextLogs);
+  }
+
+  function appendNodeLog(node, detail, status = 'doing') {
+    const stepKey = resolveStepKeyByNode(node);
+    const title = resolveNodeLabel(node);
+    const target = steps.value.find((item) => item.key === stepKey);
+    if (!target) return;
+
+    settleStepTransientLogs(target);
+    const logs = Array.isArray(target.logs) ? [...target.logs] : [];
+    const logIndex = logs.length;
+    logs.push({
+      title,
+      detail: String(detail || '').trim() || '工作流运行中。',
+      status,
+      statusText: toStatusText(status),
+      metaText: ''
+    });
+    target.logs = logs;
+    runtimeNodeLogCursor.set(`${stepKey}::${String(node || '').trim()}`, logIndex);
   }
 
   function updateLatestNodeLog(stepKey, node, patch = {}) {
@@ -923,6 +858,7 @@ export function usePaperWorkflow({
     )
       ? 'done'
       : requestedStatus;
+
     target.logs[logIndex] = {
       ...target.logs[logIndex],
       ...patch,
@@ -931,27 +867,23 @@ export function usePaperWorkflow({
     };
   }
 
-  function appendNodeLog(node, detail, status = 'doing') {
-    const stepKey = resolveStepKeyByNode(node);
-    const title = resolveNodeLabel(node);
-    const target = steps.value.find((item) => item.key === stepKey);
-    if (!target) return;
-    settleStepTransientLogs(target);
-    const logs = Array.isArray(target.logs) ? [...target.logs] : [];
-    const logIndex = logs.length;
-    logs.push({
-      title,
-      detail: String(detail || '').trim() || '工作流运行中。',
-      status,
-      statusText: toStatusText(status),
-      metaText: ''
-    });
-    target.logs = logs;
-    runtimeNodeLogCursor.set(`${stepKey}::${String(node || '').trim()}`, logIndex);
-  }
-
-  function resetNegotiationState() {
-    negotiationByStep.value = createNegotiationStateByStep();
+  function markEarlierStepsDone(stepKey) {
+    const targetIndex = STEP_FLOW_ORDER.indexOf(String(stepKey || '').trim());
+    if (targetIndex <= 0) return;
+    for (let index = 0; index < targetIndex; index += 1) {
+      const key = STEP_FLOW_ORDER[index];
+      const step = steps.value.find((item) => item.key === key);
+      if (!step) continue;
+      const status = String(step.status || '').trim().toLowerCase();
+      if (!['done', 'skipped'].includes(status)) {
+        step.status = 'done';
+        if (!String(step.message || '').trim()) {
+          step.message = `${step.title}已完成。`;
+        }
+      }
+      finalizeStepLogs(step);
+      ensureStepHasVisibleDetails(step);
+    }
   }
 
   function resolveNegotiationTimestamp(event = {}) {
@@ -963,20 +895,6 @@ export function usePaperWorkflow({
     const parsed = Number(rawRound);
     if (!Number.isFinite(parsed) || parsed <= 0) return 1;
     return Math.max(1, Math.round(parsed));
-  }
-
-  function toFiniteNegotiationNumber(rawValue) {
-    if (rawValue === null || rawValue === undefined) return null;
-    if (typeof rawValue === 'string' && !rawValue.trim()) return null;
-    const parsed = Number(rawValue);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-
-  function hasNegotiationMetricValue(rawValue) {
-    if (rawValue === null || rawValue === undefined) return false;
-    if (typeof rawValue === 'string' && !rawValue.trim()) return false;
-    const parsed = Number(rawValue);
-    return Number.isFinite(parsed) && parsed > 0;
   }
 
   function ensureNegotiationStepState(stepKey) {
@@ -1006,6 +924,7 @@ export function usePaperWorkflow({
       if (!String(item?.taskId || '').trim()) return true;
       return String(item.taskId || '').trim() === safeTaskId;
     });
+
     if (!roundState) {
       roundState = createNegotiationRoundState({
         round: roundIndex,
@@ -1032,10 +951,25 @@ export function usePaperWorkflow({
     if (safeTaskKind) {
       stepState.activeTaskKind = safeTaskKind;
     }
+
     return {
       stepState,
       roundState
     };
+  }
+
+  function resolveAgentRuntimeLabel(rawAgentId, rawProfile) {
+    const agentId = String(rawAgentId || '').trim().toLowerCase();
+    const profile = String(rawProfile || '').trim().toLowerCase();
+    let base = 'Coordinator Agent';
+    if (agentId.includes('planner')) base = 'Planner Agent';
+    else if (agentId.includes('router')) base = 'Router Agent';
+    else if (agentId.includes('search')) base = 'Retriever Agent';
+    else if (agentId.includes('graph')) base = 'Graph Builder Agent';
+    else if (agentId.includes('checkpoint_1')) base = 'Human Checkpoint';
+    const profileLabel = NEGOTIATION_PROFILE_LABEL[profile] || NEGOTIATION_PROFILE_LABEL[agentId.split('_').at(-1)] || '';
+    if (!profileLabel) return base;
+    return `${base} · ${profileLabel}`;
   }
 
   function buildNegotiationBid(event = {}) {
@@ -1075,10 +1009,12 @@ export function usePaperWorkflow({
     const safeAgentId = String(nextBid.agentId || '').trim();
     const safeProfile = String(nextBid.profile || '').trim().toLowerCase();
     if (!safeAgentId) return;
+
     const index = roundState.bids.findIndex((item) => (
       String(item?.agentId || '').trim() === safeAgentId
       && String(item?.profile || '').trim().toLowerCase() === safeProfile
     ));
+
     if (index >= 0) {
       roundState.bids[index] = {
         ...roundState.bids[index],
@@ -1086,6 +1022,7 @@ export function usePaperWorkflow({
       };
       return;
     }
+
     roundState.bids.push(nextBid);
   }
 
@@ -1134,220 +1071,6 @@ export function usePaperWorkflow({
     };
   }
 
-  function resetUnifiedRuntimeState() {
-    stopResearchPolling();
-    closeResearchSocket();
-    researchSessionId.value = '';
-    unifiedRuntimeActive.value = false;
-    waitingResearchCheckpoint.value = '';
-    runtimeAutoResumingCheckpoint.value = '';
-    lineageRevealApproved.value = false;
-    pendingLineagePayload.value = null;
-    graphSnapshotSignature.value = '';
-    runtimeNodeLogCursor.clear();
-    resetNegotiationState();
-  }
-
-  async function playRetrievalTrace(rawSteps) {
-    const inputType = String(seedRef.value?.input_type || 'domain').trim().toLowerCase();
-    const items = Array.isArray(rawSteps) ? rawSteps.map((item) => normalizeTraceStep(item, inputType)) : [];
-    if (!items.length) return;
-    const evolving = [];
-    for (const item of items) {
-      evolving.push({
-        ...item,
-        status: 'doing',
-        statusText: toStatusText('doing')
-      });
-      setStepLogs('retrieve', [...evolving]);
-      await sleep(220);
-      evolving[evolving.length - 1] = item;
-      setStepLogs('retrieve', [...evolving]);
-    }
-  }
-
-  async function playBuildTrace(rawSteps) {
-    const items = Array.isArray(rawSteps) ? rawSteps.map(normalizeBuildTraceStep) : [];
-    if (!items.length) return;
-    const evolving = [];
-    for (const item of items) {
-      evolving.push({
-        ...item,
-        status: 'doing',
-        statusText: toStatusText('doing')
-      });
-      setStepLogs('graph', [...evolving]);
-      await sleep(240);
-      evolving[evolving.length - 1] = item;
-      setStepLogs('graph', [...evolving]);
-    }
-  }
-
-  function resetSteps() {
-    runtimeNodeLogCursor.clear();
-    resetNegotiationState();
-    for (const step of steps.value) {
-      step.status = 'pending';
-      step.message = '';
-      step.logs = [];
-      if (Object.prototype.hasOwnProperty.call(step, 'action')) {
-        step.action = null;
-      }
-    }
-    updateStepSignal();
-  }
-
-  function resetLineageState() {
-    clearLineage();
-    lineageSeed.value = { paperId: '', title: '' };
-    pendingLineagePayload.value = null;
-    graphSnapshotSignature.value = '';
-    activeViewKey.value = 'graph';
-  }
-
-  function appendFailureLog(stepKey, detail) {
-    const target = steps.value.find((item) => item.key === String(stepKey || '').trim());
-    if (!target) return;
-    const nextLogs = [
-      ...(target.logs || []),
-      {
-        title: '执行异常',
-        detail: String(detail || '').trim() || '步骤执行失败。',
-        status: 'fallback',
-        statusText: toStatusText('error'),
-        metaText: ''
-      }
-    ];
-    setStepLogs(stepKey, nextLogs);
-  }
-
-  function normalizeRuntimeSeed(seed = {}) {
-    return {
-      input_type: String(seed?.input_type || 'domain').trim().toLowerCase() === 'domain'
-        ? 'domain'
-        : (String(seed?.input_type || '').trim().toLowerCase() === 'doi' ? 'doi' : 'arxiv_id'),
-      input_value: String(seed?.input_value || '').trim(),
-      paper_range_years: parsePaperRangeYears(seed?.paper_range_years),
-      quick_mode: Boolean(seed?.quick_mode),
-      auto_lineage: Boolean(seed?.auto_lineage),
-      lineage_seed_paper_id: String(seed?.lineage_seed_paper_id || '').trim(),
-      runtime_session_id: String(seed?.runtime_session_id || '').trim()
-    };
-  }
-
-  function shouldFallbackToLegacy(error) {
-    const message = String(error?.message || '').trim().toLowerCase();
-    if (!message) return false;
-    if (message.includes('403') || message.includes('401') || message.includes('forbidden')) {
-      return false;
-    }
-    return (
-      message.includes('404')
-      || message.includes('session_not_found')
-      || message.includes('/api/research')
-      || message.includes('not found')
-      || message.includes('connection')
-    );
-  }
-
-  function persistActiveRuntimeSessionSnapshot(snapshot = {}) {
-    const sessionId = String(snapshot?.session_id || researchSessionId.value || '').trim();
-    if (!sessionId) return;
-    const snapshotProgress = Number(snapshot?.progress);
-    const doneCount = steps.value.filter((item) => item.status === 'done').length;
-    const fallbackProgress = Math.max(0, Math.min(100, doneCount * 25));
-    persistActiveResearchSessionRecord({
-      session_id: sessionId,
-      status: String(snapshot?.status || 'running').trim().toLowerCase(),
-      progress: Number.isFinite(snapshotProgress) ? snapshotProgress : fallbackProgress,
-      current_node: String(snapshot?.current_node || '').trim(),
-      waiting_checkpoint: String(snapshot?.waiting_checkpoint || waitingResearchCheckpoint.value || '').trim(),
-      input_type: String(snapshot?.input_type || runtimeSeed.value.input_type || 'domain').trim().toLowerCase(),
-      input_value: String(snapshot?.input_value || runtimeSeed.value.input_value || '').trim(),
-      paper_range_years: snapshot?.paper_range_years ?? runtimeSeed.value.paper_range_years,
-      quick_mode: Boolean(
-        snapshot?.quick_mode !== undefined
-          ? snapshot.quick_mode
-          : runtimeSeed.value.quick_mode
-      ),
-      updated_at: new Date().toISOString()
-    });
-  }
-
-  function resolveCheckpointStepKey(checkpointNode) {
-    const normalized = String(checkpointNode || '').trim().toLowerCase();
-    if (normalized === 'checkpoint_1') return 'checkpoint';
-    if (normalized === 'checkpoint_2') return 'lineage';
-    return '';
-  }
-
-  function resolveCheckpointActionLabel(checkpointNode) {
-    const normalized = String(checkpointNode || '').trim().toLowerCase();
-    if (normalized === 'checkpoint_2') {
-      return '确认生成血缘树';
-    }
-    return '继续执行';
-  }
-
-  function resolveAutoCheckpointDoneMessage(checkpointNode) {
-    const normalized = String(checkpointNode || '').trim().toLowerCase();
-    if (normalized === 'checkpoint_1') {
-      return '检索阶段已确认，系统自动继续生成知识图谱。';
-    }
-    if (normalized === 'checkpoint_2') {
-      return '血缘树阶段已确认，系统自动继续后续分析。';
-    }
-    return '已自动确认，正在继续执行。';
-  }
-
-  function shouldAutoConfirmCheckpoint(checkpointNode) {
-    const normalized = String(checkpointNode || '').trim().toLowerCase();
-    return normalized === 'checkpoint_1';
-  }
-
-  function shouldAutoRevealLineageView() {
-    return lineageRevealApproved.value;
-  }
-
-  function shouldRevealLineageFromSnapshot(snapshot = {}) {
-    const status = String(snapshot?.status || '').trim().toLowerCase();
-    if (status === 'completed') return true;
-
-    const waitingCheckpoint = String(snapshot?.waiting_checkpoint || '').trim().toLowerCase();
-    if (waitingCheckpoint === 'checkpoint_2') return false;
-
-    const currentNode = String(snapshot?.current_node || '').trim().toLowerCase();
-    if (currentNode === 'checkpoint_2') return true;
-    if (['parallel', 'synthesizer', 'report', 'save'].includes(currentNode)) return true;
-    return false;
-  }
-
-  function finalizeAllRuntimeTraceStatuses() {
-    for (const step of steps.value) {
-      if (!Array.isArray(step.logs) || !step.logs.length) continue;
-      step.logs = step.logs.map((log) => {
-        const status = String(log?.status || '').trim().toLowerCase();
-        if (status === 'doing' || status === 'pending') {
-          return {
-            ...log,
-            status: 'done',
-            statusText: toStatusText('done')
-          };
-        }
-        return log;
-      });
-    }
-  }
-
-  function ensureCompletedWorkflowStepLogs() {
-    for (const step of steps.value) {
-      const status = String(step?.status || '').trim().toLowerCase();
-      if (!['done', 'completed', 'skipped'].includes(status)) continue;
-      finalizeStepLogs(step);
-      ensureStepHasVisibleDetails(step);
-    }
-  }
-
   function normalizeNegotiationStateForCompletedWorkflow() {
     for (const stepKey of STEP_FLOW_ORDER) {
       const step = steps.value.find((item) => item.key === stepKey);
@@ -1388,136 +1111,55 @@ export function usePaperWorkflow({
     }
   }
 
-  function persistCompletedWorkflowSnapshotFromState() {
-    const seedPayload = runtimeSeed.value?.input_value
-      ? runtimeSeed.value
-      : normalizeRuntimeSeed(seedRef.value || {});
-    const stepsPayload = steps.value.map((step) => ({
-      index: Number(step?.index || 0),
-      key: String(step?.key || '').trim(),
-      status: String(step?.status || '').trim().toLowerCase(),
-      message: String(step?.message || '').trim(),
-      logs: safeJsonClone(Array.isArray(step?.logs) ? step.logs : [], []),
-      action: null
-    }));
+  function persistActiveRuntimeSessionSnapshot(snapshot = {}) {
+    const sessionId = String(snapshot?.session_id || researchSessionId.value || '').trim();
+    if (!sessionId) return;
+    const snapshotProgress = Number(snapshot?.progress);
+    const doneCount = steps.value.filter((item) => item.status === 'done').length;
+    const fallbackProgress = Math.max(0, Math.min(100, doneCount * 33));
 
-    writeCompletedWorkflowSnapshot({
-      status: 'completed',
-      seed_fingerprint: buildWorkflowSeedFingerprint(seedPayload),
-      saved_at: new Date().toISOString(),
-      steps: stepsPayload,
-      negotiation_by_step: safeJsonClone(negotiationByStep.value, createNegotiationStateByStep()),
-      graph: graphData.value && typeof graphData.value === 'object'
-        ? safeJsonClone(graphData.value, null)
-        : null,
-      lineage: lineageData.value && typeof lineageData.value === 'object'
-        ? safeJsonClone(lineageData.value, null)
-        : null
+    persistActiveResearchSessionRecord({
+      session_id: sessionId,
+      status: String(snapshot?.status || 'running').trim().toLowerCase(),
+      progress: Number.isFinite(snapshotProgress) ? snapshotProgress : fallbackProgress,
+      current_node: String(snapshot?.current_node || '').trim(),
+      waiting_checkpoint: String(snapshot?.waiting_checkpoint || waitingResearchCheckpoint.value || '').trim(),
+      input_type: String(snapshot?.input_type || runtimeSeed.value.input_type || 'domain').trim().toLowerCase(),
+      input_value: String(snapshot?.input_value || runtimeSeed.value.input_value || '').trim(),
+      paper_range_years: snapshot?.paper_range_years ?? runtimeSeed.value.paper_range_years,
+      quick_mode: Boolean(
+        snapshot?.quick_mode !== undefined
+          ? snapshot.quick_mode
+          : runtimeSeed.value.quick_mode
+      ),
+      updated_at: new Date().toISOString()
     });
   }
 
-  function restoreCompletedWorkflowSnapshotFromStorage() {
-    const snapshot = readCompletedWorkflowSnapshot();
-    if (!snapshot || typeof snapshot !== 'object') return false;
-    if (String(snapshot?.status || '').trim().toLowerCase() !== 'completed') return false;
-
-    const currentSeed = normalizeRuntimeSeed(seedRef.value || {});
-    const expectedFingerprint = buildWorkflowSeedFingerprint(currentSeed);
-    if (String(snapshot?.seed_fingerprint || '').trim() !== expectedFingerprint) return false;
-
-    const stepRecords = Array.isArray(snapshot?.steps) ? snapshot.steps : [];
-    const stepRecordByKey = new Map();
-    for (const item of stepRecords) {
-      const key = String(item?.key || '').trim();
-      if (!key) continue;
-      stepRecordByKey.set(key, item);
-    }
-
+  function finalizeAllRuntimeTraceStatuses() {
     for (const step of steps.value) {
-      const record = stepRecordByKey.get(String(step?.key || '').trim()) || {};
-      step.status = 'done';
-      step.message = String(record?.message || step?.message || `${step.title}已完成。`).trim();
-      step.logs = safeJsonClone(Array.isArray(record?.logs) ? record.logs : (Array.isArray(step.logs) ? step.logs : []), []);
-      if (!Array.isArray(step.logs)) {
-        step.logs = [];
-      }
-      if (Object.prototype.hasOwnProperty.call(step, 'action')) {
-        step.action = null;
-      }
-      finalizeStepLogs(step);
+      if (!Array.isArray(step.logs) || !step.logs.length) continue;
+      step.logs = step.logs.map((log) => {
+        const status = String(log?.status || '').trim().toLowerCase();
+        if (status === 'doing' || status === 'pending') {
+          return {
+            ...log,
+            status: 'done',
+            statusText: toStatusText('done')
+          };
+        }
+        return log;
+      });
     }
-
-    const restoredNegotiation = snapshot?.negotiation_by_step;
-    negotiationByStep.value = safeJsonClone(
-      restoredNegotiation && typeof restoredNegotiation === 'object'
-        ? restoredNegotiation
-        : createNegotiationStateByStep(),
-      createNegotiationStateByStep()
-    );
-    normalizeNegotiationStateForCompletedWorkflow();
-    finalizeAllRuntimeTraceStatuses();
-    ensureCompletedWorkflowStepLogs();
-
-    const restoredGraph = snapshot?.graph;
-    if (restoredGraph && typeof restoredGraph === 'object') {
-      commitGraphData(restoredGraph, buildGraphSignature(restoredGraph));
-    }
-
-    const restoredLineage = snapshot?.lineage;
-    if (restoredLineage && typeof restoredLineage === 'object') {
-      lineageRevealApproved.value = true;
-      pendingLineagePayload.value = restoredLineage;
-      lineageData.value = restoredLineage;
-      lineageErrorMessage.value = '';
-      if (shouldAutoRevealLineageView()) {
-        activeViewKey.value = 'lineage';
-      }
-    }
-
-    waitingResearchCheckpoint.value = '';
-    runtimeAutoResumingCheckpoint.value = '';
-    graphLoading.value = false;
-    unifiedRuntimeActive.value = false;
-    errorMessage.value = '';
-    clearActiveResearchSessionRecord();
-    stopResearchPolling();
-    closeResearchSocket();
-    updateStepSignal();
-    return true;
   }
 
-  function markEarlierStepsDone(stepKey) {
-    const targetIndex = STEP_FLOW_ORDER.indexOf(String(stepKey || '').trim());
-    if (targetIndex <= 0) return;
-    for (let index = 0; index < targetIndex; index += 1) {
-      const key = STEP_FLOW_ORDER[index];
-      const step = steps.value.find((item) => item.key === key);
-      if (!step) continue;
-      const status = String(step.status || '').trim().toLowerCase();
-      if (!['done', 'skipped'].includes(status)) {
-        step.status = 'done';
-        if (!String(step.message || '').trim()) {
-          step.message = `${step.title}已完成。`;
-        }
-      }
+  function ensureCompletedWorkflowStepLogs() {
+    for (const step of steps.value) {
+      const status = String(step?.status || '').trim().toLowerCase();
+      if (!['done', 'completed', 'skipped'].includes(status)) continue;
       finalizeStepLogs(step);
       ensureStepHasVisibleDetails(step);
     }
-  }
-
-  function resolveFailureStepKey(message, currentNode = '', waitingCheckpoint = '') {
-    const errorText = String(message || '').trim().toLowerCase();
-    if (errorText) {
-      const matchedTask = errorText.match(
-        /(?:negotiation_budget_exhausted|no_agent_bid_for_task|critic_rejected|agent_execution_failed):([a-z0-9_]+)/i
-      );
-      if (matchedTask && matchedTask[1]) {
-        return resolveStepKeyByTaskKind(matchedTask[1]);
-      }
-    }
-    const checkpointStep = resolveCheckpointStepKey(waitingCheckpoint);
-    if (checkpointStep) return checkpointStep;
-    return resolveStepKeyByNode(currentNode || 'lineage');
   }
 
   function buildGraphSignature(rawGraph = {}) {
@@ -1554,64 +1196,252 @@ export function usePaperWorkflow({
   function commitGraphData(nextGraph, signature) {
     if (!nextGraph || typeof nextGraph !== 'object') return false;
     const nextSignature = String(signature || '').trim();
-    if (nextSignature && nextSignature === graphSnapshotSignature.value) {
-      return false;
-    }
+    if (nextSignature && nextSignature === graphSnapshotSignature.value) return false;
     graphData.value = nextGraph;
     graphSnapshotSignature.value = nextSignature;
     return true;
   }
 
-  function hydrateLineageSeedFromRuntimeSnapshot(snapshot = {}) {
-    const retrieval = { papers: Array.isArray(snapshot?.papers) ? snapshot.papers : [] };
-    const graphResult = snapshot?.graph && typeof snapshot.graph === 'object'
-      ? snapshot.graph
-      : graphData.value;
-    const seedPaper = resolveLineageSeed({
-      seedInputType: snapshot?.input_type || runtimeSeed.value.input_type,
-      seedInputValue: snapshot?.input_value || runtimeSeed.value.input_value,
-      retrieval,
-      graphResult
-    });
-
-    const preferredLineageSeedPaperId = String(runtimeSeed.value.lineage_seed_paper_id || '').trim();
-    if (preferredLineageSeedPaperId) {
-      const preferredPaper = retrieval.papers.find(
-        (item) => String(item?.paper_id || '').trim() === preferredLineageSeedPaperId
-      );
-      seedPaper.paperId = preferredLineageSeedPaperId;
-      seedPaper.title = String(preferredPaper?.title || seedPaper.title || preferredLineageSeedPaperId).trim();
-    }
-    lineageSeed.value = seedPaper;
-  }
-
   function hydrateRuntimeArtifacts(snapshot = {}) {
-    if (shouldRevealLineageFromSnapshot(snapshot)) {
-      lineageRevealApproved.value = true;
-    }
-
     if (snapshot?.graph && typeof snapshot.graph === 'object') {
       commitGraphData(snapshot.graph, buildGraphSignature(snapshot.graph));
-    } else if (Array.isArray(snapshot?.papers) && snapshot.papers.length) {
+      return;
+    }
+
+    if (Array.isArray(snapshot?.papers) && snapshot.papers.length) {
       const previewQuery = snapshot?.research_goal || snapshot?.input_value || runtimeSeed.value.input_value;
       const previewSignature = buildPreviewGraphSignature(previewQuery, snapshot.papers);
       const previewGraph = buildRetrievalPreviewGraph(previewQuery, snapshot.papers);
       commitGraphData(previewGraph, previewSignature);
     }
+  }
 
-    if (snapshot?.lineage && typeof snapshot.lineage === 'object') {
-      pendingLineagePayload.value = snapshot.lineage;
-      if (lineageRevealApproved.value) {
-        lineageData.value = snapshot.lineage;
-        lineageErrorMessage.value = '';
-        if (shouldAutoRevealLineageView()) {
-          activeViewKey.value = 'lineage';
-        }
+  function persistCompletedWorkflowSnapshotFromState() {
+    const seedPayload = runtimeSeed.value?.input_value
+      ? runtimeSeed.value
+      : normalizeRuntimeSeed(seedRef.value || {});
+
+    const stepsPayload = steps.value.map((step) => ({
+      index: Number(step?.index || 0),
+      key: String(step?.key || '').trim(),
+      status: String(step?.status || '').trim().toLowerCase(),
+      message: String(step?.message || '').trim(),
+      logs: safeJsonClone(Array.isArray(step?.logs) ? step.logs : [], []),
+      action: null
+    }));
+
+    writeCompletedWorkflowSnapshot({
+      status: 'completed',
+      seed_fingerprint: buildWorkflowSeedFingerprint(seedPayload),
+      saved_at: new Date().toISOString(),
+      steps: stepsPayload,
+      negotiation_by_step: safeJsonClone(negotiationByStep.value, createNegotiationStateByStep()),
+      graph: graphData.value && typeof graphData.value === 'object'
+        ? safeJsonClone(graphData.value, null)
+        : null
+    });
+  }
+
+  function restoreCompletedWorkflowSnapshotFromStorage() {
+    const snapshot = readCompletedWorkflowSnapshot();
+    if (!snapshot || typeof snapshot !== 'object') return false;
+    if (String(snapshot?.status || '').trim().toLowerCase() !== 'completed') return false;
+
+    const currentSeed = normalizeRuntimeSeed(seedRef.value || {});
+    const expectedFingerprint = buildWorkflowSeedFingerprint(currentSeed);
+    if (String(snapshot?.seed_fingerprint || '').trim() !== expectedFingerprint) return false;
+
+    const stepRecords = Array.isArray(snapshot?.steps) ? snapshot.steps : [];
+    const stepRecordByKey = new Map();
+    for (const item of stepRecords) {
+      const key = String(item?.key || '').trim();
+      if (!key) continue;
+      stepRecordByKey.set(key, item);
+    }
+
+    for (const step of steps.value) {
+      const record = stepRecordByKey.get(String(step?.key || '').trim()) || {};
+      step.status = 'done';
+      step.message = String(record?.message || step?.message || `${step.title}已完成。`).trim();
+      step.logs = safeJsonClone(Array.isArray(record?.logs) ? record.logs : (Array.isArray(step.logs) ? step.logs : []), []);
+      if (!Array.isArray(step.logs)) step.logs = [];
+      if (Object.prototype.hasOwnProperty.call(step, 'action')) step.action = null;
+      finalizeStepLogs(step);
+      ensureStepHasVisibleDetails(step);
+    }
+
+    const restoredNegotiation = snapshot?.negotiation_by_step;
+    negotiationByStep.value = safeJsonClone(
+      restoredNegotiation && typeof restoredNegotiation === 'object'
+        ? restoredNegotiation
+        : createNegotiationStateByStep(),
+      createNegotiationStateByStep()
+    );
+
+    normalizeNegotiationStateForCompletedWorkflow();
+    finalizeAllRuntimeTraceStatuses();
+    ensureCompletedWorkflowStepLogs();
+
+    const restoredGraph = snapshot?.graph;
+    if (restoredGraph && typeof restoredGraph === 'object') {
+      commitGraphData(restoredGraph, buildGraphSignature(restoredGraph));
+    }
+
+    waitingResearchCheckpoint.value = '';
+    runtimeAutoResumingCheckpoint.value = '';
+    graphLoading.value = false;
+    unifiedRuntimeActive.value = false;
+    errorMessage.value = '';
+    clearActiveResearchSessionRecord();
+    stopResearchPolling();
+    closeResearchSocket();
+    updateStepSignal();
+    return true;
+  }
+
+  function resolveFailureStepKey(message, currentNode = '', waitingCheckpoint = '') {
+    const errorText = String(message || '').trim().toLowerCase();
+    if (errorText) {
+      const matchedTask = errorText.match(
+        /(?:negotiation_budget_exhausted|no_agent_bid_for_task|critic_rejected|agent_execution_failed):([a-z0-9_]+)/i
+      );
+      if (matchedTask && matchedTask[1]) {
+        return resolveStepKeyByTaskKind(matchedTask[1]);
       }
     }
 
-    if (Array.isArray(snapshot?.papers) && snapshot.papers.length) {
-      hydrateLineageSeedFromRuntimeSnapshot(snapshot);
+    const checkpoint = String(waitingCheckpoint || '').trim().toLowerCase();
+    if (checkpoint === 'checkpoint_1') return 'checkpoint';
+    return resolveStepKeyByNode(currentNode || 'search');
+  }
+
+  function resetUnifiedRuntimeState() {
+    stopResearchPolling();
+    closeResearchSocket();
+    researchSessionId.value = '';
+    unifiedRuntimeActive.value = false;
+    waitingResearchCheckpoint.value = '';
+    runtimeAutoResumingCheckpoint.value = '';
+    graphSnapshotSignature.value = '';
+    runtimeNodeLogCursor.clear();
+    resetNegotiationState();
+  }
+
+  function resetSteps() {
+    runtimeNodeLogCursor.clear();
+    resetNegotiationState();
+    for (const step of steps.value) {
+      step.status = 'pending';
+      step.message = '';
+      step.logs = [];
+      if (Object.prototype.hasOwnProperty.call(step, 'action')) {
+        step.action = null;
+      }
+    }
+    updateStepSignal();
+  }
+
+  async function playRetrievalTrace(rawSteps) {
+    const inputType = String(seedRef.value?.input_type || 'domain').trim().toLowerCase();
+    const items = Array.isArray(rawSteps) ? rawSteps.map((item) => normalizeTraceStep(item, inputType)) : [];
+    if (!items.length) return;
+    const evolving = [];
+    for (const item of items) {
+      evolving.push({
+        ...item,
+        status: 'doing',
+        statusText: toStatusText('doing')
+      });
+      setStepLogs('retrieve', [...evolving]);
+      await sleep(220);
+      evolving[evolving.length - 1] = item;
+      setStepLogs('retrieve', [...evolving]);
+    }
+  }
+
+  async function playBuildTrace(rawSteps) {
+    const items = Array.isArray(rawSteps) ? rawSteps.map(normalizeBuildTraceStep) : [];
+    if (!items.length) return;
+    const evolving = [];
+    for (const item of items) {
+      evolving.push({
+        ...item,
+        status: 'doing',
+        statusText: toStatusText('doing')
+      });
+      setStepLogs('graph', [...evolving]);
+      await sleep(240);
+      evolving[evolving.length - 1] = item;
+      setStepLogs('graph', [...evolving]);
+    }
+  }
+
+  function shouldAutoConfirmCheckpoint(checkpointNode) {
+    return String(checkpointNode || '').trim().toLowerCase() === 'checkpoint_1';
+  }
+
+  function resolveAutoCheckpointDoneMessage(checkpointNode) {
+    const normalized = String(checkpointNode || '').trim().toLowerCase();
+    if (normalized === 'checkpoint_1') {
+      return '检索阶段已确认，系统自动继续生成知识图谱。';
+    }
+    return '已自动确认，正在继续执行。';
+  }
+
+  async function continueAfterUnifiedCheckpoint(stepKey, options = {}) {
+    const auto = Boolean(options?.auto);
+    const safeStepKey = String(stepKey || '').trim();
+    const checkpoint = String(waitingResearchCheckpoint.value || '').trim().toLowerCase();
+    if (!safeStepKey || !checkpoint) return;
+    if (!(safeStepKey === 'checkpoint' && checkpoint === 'checkpoint_1')) return;
+
+    const sessionId = String(researchSessionId.value || '').trim();
+    if (!sessionId) return;
+
+    const scheduleCheckpointAutoRetry = () => {
+      const target = steps.value.find((item) => item.key === 'checkpoint');
+      if (target) {
+        setStepStatus(target.index, 'running', '自动继续失败，正在重试...');
+      }
+      runtimeAutoResumingCheckpoint.value = '';
+      window.setTimeout(() => {
+        if (!unifiedRuntimeActive.value) return;
+        const waiting = String(waitingResearchCheckpoint.value || '').trim().toLowerCase();
+        if (waiting !== checkpoint) return;
+        runtimeAutoResumingCheckpoint.value = checkpoint;
+        void continueAfterUnifiedCheckpoint('checkpoint', { auto: true });
+      }, 1200);
+    };
+
+    try {
+      const result = await resumeResearchSession(
+        sessionId,
+        '',
+        { accessToken: accessTokenRef.value || '' }
+      );
+      if (!result?.resumed) {
+        if (auto && safeStepKey === 'checkpoint') {
+          scheduleCheckpointAutoRetry();
+        }
+        return;
+      }
+
+      waitingResearchCheckpoint.value = '';
+      runtimeAutoResumingCheckpoint.value = '';
+
+      const target = steps.value.find((item) => item.key === safeStepKey);
+      if (target) {
+        setStepStatus(
+          target.index,
+          'running',
+          auto ? '已自动确认，正在继续执行。' : '已确认，正在继续执行。'
+        );
+      }
+    } catch {
+      runtimeAutoResumingCheckpoint.value = '';
+      if (auto && safeStepKey === 'checkpoint') {
+        scheduleCheckpointAutoRetry();
+      }
     }
   }
 
@@ -1623,23 +1453,17 @@ export function usePaperWorkflow({
     if (!step) return;
 
     markEarlierStepsDone(stepKey);
-    const runningMessage = node === 'parallel'
-      ? '正在生成血缘树...'
-      : `正在执行 ${resolveNodeLabel(node)}。`;
+    const runningMessage = `正在执行 ${resolveNodeLabel(node)}。`;
     setStepStatus(step.index, 'running', runningMessage);
     appendNodeLog(node, runningMessage, 'doing');
+
     if (node === 'graph_build') {
       void refreshRuntimeSnapshot().catch(() => {
-        // keep graph-building stage resilient when snapshot fetch is transiently unavailable
+        // keep graph stage resilient when snapshot fetch is transiently unavailable
       });
     }
-    if (node === 'parallel') {
-      lineageRevealApproved.value = true;
-    }
+
     setStepAction('checkpoint', null);
-    if (node !== 'checkpoint_2') {
-      setStepAction('lineage', null);
-    }
   }
 
   function handleRuntimeThinking(event = {}) {
@@ -1647,8 +1471,10 @@ export function usePaperWorkflow({
     if (!node) return;
     const content = String(event?.content || '').trim();
     if (!content) return;
+
     const stepKey = resolveStepKeyByNode(node);
     if (!steps.value.find((item) => item.key === stepKey)) return;
+
     const cursorKey = `${stepKey}::${node}`;
     if (runtimeNodeLogCursor.has(cursorKey)) {
       updateLatestNodeLog(stepKey, node, { detail: content, status: 'doing' });
@@ -1660,6 +1486,7 @@ export function usePaperWorkflow({
   async function handleRuntimeNodeComplete(event = {}) {
     const node = String(event?.node || '').trim().toLowerCase();
     if (!node) return;
+
     const stepKey = resolveStepKeyByNode(node);
     const summary = String(event?.summary || '').trim() || `${resolveNodeLabel(node)} 已完成。`;
     const target = steps.value.find((item) => item.key === stepKey);
@@ -1671,6 +1498,7 @@ export function usePaperWorkflow({
     } else {
       updateLatestNodeLog(stepKey, node, { detail: summary, status: 'done' });
     }
+
     if (STEP_FINAL_NODE[stepKey] === node) {
       setStepStatus(target.index, 'done', summary);
       if (stepKey === 'checkpoint') {
@@ -1680,10 +1508,7 @@ export function usePaperWorkflow({
       setStepStatus(target.index, 'running', summary);
     }
 
-    if (node === 'search' || node === 'graph_build' || node === 'parallel' || node === 'checkpoint_2') {
-      if (node === 'parallel' || node === 'checkpoint_2') {
-        lineageRevealApproved.value = true;
-      }
+    if (node === 'search' || node === 'graph_build') {
       try {
         const snapshot = await getResearchSession(researchSessionId.value, {
           accessToken: accessTokenRef.value || ''
@@ -1697,39 +1522,35 @@ export function usePaperWorkflow({
 
   function handleRuntimePause(event = {}) {
     const checkpoint = String(event?.checkpoint || '').trim().toLowerCase();
-    const stepKey = resolveCheckpointStepKey(checkpoint);
-    if (!stepKey) return;
+    if (checkpoint !== 'checkpoint_1') return;
+
     waitingResearchCheckpoint.value = checkpoint;
-    const message = String(event?.message || '').trim() || '等待确认后继续执行。';
-    const target = steps.value.find((item) => item.key === stepKey);
+    const target = steps.value.find((item) => item.key === 'checkpoint');
     if (!target) return;
 
     if (shouldAutoConfirmCheckpoint(checkpoint)) {
       const autoMessage = resolveAutoCheckpointDoneMessage(checkpoint);
       setStepStatus(target.index, 'done', autoMessage);
-      appendStepLog(stepKey, {
+      appendStepLog('checkpoint', {
         title: resolveNodeLabel(checkpoint),
         detail: autoMessage,
         status: 'done'
       });
-      setStepAction(stepKey, null);
+      setStepAction('checkpoint', null);
       runtimeAutoResumingCheckpoint.value = checkpoint;
-      void continueAfterUnifiedCheckpoint(stepKey, { auto: true });
+      void continueAfterUnifiedCheckpoint('checkpoint', { auto: true });
       return;
     }
 
-    let actionMessage = message;
-    if (checkpoint === 'checkpoint_2') {
-      actionMessage = '知识图谱已完成，请确认是否生成并展示血缘树。';
-    }
-    setStepStatus(target.index, 'action_required', actionMessage);
-    appendStepLog(stepKey, {
+    const message = String(event?.message || '').trim() || '等待确认后继续执行。';
+    setStepStatus(target.index, 'action_required', message);
+    appendStepLog('checkpoint', {
       title: resolveNodeLabel(checkpoint),
-      detail: actionMessage,
+      detail: message,
       status: 'doing'
     });
-    setStepAction(stepKey, {
-      label: resolveCheckpointActionLabel(checkpoint),
+    setStepAction('checkpoint', {
+      label: '继续执行',
       disabled: false
     });
   }
@@ -1739,14 +1560,17 @@ export function usePaperWorkflow({
     const stepKey = resolveStepKeyByTaskKind(taskKind);
     const round = normalizeNegotiationRound(event?.round);
     const taskLabel = resolveTaskKindLabel(taskKind);
+
     markEarlierStepsDone(stepKey);
     const { roundState } = ensureNegotiationRoundState({
       stepKey,
       event,
       defaultStatus: 'bidding'
     });
+
     roundState.status = 'bidding';
     roundState.updatedAt = resolveNegotiationTimestamp(event);
+
     setStepStatusByKey(stepKey, 'running', `协商中：正在为 ${taskLabel} 选择执行方案。`);
     appendStepLog(stepKey, {
       title: 'Coordinator Agent',
@@ -1758,24 +1582,30 @@ export function usePaperWorkflow({
   function handleNegotiationBidReceived(event = {}) {
     const taskKind = String(event?.task_kind || '').trim().toLowerCase();
     const stepKey = resolveStepKeyByTaskKind(taskKind);
+
     markEarlierStepsDone(stepKey);
     const { roundState } = ensureNegotiationRoundState({
       stepKey,
       event,
       defaultStatus: 'bidding'
     });
+
     upsertNegotiationBid(roundState, buildNegotiationBid(event));
     if (!['awarded', 'vetoed', 'rebid'].includes(String(roundState.status || '').trim().toLowerCase())) {
       roundState.status = 'bidding';
     }
     roundState.updatedAt = resolveNegotiationTimestamp(event);
+
     const agentLabel = resolveAgentRuntimeLabel(event?.agent_id, event?.profile);
     const confidence = toFiniteNegotiationNumber(event?.confidence);
     const estimatedLatencyMs = toFiniteNegotiationNumber(event?.estimated_latency_ms);
     const estimatedCost = toFiniteNegotiationNumber(event?.estimated_cost);
-    const confidenceText = Number.isFinite(confidence) ? confidence.toFixed(3) : '计算中';
-    const latencyText = Number.isFinite(estimatedLatencyMs) ? `${Math.max(1, Math.round(estimatedLatencyMs))}ms` : '计算中';
-    const costText = Number.isFinite(estimatedCost) ? estimatedCost.toFixed(3) : '计算中';
+    const confidenceText = Number.isFinite(confidence) && confidence > 0 ? confidence.toFixed(3) : '计算中';
+    const latencyText = Number.isFinite(estimatedLatencyMs) && estimatedLatencyMs > 0
+      ? `${Math.max(1, Math.round(estimatedLatencyMs))}ms`
+      : '计算中';
+    const costText = Number.isFinite(estimatedCost) && estimatedCost > 0 ? estimatedCost.toFixed(3) : '计算中';
+
     appendStepLog(stepKey, {
       title: 'Coordinator Agent',
       detail: `收到候选方案：${agentLabel}（置信度 ${confidenceText}，预计耗时 ${latencyText}，预计成本 ${costText}）。`,
@@ -1786,15 +1616,18 @@ export function usePaperWorkflow({
   function handleNegotiationContractAwarded(event = {}) {
     const taskKind = String(event?.task_kind || '').trim().toLowerCase();
     const stepKey = resolveStepKeyByTaskKind(taskKind);
+
     markEarlierStepsDone(stepKey);
     const { roundState } = ensureNegotiationRoundState({
       stepKey,
       event,
       defaultStatus: 'bidding'
     });
+
     assignNegotiationWinner(roundState, buildNegotiationBid(event));
     roundState.status = 'awarded';
     roundState.updatedAt = resolveNegotiationTimestamp(event);
+
     const agentLabel = resolveAgentRuntimeLabel(event?.agent_id, event?.profile);
     setStepStatusByKey(stepKey, 'running', `已确认执行方案：${agentLabel}。`);
     appendStepLog(stepKey, {
@@ -1807,11 +1640,13 @@ export function usePaperWorkflow({
   function handleNegotiationBudgetUpdate(event = {}) {
     const taskKind = String(event?.task_kind || '').trim().toLowerCase();
     const stepKey = resolveStepKeyByTaskKind(taskKind);
+
     markEarlierStepsDone(stepKey);
     const stepState = ensureNegotiationStepState(stepKey);
     stepState.budget.spent = toFiniteNegotiationNumber(event?.spent);
     stepState.budget.limit = toFiniteNegotiationNumber(event?.limit);
     stepState.budget.remaining = toFiniteNegotiationNumber(event?.remaining);
+
     if (Number.isFinite(Number(event?.round))) {
       const { roundState } = ensureNegotiationRoundState({
         stepKey,
@@ -1820,16 +1655,19 @@ export function usePaperWorkflow({
       });
       roundState.updatedAt = resolveNegotiationTimestamp(event);
     }
+
     const safeTaskKind = String(event?.task_kind || '').trim().toLowerCase();
     if (safeTaskKind) {
       stepState.activeTaskKind = safeTaskKind;
     }
+
     const spent = Number(event?.spent);
     const limit = Number(event?.limit);
     const remaining = Number(event?.remaining);
     const spentText = Number.isFinite(spent) ? spent.toFixed(3) : '-';
     const limitText = Number.isFinite(limit) ? limit.toFixed(3) : '-';
     const remainingText = Number.isFinite(remaining) ? remaining.toFixed(3) : '-';
+
     appendStepLog(stepKey, {
       title: 'Coordinator Agent',
       detail: `预算更新：已使用 ${spentText} / ${limitText}，剩余 ${remainingText}。`,
@@ -1841,12 +1679,14 @@ export function usePaperWorkflow({
     const taskKind = String(event?.task_kind || '').trim().toLowerCase();
     const stepKey = resolveStepKeyByTaskKind(taskKind);
     const reason = String(event?.reason || '').trim() || '执行结果未通过质量审核。';
+
     markEarlierStepsDone(stepKey);
     const { roundState } = ensureNegotiationRoundState({
       stepKey,
       event,
       defaultStatus: 'bidding'
     });
+
     const vetoedAgentId = String(event?.agent_id || '').trim();
     const vetoedProfile = String(event?.profile || '').trim().toLowerCase();
     roundState.status = 'vetoed';
@@ -1856,6 +1696,7 @@ export function usePaperWorkflow({
       at: resolveNegotiationTimestamp(event)
     };
     roundState.updatedAt = resolveNegotiationTimestamp(event);
+
     if (vetoedAgentId) {
       let matched = false;
       for (const bid of roundState.bids) {
@@ -1878,6 +1719,7 @@ export function usePaperWorkflow({
         roundState.winner.status = 'vetoed';
       }
     }
+
     setStepStatusByKey(stepKey, 'running', '质量审核未通过，准备重新协商执行方案。');
     appendStepLog(stepKey, {
       title: 'Quality SubAgent',
@@ -1891,12 +1733,14 @@ export function usePaperWorkflow({
     const stepKey = resolveStepKeyByTaskKind(taskKind);
     const retryCount = Number(event?.retry_count);
     const reason = String(event?.reason || '').trim();
+
     markEarlierStepsDone(stepKey);
     const { roundState } = ensureNegotiationRoundState({
       stepKey,
       event,
       defaultStatus: 'bidding'
     });
+
     roundState.status = 'rebid';
     roundState.rebid = {
       reason: reason || '正在重新发起竞标。',
@@ -1904,6 +1748,7 @@ export function usePaperWorkflow({
       at: resolveNegotiationTimestamp(event)
     };
     roundState.updatedAt = resolveNegotiationTimestamp(event);
+
     const retryText = Number.isFinite(retryCount) ? `第 ${Math.max(1, Math.round(retryCount))} 次重试` : '已触发重试';
     appendStepLog(stepKey, {
       title: 'Coordinator Agent',
@@ -1915,9 +1760,11 @@ export function usePaperWorkflow({
   async function refreshRuntimeSnapshot({ finalize = false } = {}) {
     const sessionId = String(researchSessionId.value || '').trim();
     if (!sessionId) return null;
+
     const snapshot = await getResearchSession(sessionId, {
       accessToken: accessTokenRef.value || ''
     });
+
     hydrateRuntimeArtifacts(snapshot || {});
     persistActiveRuntimeSessionSnapshot({
       session_id: sessionId,
@@ -1935,31 +1782,9 @@ export function usePaperWorkflow({
     if (status === 'completed') {
       finalizeAllRuntimeTraceStatuses();
       setStepStatusByKey('retrieve', 'done', steps.value.find((item) => item.key === 'retrieve')?.message || '论文检索完成。');
-      setStepStatusByKey('checkpoint', 'done', steps.value.find((item) => item.key === 'checkpoint')?.message || '检查点确认完成。');
+      setStepStatusByKey('checkpoint', 'done', steps.value.find((item) => item.key === 'checkpoint')?.message || '需求确认完成。');
       setStepStatusByKey('graph', 'done', steps.value.find((item) => item.key === 'graph')?.message || '知识图谱生成完成。');
-      const lineagePayload = snapshot?.lineage && typeof snapshot.lineage === 'object' ? snapshot.lineage : null;
-      const ancestors = Array.isArray(lineagePayload?.ancestors) ? lineagePayload.ancestors.length : 0;
-      const descendants = Array.isArray(lineagePayload?.descendants) ? lineagePayload.descendants.length : 0;
-      const lineageCount = ancestors + descendants;
-      if (lineagePayload) {
-        lineageRevealApproved.value = true;
-        pendingLineagePayload.value = lineagePayload;
-        lineageData.value = lineagePayload;
-        lineageErrorMessage.value = '';
-        setStepStatusByKey(
-          'lineage',
-          'done',
-          lineageCount > 0 ? `血缘树已生成，关联论文 ${lineageCount} 篇。` : '血缘树已生成。'
-        );
-      } else {
-        setStepStatusByKey('lineage', 'failed', '血缘树未生成成功，请重试。');
-        appendFailureLog('lineage', '本次未产出可展示的血缘树结果。');
-      }
       setStepAction('checkpoint', null);
-      setStepAction('lineage', lineagePayload ? null : {
-        label: '重新生成血缘树',
-        disabled: false
-      });
       normalizeNegotiationStateForCompletedWorkflow();
       ensureCompletedWorkflowStepLogs();
       persistCompletedWorkflowSnapshotFromState();
@@ -1995,7 +1820,12 @@ export function usePaperWorkflow({
     }
 
     if (status === 'stopped') {
-      setStepStatusByKey('lineage', 'failed', '流程已停止。');
+      const step = steps.value.find((item) => String(item?.status || '').trim().toLowerCase() === 'running')
+        || steps.value.find((item) => item.key === 'graph')
+        || steps.value[0];
+      if (step) {
+        setStepStatus(step.index, 'failed', '流程已停止。');
+      }
       graphLoading.value = false;
       unifiedRuntimeActive.value = false;
       runtimeAutoResumingCheckpoint.value = '';
@@ -2010,23 +1840,13 @@ export function usePaperWorkflow({
       waitingResearchCheckpoint.value = waiting;
       if (shouldAutoConfirmCheckpoint(waiting) && runtimeAutoResumingCheckpoint.value !== waiting) {
         runtimeAutoResumingCheckpoint.value = waiting;
-        void continueAfterUnifiedCheckpoint(resolveCheckpointStepKey(waiting), { auto: true });
+        void continueAfterUnifiedCheckpoint('checkpoint', { auto: true });
       }
-      const stepKey = resolveCheckpointStepKey(waiting);
-      const target = steps.value.find((item) => item.key === stepKey);
-      if (target) {
-        if (shouldAutoConfirmCheckpoint(waiting)) {
+      if (waiting === 'checkpoint_1') {
+        const target = steps.value.find((item) => item.key === 'checkpoint');
+        if (target) {
           setStepStatus(target.index, 'done', resolveAutoCheckpointDoneMessage(waiting));
-          setStepAction(stepKey, null);
-        } else {
-          const actionMessage = waiting === 'checkpoint_2'
-            ? '知识图谱已完成，请确认是否生成并展示血缘树。'
-            : '等待确认后继续执行。';
-          setStepStatus(target.index, 'action_required', actionMessage);
-          setStepAction(stepKey, {
-            label: resolveCheckpointActionLabel(waiting),
-            disabled: false
-          });
+          setStepAction('checkpoint', null);
         }
       }
     } else {
@@ -2063,7 +1883,12 @@ export function usePaperWorkflow({
   }
 
   function handleRuntimeStopped() {
-    setStepStatusByKey('lineage', 'failed', '流程已停止。');
+    const step = steps.value.find((item) => String(item?.status || '').trim().toLowerCase() === 'running')
+      || steps.value.find((item) => item.key === 'graph')
+      || steps.value[0];
+    if (step) {
+      setStepStatus(step.index, 'failed', '流程已停止。');
+    }
     graphLoading.value = false;
     unifiedRuntimeActive.value = false;
     waitingResearchCheckpoint.value = '';
@@ -2075,6 +1900,7 @@ export function usePaperWorkflow({
   async function handleRuntimeEvent(event = {}) {
     const type = String(event?.type || '').trim().toLowerCase();
     if (!type) return;
+
     if (type === 'node_start') {
       handleRuntimeNodeStart(event);
       return;
@@ -2162,127 +1988,13 @@ export function usePaperWorkflow({
     };
   }
 
-  async function continueAfterUnifiedCheckpoint(stepKey, options = {}) {
-    const auto = Boolean(options?.auto);
-    const safeStepKey = String(stepKey || '').trim();
-    const checkpoint = String(waitingResearchCheckpoint.value || '').trim().toLowerCase();
-    if (!safeStepKey || !checkpoint) return;
-    if (resolveCheckpointStepKey(checkpoint) !== safeStepKey) return;
-    const sessionId = String(researchSessionId.value || '').trim();
-    if (!sessionId) return;
-
-    if (!auto) {
-      setStepAction(safeStepKey, {
-        label: resolveCheckpointActionLabel(checkpoint),
-        disabled: true
-      });
-    }
-
-    const scheduleCheckpointAutoRetry = () => {
-      const target = steps.value.find((item) => item.key === 'checkpoint');
-      if (target) {
-        setStepStatus(target.index, 'running', '自动继续失败，正在重试...');
-      }
-      setStepAction('checkpoint', null);
-      runtimeAutoResumingCheckpoint.value = '';
-      window.setTimeout(() => {
-        if (!unifiedRuntimeActive.value) return;
-        const waiting = String(waitingResearchCheckpoint.value || '').trim().toLowerCase();
-        if (waiting !== checkpoint) return;
-        runtimeAutoResumingCheckpoint.value = checkpoint;
-        void continueAfterUnifiedCheckpoint('checkpoint', { auto: true });
-      }, 1200);
-    };
-
-    try {
-      const result = await resumeResearchSession(
-        sessionId,
-        '',
-        { accessToken: accessTokenRef.value || '' }
-      );
-      if (!result?.resumed) {
-        if (!auto) {
-          setStepAction(safeStepKey, {
-            label: resolveCheckpointActionLabel(checkpoint),
-            disabled: false
-          });
-        } else if (safeStepKey === 'checkpoint') {
-          scheduleCheckpointAutoRetry();
-        } else {
-          const target = steps.value.find((item) => item.key === safeStepKey);
-          if (target) {
-            setStepStatus(target.index, 'action_required', '自动继续失败，请手动确认后继续。');
-          }
-          setStepAction(safeStepKey, {
-            label: resolveCheckpointActionLabel(checkpoint),
-            disabled: false
-          });
-        }
-        return;
-      }
-      waitingResearchCheckpoint.value = '';
-      runtimeAutoResumingCheckpoint.value = '';
-      if (checkpoint === 'checkpoint_2') {
-        lineageRevealApproved.value = true;
-        if (pendingLineagePayload.value && typeof pendingLineagePayload.value === 'object') {
-          lineageData.value = pendingLineagePayload.value;
-          lineageErrorMessage.value = '';
-        }
-        if (lineageData.value) {
-          activeViewKey.value = 'lineage';
-        }
-      }
-      const target = steps.value.find((item) => item.key === safeStepKey);
-      if (target) {
-        if (auto && safeStepKey === 'checkpoint') {
-          setStepStatus(target.index, 'done', resolveAutoCheckpointDoneMessage(checkpoint));
-        } else if (checkpoint === 'checkpoint_2') {
-          setStepStatus(target.index, 'running', '已确认，正在生成血缘树...');
-          appendStepLog('lineage', {
-            title: resolveNodeLabel('parallel'),
-            detail: '正在生成血缘树...',
-            status: 'doing'
-          });
-        } else {
-          setStepStatus(
-            target.index,
-            'running',
-            auto ? '已自动确认，正在继续执行。' : '已确认，正在继续执行。'
-          );
-        }
-      }
-    } catch (error) {
-      const message = error?.message || '继续执行失败。';
-      if (!(auto && safeStepKey === 'checkpoint')) {
-        errorMessage.value = message;
-      }
-      runtimeAutoResumingCheckpoint.value = '';
-      if (!auto) {
-        setStepAction(safeStepKey, {
-          label: resolveCheckpointActionLabel(checkpoint),
-          disabled: false
-        });
-      } else if (safeStepKey === 'checkpoint') {
-        scheduleCheckpointAutoRetry();
-      } else {
-        const target = steps.value.find((item) => item.key === safeStepKey);
-        if (target) {
-          setStepStatus(target.index, 'action_required', '自动继续失败，请手动确认后继续。');
-        }
-        setStepAction(safeStepKey, {
-          label: resolveCheckpointActionLabel(checkpoint),
-          disabled: false
-        });
-      }
-    }
-  }
-
   async function stopUnifiedRuntimeSession({ silent = true } = {}) {
     const sessionId = String(researchSessionId.value || '').trim();
     if (!sessionId || !unifiedRuntimeActive.value) {
       resetUnifiedRuntimeState();
       return;
     }
+
     try {
       await stopResearchSession(sessionId, { accessToken: accessTokenRef.value || '' });
     } catch {
@@ -2308,7 +2020,6 @@ export function usePaperWorkflow({
       appendFailureLog(targetStep.key, safeMessage);
     }
     setStepAction('checkpoint', null);
-    setStepAction('lineage', null);
     waitingResearchCheckpoint.value = '';
     runtimeAutoResumingCheckpoint.value = '';
     errorMessage.value = safeMessage;
@@ -2320,6 +2031,7 @@ export function usePaperWorkflow({
     if (terminatingWorkflow.value || !canTerminateWorkflow.value) {
       return false;
     }
+
     terminatingWorkflow.value = true;
     try {
       const hasRuntimeSession = Boolean(String(researchSessionId.value || '').trim());
@@ -2351,6 +2063,7 @@ export function usePaperWorkflow({
       paper_range_years: runtimeSeed.value.paper_range_years,
       quick_mode: runtimeSeed.value.quick_mode
     };
+
     const created = await startResearchSession(payload, { accessToken: accessTokenRef.value || '' });
     const sessionId = String(created?.session_id || '').trim();
     if (!sessionId) {
@@ -2361,7 +2074,7 @@ export function usePaperWorkflow({
     researchSessionId.value = sessionId;
     waitingResearchCheckpoint.value = '';
     runtimeAutoResumingCheckpoint.value = '';
-    lineageRevealApproved.value = false;
+
     persistActiveRuntimeSessionSnapshot({
       session_id: sessionId,
       status: 'running',
@@ -2376,7 +2089,7 @@ export function usePaperWorkflow({
     bindResearchSocket(sessionId);
     startResearchPolling();
     void refreshRuntimeSnapshot().catch(() => {
-      // initial snapshot is optional; websocket events are the primary source
+      // initial snapshot is optional; websocket events are primary
     });
   }
 
@@ -2391,7 +2104,7 @@ export function usePaperWorkflow({
     researchSessionId.value = sessionId;
     waitingResearchCheckpoint.value = '';
     runtimeAutoResumingCheckpoint.value = '';
-    lineageRevealApproved.value = false;
+
     persistActiveRuntimeSessionSnapshot({
       session_id: sessionId,
       status: 'running',
@@ -2410,64 +2123,18 @@ export function usePaperWorkflow({
     });
   }
 
-  async function finalizeLineageSetup({
-    inputType,
-    seedInputValue,
-    retrieval,
-    graphResult,
-    preferredLineageSeedPaperId,
-    shouldAutoGenerateLineage
-  }) {
-    const seedPaper = resolveLineageSeed({
-      seedInputType: inputType,
-      seedInputValue,
-      retrieval,
-      graphResult
-    });
-    if (preferredLineageSeedPaperId) {
-      const papers = Array.isArray(retrieval?.papers) ? retrieval.papers : [];
-      const preferredPaper = papers.find((item) => String(item?.paper_id || '').trim() === preferredLineageSeedPaperId);
-      seedPaper.paperId = preferredLineageSeedPaperId;
-      if (preferredPaper?.title) {
-        seedPaper.title = String(preferredPaper.title || '').trim();
-      } else if (!String(seedPaper.title || '').trim()) {
-        seedPaper.title = preferredLineageSeedPaperId;
-      }
-    }
-
-    lineageSeed.value = seedPaper;
-    setStepStatus(4, 'action_required', `已定位血缘树起点论文：${seedPaper.title || seedPaper.paperId || '未命名论文'}。`);
-    setStepLogs('lineage', [
-      {
-        title: '起点论文确认',
-        detail: '已确认本次血缘树起点论文，可继续生成。',
-        status: 'done',
-        statusText: toStatusText('done'),
-        metaText: ''
-      }
-    ]);
-    setStepAction('lineage', {
-      label: '生成血缘树',
-      disabled: false
-    });
-    if (shouldAutoGenerateLineage) {
-      await generateLineageTree();
-    }
-  }
-
   async function runGraphStage(context) {
     const {
       retrieval,
       retrievalQuery,
       inputType,
       seedInputValue,
-      paperRangeYears,
-      preferredLineageSeedPaperId,
-      shouldAutoGenerateLineage
+      paperRangeYears
     } = context;
 
     setStepStatus(3, 'running', '正在生成知识图谱...');
     setStepLogs('graph', createRunningBuildLogs());
+
     const result = await buildKnowledgeGraph({
       query: retrievalQuery,
       max_papers: 24,
@@ -2491,6 +2158,7 @@ export function usePaperWorkflow({
     if (!Array.isArray(result.build_steps) || !result.build_steps.length) {
       setStepLogs('graph', createFallbackBuildLogs(result));
     }
+
     commitGraphData(resolvedGraph, buildGraphSignature(resolvedGraph));
     const panoramaStats = extractPanoramaStats(resolvedGraph || result || {});
     setStepStatus(
@@ -2498,88 +2166,17 @@ export function usePaperWorkflow({
       'done',
       `知识图谱已生成，包含 ${panoramaStats.paperCount} 个论文节点、${panoramaStats.edgeCount} 条关联边。`
     );
-
-    await finalizeLineageSetup({
-      inputType,
-      seedInputValue,
-      retrieval,
-      graphResult: resolvedGraph || result,
-      preferredLineageSeedPaperId,
-      shouldAutoGenerateLineage
-    });
-  }
-
-  async function continueAfterLegacyCheckpoint() {
-    if (graphLoading.value) return;
-    const context = checkpointContext.value;
-    if (!context) return;
-
-    setStepAction('checkpoint', null);
-    const checkpointLogs = Array.isArray(steps.value.find((item) => item.key === 'checkpoint')?.logs)
-      ? [...(steps.value.find((item) => item.key === 'checkpoint')?.logs || [])]
-      : [];
-    if (checkpointLogs.length) {
-      const lastIndex = checkpointLogs.length - 1;
-      checkpointLogs[lastIndex] = {
-        ...checkpointLogs[lastIndex],
-        detail: '已确认需求，进入知识图谱生成阶段。',
-        status: 'done',
-        statusText: toStatusText('done')
-      };
-      setStepLogs('checkpoint', checkpointLogs);
-    }
-    setStepStatus(2, 'done', '需求已确认，开始生成知识图谱。');
-    setStepAction('checkpoint', null);
-    checkpointContext.value = null;
-
-    graphLoading.value = true;
-    try {
-      await runGraphStage(context);
-      errorMessage.value = '';
-    } catch (error) {
-      errorMessage.value = error?.message || '知识图谱生成失败。';
-      setStepStatus(3, 'failed', '知识图谱步骤失败。');
-      appendFailureLog('graph', errorMessage.value);
-
-      if (context?.shouldAutoGenerateLineage && context?.preferredLineageSeedPaperId) {
-        lineageSeed.value = {
-          paperId: context.preferredLineageSeedPaperId,
-          title: context.preferredLineageSeedPaperId
-        };
-        setStepStatus(4, 'running', '知识图谱步骤失败，正在直接生成血缘树...');
-        setStepLogs('lineage', [
-          {
-            title: '降级处理',
-            detail: '已跳过图谱展示，直接尝试生成血缘树。',
-            status: 'fallback',
-            statusText: toStatusText('fallback'),
-            metaText: ''
-          }
-        ]);
-        await generateLineageTree();
-        if (lineageData.value) {
-          errorMessage.value = '';
-        }
-      }
-    } finally {
-      graphLoading.value = false;
-      updateStepSignal();
-    }
   }
 
   async function runLegacyWorkflow() {
     if (graphLoading.value) return;
     resetSteps();
-    resetLineageState();
-    checkpointContext.value = null;
     errorMessage.value = '';
     graphLoading.value = true;
 
     const seed = seedRef.value || {};
     const inputType = String(seed?.input_type || 'domain').trim().toLowerCase();
     const quickMode = Boolean(seed?.quick_mode);
-    const preferredLineageSeedPaperId = String(seed?.lineage_seed_paper_id || '').trim();
-    const shouldAutoGenerateLineage = false;
 
     try {
       setStepStatus(1, 'running', createRetrievalRunningMessage(inputType));
@@ -2599,6 +2196,7 @@ export function usePaperWorkflow({
       if (!Array.isArray(retrieval.steps) || !retrieval.steps.length) {
         setStepLogs('retrieve', createFallbackRetrievalLogs(retrieval));
       }
+
       const retrievalAuditLogs = createRetrievalAuditLogs(retrieval);
       if (retrievalAuditLogs.length) {
         const retrievalStep = steps.value.find((item) => item.key === 'retrieve');
@@ -2612,7 +2210,7 @@ export function usePaperWorkflow({
       const previewSignature = buildPreviewGraphSignature(retrievalQuery, previewPapers);
       commitGraphData(buildRetrievalPreviewGraph(retrievalQuery, previewPapers), previewSignature);
 
-      setStepStatus(2, 'done', '知识图谱生成阶段将自动继续。');
+      setStepStatus(2, 'done', '检索阶段已确认，自动进入知识图谱生成。');
       setStepLogs('checkpoint', [
         {
           title: 'Coordinator Agent',
@@ -2623,16 +2221,14 @@ export function usePaperWorkflow({
         }
       ]);
       setStepAction('checkpoint', null);
-      checkpointContext.value = null;
+
       try {
         await runGraphStage({
           retrieval,
           retrievalQuery,
           inputType,
           seedInputValue: String(seed?.input_value || '').trim(),
-          paperRangeYears,
-          preferredLineageSeedPaperId,
-          shouldAutoGenerateLineage
+          paperRangeYears
         });
       } catch (graphError) {
         errorMessage.value = graphError?.message || '知识图谱生成失败。';
@@ -2659,17 +2255,18 @@ export function usePaperWorkflow({
     } else {
       resetUnifiedRuntimeState();
     }
-    resetNegotiationState();
+
     resetSteps();
-    resetLineageState();
-    checkpointContext.value = null;
     errorMessage.value = '';
+
     if (restoreCompletedWorkflowSnapshotFromStorage()) {
       return;
     }
+
     if (!resumeSessionId) {
       clearCompletedWorkflowSnapshot();
     }
+
     graphLoading.value = true;
 
     try {
@@ -2686,6 +2283,7 @@ export function usePaperWorkflow({
         await runLegacyWorkflow();
         return;
       }
+
       const rawMessage = String(error?.message || '').trim();
       const activeSessionMatch = rawMessage.match(/^active_session_exists:([a-z0-9-]+)$/i);
       if (activeSessionMatch && activeSessionMatch[1]) {
@@ -2710,158 +2308,12 @@ export function usePaperWorkflow({
     }
   }
 
-  async function generateLineageTree() {
-    const seedPaperId = String(lineageSeed.value?.paperId || '').trim();
-    if (!seedPaperId || lineageLoading.value) return;
-
-    const lineageLogs = [];
-    const pushLineageLog = ({
-      title,
-      detail,
-      status = 'pending',
-      metaText = ''
-    }) => {
-      lineageLogs.push({
-        title: String(title || '').trim() || '血缘树处理',
-        detail: String(detail || '').trim(),
-        status,
-        statusText: toStatusText(status),
-        metaText: String(metaText || '').trim()
-      });
-      setStepLogs('lineage', [...lineageLogs]);
-      return lineageLogs.length - 1;
-    };
-    const updateLineageLog = (index, patch = {}) => {
-      if (!Number.isInteger(index) || index < 0 || index >= lineageLogs.length) return;
-      const nextStatus = patch.status || lineageLogs[index].status || 'pending';
-      lineageLogs[index] = {
-        ...lineageLogs[index],
-        ...patch,
-        status: nextStatus,
-        statusText: toStatusText(nextStatus),
-        metaText: String(patch.metaText ?? lineageLogs[index].metaText ?? '').trim()
-      };
-      setStepLogs('lineage', [...lineageLogs]);
-    };
-
-    setStepStatus(4, 'running', '正在生成血缘树...');
-    pushLineageLog({
-      title: '起点论文确认',
-      detail: '已确认起点论文，开始构建血缘脉络。',
-      status: 'done'
-    });
-    const requestLogIndex = pushLineageLog({
-      title: '扩展引用脉络',
-      detail: '正在扩展祖先与后代论文关系...',
-      status: 'doing'
-    });
-    setStepAction('lineage', {
-      label: '生成血缘树',
-      disabled: true
-    });
-
-    const payload = await loadLineage(seedPaperId, {
-      ancestorDepth: 3,
-      descendantDepth: 3,
-      forceRefresh: true
-    });
-
-    if (!payload) {
-      updateLineageLog(requestLogIndex, {
-        detail: lineageErrorMessage.value || '生成血缘树失败。',
-        status: 'fallback',
-        metaText: ''
-      });
-      pushLineageLog({
-        title: '执行中断',
-        detail: '本次血缘树生成失败，可重新发起。',
-        status: 'fallback'
-      });
-      setStepStatus(4, 'failed', lineageErrorMessage.value || '生成血缘树失败。');
-      setStepAction('lineage', {
-        label: '重新生成血缘树',
-        disabled: false
-      });
-      return;
-    }
-
-    activeViewKey.value = 'lineage';
-    const ancestors = Array.isArray(payload?.ancestors) ? payload.ancestors.length : 0;
-    const descendants = Array.isArray(payload?.descendants) ? payload.descendants.length : 0;
-    updateLineageLog(requestLogIndex, {
-      detail: `引用网络构建完成，祖先 ${ancestors} 篇，后代 ${descendants} 篇。`,
-      status: 'done',
-      metaText: ''
-    });
-    pushLineageLog({
-      title: '结果渲染',
-      detail: '血缘树已渲染并自动切换到血缘树视图。',
-      status: 'done'
-    });
-
-    const graphId = String(graphData.value?.graph_id || '').trim();
-    const token = String(accessTokenRef.value || '').trim();
-    const historyLogIndex = pushLineageLog({
-      title: '研究历史同步',
-      detail: graphId && token ? '正在同步本次血缘树到研究历史...' : '当前会话未写入研究历史（不影响当前结果）。',
-      status: graphId && token ? 'doing' : 'fallback'
-    });
-    if (graphId && token) {
-      void updateResearchHistoryLineageStatus({
-        graph_id: graphId,
-        seed_paper_id: seedPaperId,
-        ancestor_count: ancestors,
-        descendant_count: descendants,
-        lineage_payload: payload
-      }, token).then((result) => {
-        updateLineageLog(historyLogIndex, {
-          detail: result?.updated ? '研究历史已更新。' : '未找到可更新的研究历史记录（已跳过）。',
-          status: result?.updated ? 'done' : 'fallback'
-        });
-      }).catch(() => {
-        updateLineageLog(historyLogIndex, {
-          detail: '研究历史更新失败（已跳过，不影响当前结果）。',
-          status: 'fallback'
-        });
-        // keep lineage generation non-blocking even if history status update fails
-      });
-    }
-
-    pushLineageLog({
-      title: '结果完成',
-      detail: `血缘树构建完成，祖先 ${ancestors} 篇，后代 ${descendants} 篇。`,
-      status: 'done'
-    });
-    setStepStatus(4, 'done', `血缘树已生成，关联论文 ${ancestors + descendants} 篇。`);
-    setStepAction('lineage', null);
-  }
-
   async function handleStepAction(stepKey) {
     const key = String(stepKey || '').trim().toLowerCase();
-    if (key === 'checkpoint') {
-      if (unifiedRuntimeActive.value) {
-        await continueAfterUnifiedCheckpoint('checkpoint');
-        return;
-      }
-      await continueAfterLegacyCheckpoint();
-      return;
-    }
-    if (key === 'lineage') {
-      if (unifiedRuntimeActive.value && waitingResearchCheckpoint.value === 'checkpoint_2') {
-        await continueAfterUnifiedCheckpoint('lineage');
-        return;
-      }
-      await generateLineageTree();
+    if (key === 'checkpoint' && unifiedRuntimeActive.value) {
+      await continueAfterUnifiedCheckpoint('checkpoint');
     }
   }
-
-  watch(
-    canViewLineage,
-    (next) => {
-      notifyLineageAvailability(Boolean(next));
-    },
-    { immediate: true }
-  );
 
   onUnmounted(() => {
     stopResearchPolling();
@@ -2876,16 +2328,11 @@ export function usePaperWorkflow({
     terminatingWorkflow,
     graphData,
     errorMessage,
-    lineageLoading,
-    lineageData,
-    lineageErrorMessage,
     graphStats,
     workflowProgress,
     currentTaskText,
     nextTaskText,
     activeStepHint,
-    activeViewKey,
-    canViewLineage,
     runWorkflow,
     terminateWorkflow,
     handleStepAction

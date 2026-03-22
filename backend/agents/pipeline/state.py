@@ -35,8 +35,7 @@ class PipelineState(TypedDict):
     graph_edges: list[dict[str, Any]]
     graph_payload: dict[str, Any] | None
 
-    # parallel
-    lineage_data: dict[str, Any] | None
+    # synthesis context
     research_gaps: list[dict[str, Any]]
     critic_notes: list[str]
 
@@ -97,7 +96,6 @@ def build_initial_state(
         graph_nodes=[],
         graph_edges=[],
         graph_payload=None,
-        lineage_data=None,
         research_gaps=[],
         critic_notes=[],
         report_draft=None,

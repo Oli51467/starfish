@@ -169,10 +169,9 @@ function resolveShape(step, index) {
   const key = String(step?.key || '').trim().toLowerCase();
   if (key.includes('checkpoint') || key === 'checkpoint') return 'diamond';
   if (key === 'graph' || key.includes('graph')) return 'hexagon';
-  if (key === 'lineage' || key.includes('lineage')) return 'parallelogram';
   if (key === 'retrieve' || key.includes('search')) return 'rounded';
 
-  const fallback = ['rounded', 'diamond', 'hexagon', 'parallelogram'];
+  const fallback = ['rounded', 'diamond', 'hexagon'];
   return fallback[index % fallback.length];
 }
 

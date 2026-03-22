@@ -31,10 +31,7 @@
       <WorkflowView
         v-else
         :seed="workflowSeed"
-        :result-view="paperResultView"
         @step-change="updateHeaderStep"
-        @result-view-change="handleWorkflowResultViewChange"
-        @lineage-availability-change="handleLineageAvailabilityChange"
         @back="exitWorkflow"
       />
     </main>
@@ -58,17 +55,13 @@ const workflowSeed = ref({
   paper_range_years: null,
   quick_mode: true,
   depth: 2,
-  auto_lineage: false,
-  lineage_seed_paper_id: '',
   runtime_session_id: ''
 });
 const headerStep = ref({
   index: 1,
-  total: 2,
+  total: 3,
   title: '论文检索'
 });
-const paperResultView = ref('graph');
-const paperLineageEnabled = ref(false);
 const activeSessionNotice = ref(null);
 const { isAuthenticated, loadSession, accessToken } = useAuthStore();
 const router = useRouter();
@@ -79,8 +72,7 @@ const COMPLETED_WORKFLOW_SNAPSHOT_STORAGE_KEY = 'starfish:workflow-completed-sna
 
 const WORKFLOW_ROUTE_NAMES = new Set([
   'research-domain-graph',
-  'research-paper-graph',
-  'research-paper-lineage'
+  'research-paper-graph'
 ]);
 
 function normalizeText(value) {
@@ -118,7 +110,6 @@ function normalizeWorkflowSeed(payload = {}) {
     ? 'domain'
     : (normalizedInputType === 'doi' ? 'doi' : 'arxiv_id');
   const inputValue = normalizeText(payload.input_value);
-  const autoLineageDefault = inputType === 'domain';
   return {
     input_type: inputType,
     input_value: inputValue,
@@ -127,19 +118,12 @@ function normalizeWorkflowSeed(payload = {}) {
       : null,
     quick_mode: parseBooleanLike(payload.quick_mode, true),
     depth: parseOptionalPositiveInteger(payload.depth) || 2,
-    auto_lineage: parseBooleanLike(payload.auto_lineage, autoLineageDefault),
-    lineage_seed_paper_id: normalizeText(payload.lineage_seed_paper_id),
     runtime_session_id: normalizeText(payload.runtime_session_id)
   };
 }
 
 function toPersistableWorkflowSeed(seed = {}) {
-  const normalized = normalizeWorkflowSeed(seed);
-  return {
-    ...normalized,
-    auto_lineage: false,
-    lineage_seed_paper_id: ''
-  };
+  return normalizeWorkflowSeed(seed);
 }
 
 function persistWorkflowSeed(seed) {
@@ -290,7 +274,7 @@ const activeSessionNoticeDetail = computed(() => {
 function applyHeaderForSeed(seed) {
   headerStep.value = {
     index: 1,
-    total: 4,
+    total: 3,
     title: seed.input_type === 'domain' ? '领域调研' : '论文检索'
   };
 }
@@ -298,9 +282,7 @@ function applyHeaderForSeed(seed) {
 function resolveWorkflowRouteName() {
   if (!workflowActive.value) return 'home';
   if (workflowSeed.value.input_type === 'domain') return 'research-domain-graph';
-  return paperResultView.value === 'lineage'
-    ? 'research-paper-lineage'
-    : 'research-paper-graph';
+  return 'research-paper-graph';
 }
 
 let syncingRoute = false;
@@ -324,8 +306,6 @@ async function syncRouteFromWorkflow({ replace = true } = {}) {
 
 function resetWorkflowState() {
   workflowActive.value = false;
-  paperResultView.value = 'graph';
-  paperLineageEnabled.value = false;
 }
 
 function isSeedCompatibleWithRoute(seed, routeName) {
@@ -333,7 +313,7 @@ function isSeedCompatibleWithRoute(seed, routeName) {
   if (routeName === 'research-domain-graph') {
     return seed.input_type === 'domain';
   }
-  if (routeName === 'research-paper-graph' || routeName === 'research-paper-lineage') {
+  if (routeName === 'research-paper-graph') {
     return seed.input_type !== 'domain';
   }
   return true;
@@ -365,8 +345,6 @@ function parseRouteSeed(routeName, queryPayload = {}) {
     input_value: paperId,
     quick_mode: queryPayload.quick_mode,
     depth: queryPayload.depth,
-    auto_lineage: queryPayload.auto_lineage,
-    lineage_seed_paper_id: normalizeText(queryPayload.lineage_seed_paper_id || paperId),
     runtime_session_id: queryPayload.runtime_session_id
   });
 }
@@ -413,12 +391,6 @@ async function applyRouteToWorkflow() {
   }
   applyHeaderForSeed(seed);
   workflowActive.value = true;
-
-  if (routeName === 'research-paper-lineage') {
-    paperResultView.value = 'lineage';
-  } else {
-    paperResultView.value = 'graph';
-  }
 }
 
 async function enterWorkflow(payload) {
@@ -433,8 +405,6 @@ async function enterWorkflow(payload) {
   if (!workflowSeed.value.input_value) return;
   persistWorkflowSeed(workflowSeed.value);
   applyHeaderForSeed(workflowSeed.value);
-  paperResultView.value = 'graph';
-  paperLineageEnabled.value = false;
   activeSessionNotice.value = null;
   workflowActive.value = true;
   await syncRouteFromWorkflow({ replace: false });
@@ -454,8 +424,6 @@ async function resumeActiveSessionWorkflow() {
   });
   persistWorkflowSeed(workflowSeed.value);
   applyHeaderForSeed(workflowSeed.value);
-  paperResultView.value = 'graph';
-  paperLineageEnabled.value = false;
   activeSessionNotice.value = null;
   workflowActive.value = true;
   await syncRouteFromWorkflow({ replace: false });
@@ -473,25 +441,6 @@ async function exitWorkflow() {
   await router.push({ name: 'home' });
   if (String(route.name || '') === 'home') {
     clearPersistedWorkflowSeed();
-  }
-}
-
-async function handleWorkflowResultViewChange(nextView) {
-  const normalized = String(nextView || '').trim().toLowerCase();
-  if (normalized === 'lineage' && !paperLineageEnabled.value) {
-    paperResultView.value = 'graph';
-    await syncRouteFromWorkflow();
-    return;
-  }
-  paperResultView.value = normalized === 'lineage' ? 'lineage' : 'graph';
-  await syncRouteFromWorkflow();
-}
-
-async function handleLineageAvailabilityChange(enabled) {
-  paperLineageEnabled.value = Boolean(enabled);
-  if (!paperLineageEnabled.value && paperResultView.value === 'lineage') {
-    paperResultView.value = 'graph';
-    await syncRouteFromWorkflow();
   }
 }
 

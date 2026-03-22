@@ -6,8 +6,7 @@ const navItems = [
   { key: 'input', label: '输入' },
   { key: 'map', label: '领域地图' },
   { key: 'reading', label: '必读清单' },
-  { key: 'gaps', label: '研究空白' },
-  { key: 'lineage', label: '血缘树' }
+  { key: 'gaps', label: '研究空白' }
 ];
 
 export function useSessionStore() {

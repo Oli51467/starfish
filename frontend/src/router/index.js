@@ -29,14 +29,6 @@ const routes = [
     }
   },
   {
-    path: '/research/paper/lineage',
-    name: 'research-paper-lineage',
-    component: HomeView,
-    meta: {
-      requiresAuth: true
-    }
-  },
-  {
     path: '/research/pipeline',
     redirect: { name: 'home' }
   },
@@ -65,8 +57,7 @@ const router = createRouter({
 
 const WORKFLOW_ROUTE_NAMES = new Set([
   'research-domain-graph',
-  'research-paper-graph',
-  'research-paper-lineage'
+  'research-paper-graph'
 ]);
 const ACTIVE_RESEARCH_SESSION_STORAGE_KEY = 'starfish:active-research-session';
 const TERMINAL_SESSION_STATUSES = new Set(['completed', 'failed', 'stopped', 'error', 'cancelled', 'canceled']);

@@ -183,9 +183,7 @@ const NEGOTIATION_TASK_LABEL = {
   router: '任务路由协商',
   search: '论文检索协商',
   checkpoint_1: '需求确认协商',
-  graph_build: '图谱构建协商',
-  checkpoint_2: '血缘确认协商',
-  parallel: '血缘分析协商'
+  graph_build: '图谱构建协商'
 };
 
 const props = defineProps({

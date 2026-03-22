@@ -16,29 +16,6 @@
     </div>
 
     <div class="header-actions">
-      <div v-if="showResultTabs" class="header-result-tabs" role="tablist" aria-label="结果视图切换">
-        <button
-          class="header-result-tab mono"
-          :class="{ 'is-active': resultView === 'graph' }"
-          type="button"
-          role="tab"
-          :aria-selected="resultView === 'graph'"
-          @click="$emit('change-result-view', 'graph')"
-        >
-          知识图谱
-        </button>
-        <button
-          class="header-result-tab mono"
-          :class="{ 'is-active': resultView === 'lineage' }"
-          type="button"
-          role="tab"
-          :aria-selected="resultView === 'lineage'"
-          :disabled="!lineageEnabled"
-          @click="$emit('change-result-view', 'lineage')"
-        >
-          血缘树
-        </button>
-      </div>
       <LanguageToggleButton />
       <p v-if="showBack && showStep" class="mono header-step-inline">
         <span>Step {{ stepIndex }}/{{ stepTotal }} · </span>
@@ -78,20 +55,8 @@ defineProps({
   showBack: {
     type: Boolean,
     default: false
-  },
-  showResultTabs: {
-    type: Boolean,
-    default: false
-  },
-  resultView: {
-    type: String,
-    default: 'graph'
-  },
-  lineageEnabled: {
-    type: Boolean,
-    default: false
   }
 });
 
-defineEmits(['back', 'change-result-view']);
+defineEmits(['back']);
 </script>

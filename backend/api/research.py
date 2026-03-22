@@ -34,7 +34,6 @@ def _to_safe_input_type(raw_value: object) -> str:
 def _to_state_response(snapshot: dict) -> ResearchSessionStateResponse:
     state = snapshot.get("state") or {}
     graph_payload = state.get("graph_payload") if isinstance(state.get("graph_payload"), dict) else None
-    lineage_payload = state.get("lineage_data") if isinstance(state.get("lineage_data"), dict) else None
     report = state.get("final_report") or state.get("report_draft")
 
     return ResearchSessionStateResponse(
@@ -55,7 +54,7 @@ def _to_state_response(snapshot: dict) -> ResearchSessionStateResponse:
             if str(key).strip()
         },
         graph=graph_payload,
-        lineage=lineage_payload,
+        lineage=None,
         report=str(report) if report is not None else None,
         report_id=str(state.get("report_id") or "").strip() or None,
         history_id=str(state.get("history_id") or "").strip() or None,

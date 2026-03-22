@@ -124,14 +124,6 @@ export function batchDeleteResearchHistory(historyIds, { accessToken = '' } = {}
   });
 }
 
-export function updateResearchHistoryLineageStatus(payload, accessToken = '') {
-  return request('/api/research-history/lineage-status', {
-    method: 'POST',
-    headers: buildAuthHeaders(accessToken, { 'Content-Type': 'application/json' }),
-    body: JSON.stringify(payload || {})
-  });
-}
-
 export function getPaperSignal(paperId, { accessToken = '', forceRefresh = false } = {}) {
   const query = new URLSearchParams();
   query.set('force_refresh', forceRefresh ? 'true' : 'false');
@@ -260,20 +252,6 @@ export function getGaps(mapId, { gapTypes = [], minScore = 60 } = {}) {
   }
   query.set('min_score', String(minScore));
   return request(`/api/gaps/${encodeURIComponent(mapId)}?${query.toString()}`);
-}
-
-export function getLineage(
-  paperId,
-  { ancestorDepth = 2, descendantDepth = 2, citationTypes = [], forceRefresh = false } = {}
-) {
-  const query = new URLSearchParams();
-  query.set('ancestor_depth', String(ancestorDepth));
-  query.set('descendant_depth', String(descendantDepth));
-  query.set('force_refresh', forceRefresh ? 'true' : 'false');
-  for (const type of citationTypes) {
-    query.append('citation_types', type);
-  }
-  return request(`/api/lineage/${encodeURIComponent(paperId)}?${query.toString()}`);
 }
 
 export function startResearchSession(payload, { accessToken = '' } = {}) {

@@ -24,9 +24,6 @@ def _build_fallback_report(state: PipelineState) -> str:
         reverse=True,
     )[:5]
 
-    lineage = state.get("lineage_data") if isinstance(state.get("lineage_data"), dict) else {}
-    lineage_count = len(lineage.get("ancestors") or []) + len(lineage.get("descendants") or [])
-
     gaps = state.get("research_gaps") or []
     critic_notes = state.get("critic_notes") or []
 
@@ -61,21 +58,18 @@ def _build_fallback_report(state: PipelineState) -> str:
 ## 3. 核心论文分析（Top 5）
 {chr(10).join(reference_lines) if reference_lines else '- 暂无可用论文'}
 
-## 4. 技术演化脉络
-- 血缘节点总数：{lineage_count}
-
-## 5. 研究空白与机会
+## 4. 研究空白与机会
 {chr(10).join(gap_lines) if gap_lines else '- 暂无明显空白'}
 
-## 6. 批评性审查
+## 5. 批评性审查
 {chr(10).join(critic_lines)}
 
-## 7. 研究建议
+## 6. 研究建议
 - 建议 1：补充跨时间跨度的关键文献对照。
 - 建议 2：围绕高影响论文构建可复现实验路线。
 - 建议 3：针对识别出的空白方向设计最小可验证实验。
 
-## 8. 参考文献
+## 7. 参考文献
 {chr(10).join(reference_lines) if reference_lines else '- 暂无'}
 """.strip()
     return report
@@ -87,7 +81,6 @@ async def _synthesize_with_llm(state: PipelineState) -> str:
         "paper_count": len(state.get("papers") or []),
         "graph_nodes": len(state.get("graph_nodes") or []),
         "graph_edges": len(state.get("graph_edges") or []),
-        "lineage": state.get("lineage_data") or {},
         "research_gaps": (state.get("research_gaps") or [])[:3],
         "critic_notes": state.get("critic_notes") or [],
         "top_papers": sorted(
@@ -104,8 +97,8 @@ async def _synthesize_with_llm(state: PipelineState) -> str:
                     "role": "system",
                     "content": (
                         "你是科研综合分析师。"
-                        "请输出 Markdown 报告，包含 8 个章节："
-                        "研究目标与范围、领域全景、核心论文分析、技术演化脉络、"
+                        "请输出 Markdown 报告，包含 7 个章节："
+                        "研究目标与范围、领域全景、核心论文分析、"
                         "研究空白与机会、批评性审查、研究建议、参考文献。"
                     ),
                 },

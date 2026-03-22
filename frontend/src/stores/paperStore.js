@@ -1,18 +1,15 @@
 import { ref } from 'vue';
 
-import { getGaps, getLineage, getReadingList } from '../api';
+import { getGaps, getReadingList } from '../api';
 
 const readingList = ref(null);
 const gaps = ref(null);
-const lineage = ref(null);
 
 const readingListLoading = ref(false);
 const gapsLoading = ref(false);
-const lineageLoading = ref(false);
 
 const readingListErrorMessage = ref('');
 const gapsErrorMessage = ref('');
-const lineageErrorMessage = ref('');
 
 async function runRequest({
   requestFn,
@@ -61,38 +58,15 @@ async function loadGaps(mapId, options = {}) {
   });
 }
 
-async function loadLineage(paperId, options = {}) {
-  if (!paperId) return;
-  return await runRequest({
-    requestFn: () => getLineage(paperId, options),
-    loadingRef: lineageLoading,
-    errorRef: lineageErrorMessage,
-    fallbackMessage: '获取血缘树失败。',
-    onSuccess: (payload) => {
-      lineage.value = payload;
-    }
-  });
-}
-
-function clearLineage() {
-  lineage.value = null;
-  lineageErrorMessage.value = '';
-}
-
 export function usePaperStore() {
   return {
     readingList,
     gaps,
-    lineage,
     readingListLoading,
     gapsLoading,
-    lineageLoading,
     readingListErrorMessage,
     gapsErrorMessage,
-    lineageErrorMessage,
     loadReadingList,
-    loadGaps,
-    loadLineage,
-    clearLineage
+    loadGaps
   };
 }

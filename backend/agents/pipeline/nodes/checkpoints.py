@@ -51,37 +51,3 @@ async def human_checkpoint_1(state: PipelineState) -> PipelineState:
         "progress": 45,
         "messages": append_message(state, summary),
     }
-
-
-async def human_checkpoint_2(state: PipelineState) -> PipelineState:
-    runtime = get_pipeline_runtime_service()
-    session_id = state["session_id"]
-    node = "checkpoint_2"
-
-    await runtime.ensure_active(session_id)
-    await runtime.emit_node_start(session_id, node, 90)
-
-    message = "知识图谱已完成，请确认是否继续生成并展示血缘树。"
-    feedback = await runtime.wait_for_checkpoint(
-        session_id,
-        checkpoint=node,
-        message=message,
-        timeout_seconds=0,
-    )
-
-    checkpoint_feedback = dict(state.get("checkpoint_feedback") or {})
-    if not _is_continue_feedback(feedback):
-        checkpoint_feedback[node] = feedback
-
-    summary = "血缘树检查点已确认，开始生成血缘树。"
-    await runtime.emit_node_complete(session_id, node, 90, summary)
-
-    return {
-        **state,
-        "human_feedback": feedback if feedback is not None else state.get("human_feedback"),
-        "checkpoint_feedback": checkpoint_feedback,
-        "should_pause": False,
-        "current_node": node,
-        "progress": 90,
-        "messages": append_message(state, summary),
-    }

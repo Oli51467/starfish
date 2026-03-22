@@ -25,15 +25,12 @@ def _safe_int(value: object, fallback: int = 0) -> int:
 
 
 def _build_pipeline_payload(state: PipelineState) -> dict:
-    lineage = state.get("lineage_data") if isinstance(state.get("lineage_data"), dict) else {}
-    lineage_nodes = len(lineage.get("ancestors") or []) + len(lineage.get("descendants") or [])
     return {
         "research_goal": state.get("research_goal") or "",
         "execution_plan": list(state.get("execution_plan") or []),
         "final_report": state.get("final_report") or "",
         "checkpoint_feedback": dict(state.get("checkpoint_feedback") or {}),
         "parallel_outputs_summary": {
-            "lineage_nodes": lineage_nodes,
             "research_gaps": len(state.get("research_gaps") or []),
             "critic_notes": len(state.get("critic_notes") or []),
         },
