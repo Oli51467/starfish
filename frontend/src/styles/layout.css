@@ -116,18 +116,19 @@
 }
 
 .header-lang-toggle {
-  width: 36px;
+  width: auto;
+  min-width: 52px;
   height: 36px;
-  border-radius: 999px;
-  border: 1px solid var(--line-2);
-  background: #fff;
+  border-radius: var(--radius-sm);
+  border: 0;
+  background: transparent;
   color: #252525;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 4px;
+  gap: 6px;
   cursor: pointer;
-  padding: 0 6px;
+  padding: 0 10px;
   transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
 }
 
@@ -136,17 +137,17 @@
 }
 
 .header-lang-toggle:focus-visible {
-  outline: 0;
-  border-color: #c8c8c8;
+  outline: 1px solid var(--line-2);
+  outline-offset: 1px;
 }
 
 .header-lang-toggle svg {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
 }
 
 .header-lang-toggle span {
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1;
 }
 
@@ -442,14 +443,21 @@
   }
 
   .header-lang-toggle {
-    width: 34px;
+    width: auto;
+    min-width: 48px;
     height: 34px;
-    gap: 3px;
-    padding: 0 5px;
+    border-radius: var(--radius-sm);
+    gap: 5px;
+    padding: 0 8px;
+  }
+
+  .header-lang-toggle svg {
+    width: 15px;
+    height: 15px;
   }
 
   .header-lang-toggle span {
-    font-size: 9px;
+    font-size: 11px;
   }
 
   .header-github-link {

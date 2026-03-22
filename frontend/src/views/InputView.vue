@@ -238,7 +238,7 @@ const inputTypeMeta = {
   }
 };
 const currentInputMeta = computed(
-  () => inputTypeMeta[mapInput.value.input_type] || { placeholder: '请先选择研究模式', hint: '' }
+  () => inputTypeMeta[mapInput.value.input_type] || { placeholder: '', hint: '' }
 );
 const selectedMode = computed(() => {
   const type = String(mapInput.value.input_type || '').trim();

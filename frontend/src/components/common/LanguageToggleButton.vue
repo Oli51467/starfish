@@ -8,8 +8,8 @@
     @click="toggleLocale"
   >
     <svg viewBox="0 0 16 16" aria-hidden="true">
-      <circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.3" />
-      <circle cx="8" cy="8" r="2.6" fill="currentColor" />
+      <rect x="2" y="2" width="12" height="12" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.3" />
+      <rect x="6" y="6" width="4" height="4" rx="0.8" fill="currentColor" />
     </svg>
     <span class="mono">{{ isEnglish ? '中' : 'EN' }}</span>
   </button>
