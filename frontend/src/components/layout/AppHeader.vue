@@ -39,6 +39,7 @@
           血缘树
         </button>
       </div>
+      <LanguageToggleButton />
       <p v-if="showBack && showStep" class="mono header-step-inline">
         <span>Step {{ stepIndex }}/{{ stepTotal }} · </span>
         <strong class="header-step-strong">{{ stepTitle }}</strong>
@@ -52,6 +53,7 @@
 <script setup>
 import GithubLinkButton from '../common/GithubLinkButton.vue';
 import GoogleAuthStatus from '../common/GoogleAuthStatus.vue';
+import LanguageToggleButton from '../common/LanguageToggleButton.vue';
 import { useAuthStore } from '../../stores/authStore';
 
 const { isAuthenticated } = useAuthStore();

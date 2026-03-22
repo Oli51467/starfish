@@ -197,13 +197,16 @@
                 :lineage="historyLineageData"
                 :stretch-timeline="true"
               />
-              <KnowledgeGraphCanvas v-else-if="domainGraphData" :graph="domainGraphData" :show-tools="true" />
               <KnowledgeGraphView
-                v-else
+                v-else-if="historyKnowledgeGraphData"
                 ref="historyGraphViewRef"
-                :graph-data="selectedDetail.graph"
+                :graph-data="historyKnowledgeGraphData"
                 mode="panorama_only"
               />
+              <KnowledgeGraphCanvas v-else-if="domainGraphData" :graph="domainGraphData" :show-tools="true" />
+              <section v-else class="history-detail-empty panel">
+                <p class="muted">该记录缺少可展示的图谱数据。</p>
+              </section>
             </div>
           </div>
         </article>
@@ -286,6 +289,14 @@ const historyLineageData = computed(() => {
   const root = raw.root || raw.root_paper;
   if (!root || typeof root !== 'object') return null;
   return raw;
+});
+const historyKnowledgeGraphData = computed(() => {
+  const graph = selectedDetail.value?.graph;
+  if (!graph || typeof graph !== 'object') return null;
+  const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
+  const edges = Array.isArray(graph.edges) ? graph.edges : [];
+  if (!nodes.length && !edges.length) return null;
+  return graph;
 });
 const showDetailTabs = computed(() => Boolean(historyLineageData.value));
 const showSignalPanel = computed(() => {
@@ -434,8 +445,6 @@ async function changePage(nextPage) {
 async function autoCenterPaperHistoryGraph() {
   const detail = selectedDetail.value;
   if (!detail) return;
-  const researchType = String(detail.research_type || '').trim().toLowerCase();
-  if (researchType === 'domain') return;
   if (activeDetailTab.value !== 'graph') return;
   await nextTick();
   await nextTick();

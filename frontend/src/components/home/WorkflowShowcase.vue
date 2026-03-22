@@ -1,11 +1,16 @@
 <template>
   <section class="panel workflow-shell" :class="{ 'is-collapsed': started }">
     <div class="workflow-head">
-      <p class="mono workflow-kicker">Workflow</p>
       <div class="workflow-brand">
         <img class="workflow-logo" src="/assets/brand/logo-light.png" alt="StarFish logo" />
       </div>
-      <p class="muted">从一个研究领域向多触角延展，集检索、建图、自主探索的科研工作引擎。</p>
+      <p
+        :key="`workflow-tagline-${locale}`"
+        class="workflow-tagline workflow-tagline-typing muted"
+        data-i18n-skip="true"
+      >
+        {{ localizedTagline }}
+      </p>
     </div>
 
     <ol class="workflow-sequence" :class="{ 'is-active': started }">
@@ -32,6 +37,18 @@
 </template>
 
 <script setup>
+import { computed } from 'vue';
+
+import { useRuntimeLocale } from '../../i18n/runtime';
+
+const { isEnglish, locale } = useRuntimeLocale();
+
+const localizedTagline = computed(() => {
+  return isEnglish.value
+    ? 'A multi-agent research engine for retrieval, graphs, and exploration.'
+    : '从一个研究领域向多触角延展，集检索、建图、自主探索的科研工作引擎。';
+});
+
 defineProps({
   steps: {
     type: Array,

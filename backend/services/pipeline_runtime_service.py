@@ -455,6 +455,7 @@ class PipelineRuntimeService:
                 })
                 return
 
+            await self._persist_completed_history(runtime)
             runtime.status = "completed"
             runtime.updated_at = datetime.now(timezone.utc)
             await self._publish_event(
@@ -500,6 +501,123 @@ class PipelineRuntimeService:
                     "error": str(exc),
                 },
             )
+
+    @staticmethod
+    def _format_search_range_for_history(*, input_type: str, paper_range_years: Any) -> str:
+        safe_input_type = str(input_type or "").strip().lower()
+        if safe_input_type != "domain":
+            return "-"
+        try:
+            years = int(paper_range_years) if paper_range_years is not None else 0
+        except (TypeError, ValueError):
+            years = 0
+        if years > 0:
+            return f"近 {years} 年"
+        return "所有时间"
+
+    @staticmethod
+    def _build_history_pipeline_payload(state: PipelineState) -> dict[str, Any]:
+        lineage = state.get("lineage_data") if isinstance(state.get("lineage_data"), dict) else {}
+        lineage_nodes = len(lineage.get("ancestors") or []) + len(lineage.get("descendants") or [])
+        return {
+            "research_goal": state.get("research_goal") or "",
+            "execution_plan": list(state.get("execution_plan") or []),
+            "final_report": state.get("final_report") or "",
+            "checkpoint_feedback": dict(state.get("checkpoint_feedback") or {}),
+            "parallel_outputs_summary": {
+                "lineage_nodes": lineage_nodes,
+                "research_gaps": len(state.get("research_gaps") or []),
+                "critic_notes": len(state.get("critic_notes") or []),
+            },
+        }
+
+    @staticmethod
+    def _resolve_history_seed_paper_id(state: PipelineState) -> str:
+        seed = state.get("seed_paper") if isinstance(state.get("seed_paper"), dict) else {}
+        seed_paper_id = str(seed.get("paper_id") or "").strip()
+        if seed_paper_id:
+            return seed_paper_id
+        for paper in state.get("papers") or []:
+            if not isinstance(paper, dict):
+                continue
+            paper_id = str(paper.get("paper_id") or "").strip()
+            if paper_id:
+                return paper_id
+        return str(state.get("input_value") or "").strip()
+
+    async def _persist_completed_history(self, runtime: _PipelineSessionRuntime) -> None:
+        state = runtime.state
+        graph_payload = state.get("graph_payload")
+        if not isinstance(graph_payload, dict):
+            state["history_id"] = None
+            state["report_id"] = None
+            return
+
+        try:
+            from models.schemas import KnowledgeGraphBuildRequest, KnowledgeGraphResponse
+            from services.research_history_service import get_research_history_service
+
+            history_service = get_research_history_service()
+            user = UserProfile(
+                id=str(runtime.user_id or "").strip(),
+                email=str(state.get("user_email") or "").strip(),
+                name=str(state.get("user_name") or "").strip(),
+                picture=None,
+            )
+
+            graph = KnowledgeGraphResponse.model_validate(graph_payload)
+            request = KnowledgeGraphBuildRequest(
+                query=str(graph.query or state.get("input_value") or "").strip(),
+                max_papers=min(30, max(3, len(state.get("papers") or []))),
+                max_entities_per_paper=6,
+                prefetched_papers=[],
+                research_type=str(state.get("input_type") or "unknown"),
+                search_input=str(state.get("input_value") or "").strip(),
+                search_range=self._format_search_range_for_history(
+                    input_type=str(state.get("input_type") or "domain"),
+                    paper_range_years=state.get("paper_range_years"),
+                ),
+            )
+            history_id = await asyncio.to_thread(
+                history_service.record_graph_result,
+                user=user,
+                request=request,
+                graph=graph,
+            )
+            safe_history_id = str(history_id or "").strip()
+            if not safe_history_id:
+                state["history_id"] = None
+                state["report_id"] = None
+                return
+
+            lineage_payload = state.get("lineage_data")
+            if isinstance(lineage_payload, dict):
+                ancestor_count = len(lineage_payload.get("ancestors") or [])
+                descendant_count = len(lineage_payload.get("descendants") or [])
+                await asyncio.to_thread(
+                    history_service.record_lineage_status,
+                    user=user,
+                    graph_id=str(graph.graph_id or "").strip(),
+                    seed_paper_id=self._resolve_history_seed_paper_id(state),
+                    ancestor_count=ancestor_count,
+                    descendant_count=descendant_count,
+                    lineage_payload=lineage_payload,
+                )
+
+            await asyncio.to_thread(
+                history_service.update_pipeline_payload,
+                user=user,
+                history_id=safe_history_id,
+                pipeline_payload=self._build_history_pipeline_payload(state),
+            )
+            state["history_id"] = safe_history_id
+            state["report_id"] = safe_history_id
+        except Exception as exc:  # noqa: BLE001
+            state_errors = list(state.get("errors") or [])
+            state_errors.append(f"history_save_failed:{str(exc)}")
+            state["errors"] = state_errors
+            state["history_id"] = None
+            state["report_id"] = None
 
     async def _rollback_failed_history(self, runtime: _PipelineSessionRuntime) -> None:
         safe_history_id = (
