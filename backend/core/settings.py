@@ -93,6 +93,23 @@ class Settings:
         }
         self.enable_landscape_summary = self._parse_bool(os.getenv("ENABLE_LANDSCAPE_SUMMARY"), default=False)
 
+        # Insight orchestration
+        self.insight_agent_mode = self._parse_choice(
+            os.getenv("INSIGHT_AGENT_MODE"),
+            default="orchestrated",
+            choices={"legacy", "orchestrated"},
+        )
+        self.insight_worker_count = max(1, min(16, int(os.getenv("INSIGHT_WORKER_COUNT", "4"))))
+        self.insight_max_subagent_depth = max(0, min(8, int(os.getenv("INSIGHT_MAX_SUBAGENT_DEPTH", "2"))))
+        self.insight_max_subtasks_per_round = max(
+            1,
+            min(128, int(os.getenv("INSIGHT_MAX_SUBTASKS_PER_ROUND", "24"))),
+        )
+        self.insight_max_subtasks_per_parent = max(
+            1,
+            min(8, int(os.getenv("INSIGHT_MAX_SUBTASKS_PER_PARENT", "2"))),
+        )
+
         # Auth
         self.google_client_id = (os.getenv("GOOGLE_CLIENT_ID") or "").strip()
         self.session_secret = (os.getenv("SESSION_SECRET") or "change-this-session-secret").strip()
@@ -107,6 +124,20 @@ class Settings:
         if raw_value is None:
             return default
         return str(raw_value).strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _parse_choice(
+        raw_value: str | None,
+        *,
+        default: str,
+        choices: set[str],
+    ) -> str:
+        if raw_value is None:
+            return default
+        safe = str(raw_value).strip().lower()
+        if safe in choices:
+            return safe
+        return default
 
 
 @lru_cache

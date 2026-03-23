@@ -9,6 +9,7 @@ from services.pipeline_runtime_service import get_pipeline_runtime_service
 _NODE = "insight"
 _DEFAULT_AGENT_COUNT = 4
 _DEFAULT_EXPLORATION_DEPTH = 2
+_DEFAULT_AGENT_MODE = "orchestrated"
 
 
 def _safe_int(value: object, fallback: int) -> int:
@@ -24,6 +25,9 @@ async def insight_node(state: PipelineState) -> PipelineState:
     config = dict(state.get("insight_config") or {})
     agent_count = max(2, min(8, _safe_int(config.get("agent_count"), _DEFAULT_AGENT_COUNT)))
     exploration_depth = max(1, min(5, _safe_int(config.get("exploration_depth"), _DEFAULT_EXPLORATION_DEPTH)))
+    agent_mode = str(config.get("agent_mode") or _DEFAULT_AGENT_MODE).strip().lower()
+    if agent_mode not in {"legacy", "orchestrated"}:
+        agent_mode = _DEFAULT_AGENT_MODE
 
     await runtime.ensure_active(session_id)
     await runtime.emit_node_start(session_id, _NODE, 82)
@@ -31,9 +35,17 @@ async def insight_node(state: PipelineState) -> PipelineState:
     service = get_insight_exploration_service()
 
     async def on_stream(payload: dict) -> None:
+        section = str(payload.get("section") or "insight_markdown").strip().lower()
+        if section == "insight_orchestrator_event":
+            event_payload = payload.get("event")
+            await runtime.emit_insight_orchestrator_event(
+                session_id,
+                event=event_payload if isinstance(event_payload, dict) else {},
+            )
+            return
         await runtime.emit_insight_stream(
             session_id,
-            section=str(payload.get("section") or "insight_markdown"),
+            section=section or "insight_markdown",
             chunk=str(payload.get("chunk") or ""),
             accumulated_chars=int(payload.get("accumulated_chars") or 0),
             done=bool(payload.get("done")),
@@ -48,6 +60,7 @@ async def insight_node(state: PipelineState) -> PipelineState:
         graph_payload=state.get("graph_payload") if isinstance(state.get("graph_payload"), dict) else None,
         agent_count=agent_count,
         exploration_depth=exploration_depth,
+        agent_mode=agent_mode,
         stream_callback=on_stream,
     )
 
@@ -57,12 +70,16 @@ async def insight_node(state: PipelineState) -> PipelineState:
 
     artifact = result.get("artifact") if isinstance(result.get("artifact"), dict) else {}
     markdown = str(result.get("markdown") or "").strip()
+    resolved_mode = str(result.get("agent_mode") or agent_mode).strip().lower()
+    if resolved_mode not in {"legacy", "orchestrated"}:
+        resolved_mode = agent_mode
     insight_payload = {
         "status": "completed",
         "summary": summary,
         "language": str(result.get("language") or "zh"),
         "agent_count": agent_count,
         "exploration_depth": exploration_depth,
+        "agent_mode": resolved_mode,
         "markdown": markdown,
         "artifact": {
             "markdown_path": str(artifact.get("markdown_path") or ""),
@@ -82,4 +99,3 @@ async def insight_node(state: PipelineState) -> PipelineState:
         "progress": 98,
         "messages": append_message(state, summary),
     }
-

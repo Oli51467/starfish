@@ -103,6 +103,7 @@ def build_initial_state(
         insight_config={
             "agent_count": 4,
             "exploration_depth": 2,
+            "agent_mode": "orchestrated",
         },
         insight=None,
         report_draft=None,

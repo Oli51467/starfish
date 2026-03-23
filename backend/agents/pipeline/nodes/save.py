@@ -38,6 +38,7 @@ def _build_pipeline_payload(state: PipelineState) -> dict:
             "language": str(insight.get("language") or ""),
             "agent_count": _safe_int(insight.get("agent_count"), 0),
             "exploration_depth": _safe_int(insight.get("exploration_depth"), 0),
+            "agent_mode": str(insight.get("agent_mode") or ""),
             "markdown": str(insight.get("markdown") or ""),
             "artifact": {
                 "markdown_path": str(artifact.get("markdown_path") or ""),

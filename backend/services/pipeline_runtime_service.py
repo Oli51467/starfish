@@ -538,6 +538,7 @@ class PipelineRuntimeService:
                 "language": str(insight.get("language") or ""),
                 "agent_count": int(insight.get("agent_count") or 0),
                 "exploration_depth": int(insight.get("exploration_depth") or 0),
+                "agent_mode": str(insight.get("agent_mode") or ""),
                 "markdown": str(insight.get("markdown") or ""),
                 "artifact": {
                     "markdown_path": str(artifact.get("markdown_path") or ""),
@@ -875,6 +876,9 @@ class PipelineRuntimeService:
                 base_depth = int(config.get("exploration_depth") or 2)
             except (TypeError, ValueError):
                 base_depth = 2
+            base_mode = str(config.get("agent_mode") or "orchestrated").strip().lower()
+            if base_mode not in {"legacy", "orchestrated"}:
+                base_mode = "orchestrated"
             if profile in {"budget", "lean", "fast"}:
                 config["agent_count"] = max(2, min(8, base_agent_count - 1))
                 config["exploration_depth"] = max(1, min(5, base_depth - 1))
@@ -884,6 +888,7 @@ class PipelineRuntimeService:
             else:
                 config["agent_count"] = max(2, min(8, base_agent_count))
                 config["exploration_depth"] = max(1, min(5, base_depth))
+            config["agent_mode"] = base_mode
             execution_state["insight_config"] = config
 
         return execution_state
@@ -1074,9 +1079,11 @@ class PipelineRuntimeService:
                 exploration_depth = int(config.get("exploration_depth") or 0)
             except (TypeError, ValueError):
                 exploration_depth = 0
+            agent_mode = str(config.get("agent_mode") or "").strip().lower()
             has_valid_config = (
                 2 <= agent_count <= 8
                 and 1 <= exploration_depth <= 5
+                and agent_mode in {"legacy", "orchestrated"}
             )
             score = 0.02
             if node_count > 0:
@@ -1386,6 +1393,9 @@ class PipelineRuntimeService:
                 depth = int(config.get("exploration_depth") or 0)
             except (TypeError, ValueError):
                 return _CriticVerdict(False, "探索参数解析失败。", "warning")
+            mode = str(config.get("agent_mode") or "").strip().lower()
+            if mode not in {"legacy", "orchestrated"}:
+                return _CriticVerdict(False, "探索模式参数非法。", "warning")
             if not (2 <= agent_count <= 8 and 1 <= depth <= 5):
                 return _CriticVerdict(False, "探索参数超出允许范围。", "warning")
             return _CriticVerdict(True, "探索参数确认完成。")
@@ -1396,6 +1406,9 @@ class PipelineRuntimeService:
                 return _CriticVerdict(False, "探索产物缺失。", "warning")
             markdown = str(insight.get("markdown") or "").strip()
             summary = str(insight.get("summary") or "").strip()
+            agent_mode = str(insight.get("agent_mode") or "").strip().lower()
+            if agent_mode not in {"legacy", "orchestrated"}:
+                return _CriticVerdict(False, "探索模式信息缺失。", "warning")
             min_length = 700 if strictness >= 1.05 else 420
             if len(markdown) < min_length:
                 return _CriticVerdict(False, "探索报告内容不足。", "warning")
@@ -1562,6 +1575,22 @@ class PipelineRuntimeService:
                 "chunk": str(chunk or ""),
                 "accumulated_chars": max(0, int(accumulated_chars or 0)),
                 "done": bool(done),
+            },
+        )
+
+    async def emit_insight_orchestrator_event(
+        self,
+        session_id: str,
+        *,
+        event: dict[str, Any],
+    ) -> None:
+        runtime = await self._require_runtime(session_id)
+        await self._publish_event(
+            runtime,
+            {
+                "type": "insight_orchestrator_event",
+                "node": "insight",
+                "event": dict(event or {}),
             },
         )
 

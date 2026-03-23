@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
@@ -147,8 +148,25 @@ async def resume_research(
     request: ResearchSessionResumeRequest,
     user: UserProfile = Depends(get_current_user_profile),
 ) -> ResearchSessionResumeResponse:
+    resume_feedback = str(request.feedback or "")
+    if (
+        request.agent_count is not None
+        or request.exploration_depth is not None
+        or request.agent_mode is not None
+    ):
+        payload: dict[str, object] = {}
+        if resume_feedback.strip():
+            payload["feedback"] = resume_feedback
+        if request.agent_count is not None:
+            payload["agent_count"] = int(request.agent_count)
+        if request.exploration_depth is not None:
+            payload["exploration_depth"] = int(request.exploration_depth)
+        if request.agent_mode is not None:
+            payload["agent_mode"] = str(request.agent_mode)
+        resume_feedback = json.dumps(payload, ensure_ascii=False)
+
     try:
-        resumed, status_text = await runtime_service.resume_session(session_id, user.id, request.feedback)
+        resumed, status_text = await runtime_service.resume_session(session_id, user.id, resume_feedback)
     except PipelineRuntimeError as exc:
         if str(exc) == "session_not_found":
             raise HTTPException(status_code=404, detail="session_not_found") from exc

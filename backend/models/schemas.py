@@ -115,6 +115,7 @@ PipelineEventType = Literal[
     "node_complete",
     "pause",
     "insight_stream",
+    "insight_orchestrator_event",
     "negotiation_round_started",
     "negotiation_bid_received",
     "negotiation_contract_awarded",
@@ -141,6 +142,9 @@ class PipelineStartResponse(BaseModel):
 
 class PipelineResumeRequest(BaseModel):
     feedback: str = ""
+    agent_count: int | None = Field(default=None, ge=2, le=8)
+    exploration_depth: int | None = Field(default=None, ge=1, le=5)
+    agent_mode: Literal["legacy", "orchestrated"] | None = None
 
 
 class PipelineResumeResponse(BaseModel):
@@ -177,6 +181,9 @@ class ResearchSessionStartResponse(BaseModel):
 
 class ResearchSessionResumeRequest(BaseModel):
     feedback: str = ""
+    agent_count: int | None = Field(default=None, ge=2, le=8)
+    exploration_depth: int | None = Field(default=None, ge=1, le=5)
+    agent_mode: Literal["legacy", "orchestrated"] | None = None
 
 
 class ResearchSessionResumeResponse(BaseModel):

@@ -8,10 +8,12 @@ from services.pipeline_runtime_service import get_pipeline_runtime_service
 
 _DEFAULT_AGENT_COUNT = 4
 _DEFAULT_EXPLORATION_DEPTH = 2
+_DEFAULT_AGENT_MODE = "orchestrated"
 _MIN_AGENT_COUNT = 2
 _MAX_AGENT_COUNT = 8
 _MIN_EXPLORATION_DEPTH = 1
 _MAX_EXPLORATION_DEPTH = 5
+_ALLOWED_AGENT_MODES = {"legacy", "orchestrated"}
 
 
 def _is_continue_feedback(feedback: str) -> bool:
@@ -70,7 +72,7 @@ def _clamp_int(value: object, *, default: int, min_value: int, max_value: int) -
     return max(min_value, min(max_value, parsed))
 
 
-def _resolve_insight_config(feedback: str, state: PipelineState) -> dict[str, int]:
+def _resolve_insight_config(feedback: str, state: PipelineState) -> dict[str, object]:
     baseline = state.get("insight_config") or {}
     payload: dict[str, object] = {}
     safe_feedback = str(feedback or "").strip()
@@ -81,6 +83,15 @@ def _resolve_insight_config(feedback: str, state: PipelineState) -> dict[str, in
                 payload = parsed
         except json.JSONDecodeError:
             payload = {}
+
+    raw_mode = str(
+        payload.get(
+            "agent_mode",
+            baseline.get("agent_mode", _DEFAULT_AGENT_MODE),
+        )
+        or _DEFAULT_AGENT_MODE
+    ).strip().lower()
+    agent_mode = raw_mode if raw_mode in _ALLOWED_AGENT_MODES else _DEFAULT_AGENT_MODE
 
     return {
         "agent_count": _clamp_int(
@@ -95,6 +106,7 @@ def _resolve_insight_config(feedback: str, state: PipelineState) -> dict[str, in
             min_value=_MIN_EXPLORATION_DEPTH,
             max_value=_MAX_EXPLORATION_DEPTH,
         ),
+        "agent_mode": agent_mode,
     }
 
 
@@ -120,7 +132,8 @@ async def human_checkpoint_2(state: PipelineState) -> PipelineState:
     config = _resolve_insight_config(feedback, state)
     summary = (
         "探索参数已确认："
-        f"{config['agent_count']} 个 Agents，探索深度 {config['exploration_depth']}。"
+        f"{config['agent_count']} 个 Agents，探索深度 {config['exploration_depth']}，"
+        f"模式 {config['agent_mode']}。"
     )
     await runtime.emit_thinking(session_id, node, summary)
     await runtime.emit_node_complete(session_id, node, 80, summary)

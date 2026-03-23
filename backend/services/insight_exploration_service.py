@@ -9,12 +9,30 @@ from pathlib import Path
 import re
 from typing import Any, Awaitable, Callable
 
+from core.settings import get_settings
 from core.llm_client import chat, is_configured
 from models.schemas import KnowledgeGraphRetrieveRequest
 from repositories.research_history_repository import (
     ResearchHistoryRepository,
     get_research_history_repository,
 )
+from services.insight_agent_contracts import (
+    AgentMemoryWriteRecord,
+    AgentProfile,
+    AgentTask,
+    AgentTaskResult,
+    AgentToolCallRecord,
+    InsightOrchestrationJournal,
+    SubAgentRequest,
+    default_memory_scopes,
+)
+from services.insight_orchestrator_service import (
+    InsightOrchestratorService,
+    OrchestratorLimits,
+)
+from services.insight_worker_pool import InsightWorkerPool, WorkerPoolConfig
+from services.insight_memory_service import InsightMemoryService
+from services.insight_tool_gateway import InsightToolGateway
 from services.graphrag_service import GraphRAGService, get_graphrag_service
 
 try:  # pragma: no cover - optional runtime dependency in some envs
@@ -35,12 +53,14 @@ StreamCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
 _DEFAULT_AGENT_COUNT = 4
 _DEFAULT_EXPLORATION_DEPTH = 2
+_DEFAULT_AGENT_MODE = "orchestrated"
 _MIN_AGENT_COUNT = 2
 _MAX_AGENT_COUNT = 8
 _MIN_EXPLORATION_DEPTH = 1
 _MAX_EXPLORATION_DEPTH = 5
 _MAX_EXPANSION_PAPERS = 24
 _MAX_EXPANSION_QUERIES_PER_ROUND = 2
+_ALLOWED_AGENT_MODES = {"legacy", "orchestrated"}
 
 
 @dataclass(frozen=True)
@@ -68,9 +88,28 @@ class InsightExplorationService:
         *,
         graph_service: GraphRAGService | None = None,
         history_repository: ResearchHistoryRepository | None = None,
+        orchestrator: InsightOrchestratorService | None = None,
     ) -> None:
+        self.settings = get_settings()
         self.graph_service = graph_service or get_graphrag_service()
         self.history_repository = history_repository or get_research_history_repository()
+        self.tool_gateway = InsightToolGateway()
+        if orchestrator is not None:
+            self.orchestrator = orchestrator
+        else:
+            self.orchestrator = InsightOrchestratorService(
+                limits=OrchestratorLimits(
+                    max_subagent_depth=max(0, int(self.settings.insight_max_subagent_depth)),
+                    max_subtasks_per_round=max(1, int(self.settings.insight_max_subtasks_per_round)),
+                    max_subtasks_per_parent=max(1, int(self.settings.insight_max_subtasks_per_parent)),
+                    max_batch_size=max(1, min(64, int(self.settings.insight_worker_count) * 2)),
+                ),
+                worker_pool=InsightWorkerPool(
+                    config=WorkerPoolConfig(
+                        worker_count=max(1, int(self.settings.insight_worker_count)),
+                    )
+                ),
+            )
         self.report_root = Path(__file__).resolve().parents[1] / "cache" / "reports"
 
     async def generate_report(
@@ -84,6 +123,7 @@ class InsightExplorationService:
         graph_payload: dict[str, Any] | None,
         agent_count: int,
         exploration_depth: int,
+        agent_mode: str | None = None,
         stream_callback: StreamCallback | None = None,
     ) -> dict[str, Any]:
         safe_session_id = str(session_id or "").strip()
@@ -105,9 +145,27 @@ class InsightExplorationService:
             min_value=_MIN_EXPLORATION_DEPTH,
             max_value=_MAX_EXPLORATION_DEPTH,
         )
+        resolved_mode = self._resolve_agent_mode(agent_mode)
         language = self._detect_language(safe_query)
         active_roles = list(self._ROLE_POOL[:resolved_agent_count])
         rounds = max(1, resolved_depth * 2)
+
+        if resolved_mode == "orchestrated":
+            return await self._generate_report_orchestrated(
+                session_id=safe_session_id,
+                user_id=safe_user_id,
+                query=safe_query,
+                input_type=safe_input_type,
+                normalized_papers=self._normalize_papers(papers),
+                graph_payload=graph_payload if isinstance(graph_payload, dict) else {},
+                agent_count=resolved_agent_count,
+                exploration_depth=resolved_depth,
+                language=language,
+                active_roles=active_roles,
+                rounds=rounds,
+                stream_callback=stream_callback,
+            )
+
         streamed_chars = 0
 
         async def emit_stream_chunk(chunk: str, *, done: bool = False) -> None:
@@ -244,6 +302,7 @@ class InsightExplorationService:
         )
         return {
             "language": language,
+            "agent_mode": resolved_mode,
             "markdown": markdown,
             "summary": summary,
             "artifact": artifact,
@@ -256,8 +315,544 @@ class InsightExplorationService:
                 "extension_paper_count": len(extension_papers),
                 "rounds": rounds,
                 "agent_count": len(active_roles),
+                "mode": resolved_mode,
             },
         }
+
+    def _resolve_agent_mode(self, agent_mode: str | None) -> str:
+        candidate = str(agent_mode or "").strip().lower()
+        if candidate in _ALLOWED_AGENT_MODES:
+            return candidate
+        configured = str(getattr(self.settings, "insight_agent_mode", _DEFAULT_AGENT_MODE) or "").strip().lower()
+        if configured in _ALLOWED_AGENT_MODES:
+            return configured
+        return _DEFAULT_AGENT_MODE
+
+    async def _generate_report_orchestrated(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        query: str,
+        input_type: str,
+        normalized_papers: list[dict[str, Any]],
+        graph_payload: dict[str, Any],
+        agent_count: int,
+        exploration_depth: int,
+        language: str,
+        active_roles: list[_RoleSpec],
+        rounds: int,
+        stream_callback: StreamCallback | None,
+    ) -> dict[str, Any]:
+        streamed_chars = 0
+
+        async def emit_stream_chunk(chunk: str, *, done: bool = False) -> None:
+            nonlocal streamed_chars
+            if stream_callback is None:
+                return
+            safe_chunk = str(chunk or "")
+            if safe_chunk:
+                streamed_chars += len(safe_chunk)
+            await stream_callback(
+                {
+                    "section": "insight_markdown",
+                    "chunk": safe_chunk,
+                    "accumulated_chars": streamed_chars,
+                    "done": bool(done),
+                }
+            )
+
+        graph_stats = self._extract_graph_stats(graph_payload or {})
+        history_memory = await asyncio.to_thread(self._load_history_memory, user_id)
+        extension_notes: list[str] = []
+        extension_papers: list[dict[str, Any]] = []
+
+        await emit_stream_chunk(
+            self._format_line(
+                language,
+                zh=(
+                    f"# 探索与洞察正在生成\n"
+                    f"- 查询：`{query}`\n"
+                    f"- 配置：{agent_count} Agents，探索深度 {exploration_depth}（orchestrated）\n"
+                ),
+                en=(
+                    f"# Exploration In Progress\n"
+                    f"- Query: `{query}`\n"
+                    f"- Setup: {agent_count} agents, depth {exploration_depth} (orchestrated)\n"
+                ),
+            )
+        )
+
+        profiles = self._build_agent_profiles(active_roles)
+        profiles_by_id = {item.profile_id: item for item in profiles}
+        role_by_profile_id = {item.role_id: role for role, item in zip(active_roles, profiles)}
+        journal = InsightOrchestrationJournal(run_id=f"insight-{session_id}")
+        memory_service = InsightMemoryService()
+        memory_service.initialize_run(run_id=journal.run_id, history_memory=history_memory)
+        session_memory = memory_service.build_session_view(run_id=journal.run_id)
+        round_task_totals: list[int] = []
+        round_spawn_totals: list[int] = []
+
+        async def on_orchestrator_event(event: dict[str, Any]) -> None:
+            safe_event = dict(event)
+            journal.events.append(safe_event)
+            if stream_callback is not None:
+                await stream_callback(
+                    {
+                        "section": "insight_orchestrator_event",
+                        "event": safe_event,
+                        "chunk": "",
+                        "accumulated_chars": streamed_chars,
+                        "done": False,
+                    }
+                )
+
+        for round_index in range(1, rounds + 1):
+            expansion_queries = self._build_round_expansion_queries(
+                base_query=query,
+                round_index=round_index,
+                papers=normalized_papers + extension_papers,
+            )
+            expansion_queries = expansion_queries[:_MAX_EXPANSION_QUERIES_PER_ROUND]
+            if expansion_queries and len(extension_papers) < _MAX_EXPANSION_PAPERS:
+                retrieved = await self._retrieve_extension_papers(
+                    query_list=expansion_queries,
+                    input_type=input_type,
+                    remaining=max(1, _MAX_EXPANSION_PAPERS - len(extension_papers)),
+                )
+                if retrieved:
+                    extension_papers = self._merge_papers(extension_papers, retrieved, limit=_MAX_EXPANSION_PAPERS)
+                    extension_notes.append(
+                        self._format_line(
+                            language,
+                            zh=f"第 {round_index} 轮扩展检索：新增 {len(retrieved)} 篇候选论文（累计 {len(extension_papers)}）。",
+                            en=f"Round {round_index} expansion retrieved {len(retrieved)} papers ({len(extension_papers)} total).",
+                        )
+                    )
+
+            base_context = {
+                "graph_stats": dict(graph_stats),
+                "history_memory": history_memory[:3],
+                "extension_paper_count": len(extension_papers),
+                "base_paper_count": len(normalized_papers),
+            }
+            base_tasks = self.orchestrator.plan_round_tasks(
+                run_id=journal.run_id,
+                round_index=round_index,
+                profiles=profiles,
+                query=query,
+                language=language,
+                input_type=input_type,
+                objective=self._format_line(
+                    language,
+                    zh="总结领域进展并提出可执行创新方向。",
+                    en="Summarize field progress and propose executable innovation paths.",
+                ),
+                shared_context=base_context,
+            )
+
+            round_result = await self.orchestrator.execute_round(
+                round_index=round_index,
+                base_tasks=base_tasks,
+                profiles_by_id=profiles_by_id,
+                executor=lambda task, worker_id: self._execute_orchestrated_task(
+                    task=task,
+                    worker_id=worker_id,
+                    profiles_by_id=profiles_by_id,
+                    role_by_profile_id=role_by_profile_id,
+                    language=language,
+                    query=query,
+                    papers=normalized_papers,
+                    extension_papers=extension_papers,
+                    graph_stats=graph_stats,
+                    history_memory=history_memory,
+                    memory_service=memory_service,
+                ),
+                event_callback=on_orchestrator_event,
+            )
+            journal.rounds.append(round_result)
+            round_task_totals.append(int(round_result.total_task_count))
+            round_spawn_totals.append(int(round_result.spawned_task_count))
+
+            role_outputs: list[str] = []
+            for result in round_result.results:
+                memory_service.write_many(run_id=journal.run_id, records=list(result.memory_writes or []))
+                self._apply_memory_writes(session_memory=session_memory, result=result)
+                output = str(result.output or "").strip()
+                if output:
+                    role_outputs.append(output)
+            session_memory = memory_service.build_session_view(run_id=journal.run_id)
+
+            await emit_stream_chunk(
+                self._format_line(
+                    language,
+                    zh=(
+                        f"\n### 轮次 {round_index} 进展\n"
+                        f"- 活跃 Agents：{len(active_roles)}\n"
+                        f"- 当前证据池：基础 {len(normalized_papers)} + 扩展 {len(extension_papers)}\n"
+                        f"- 执行任务数：{round_result.total_task_count}（子代理扩展 {round_result.spawned_task_count}）\n"
+                        f"- 新增洞察片段：{max(0, len(role_outputs))}\n"
+                    ),
+                    en=(
+                        f"\n### Round {round_index} Progress\n"
+                        f"- Active agents: {len(active_roles)}\n"
+                        f"- Evidence pool: base {len(normalized_papers)} + expansion {len(extension_papers)}\n"
+                        f"- Executed tasks: {round_result.total_task_count} (spawned {round_result.spawned_task_count})\n"
+                        f"- New insight snippets: {max(0, len(role_outputs))}\n"
+                    ),
+                )
+            )
+
+        markdown = await self._compose_markdown(
+            language=language,
+            query=query,
+            input_type=input_type,
+            base_papers=normalized_papers,
+            extension_papers=extension_papers,
+            graph_stats=graph_stats,
+            history_memory=history_memory,
+            session_memory=session_memory,
+            active_roles=active_roles,
+            rounds=rounds,
+            extension_notes=extension_notes,
+        )
+        if stream_callback is not None:
+            await self._stream_markdown(
+                markdown=markdown,
+                callback=stream_callback,
+                section="insight_markdown",
+                start_accumulated=streamed_chars,
+            )
+
+        artifact = await asyncio.to_thread(
+            self._persist_artifacts,
+            session_id=session_id,
+            markdown=markdown,
+            language=language,
+        )
+        summary = self._build_summary(
+            language=language,
+            extension_count=len(extension_papers),
+            role_count=len(active_roles),
+            rounds=rounds,
+            base_papers=len(normalized_papers),
+        )
+        return {
+            "language": language,
+            "agent_mode": "orchestrated",
+            "markdown": markdown,
+            "summary": summary,
+            "artifact": artifact,
+            "memory": {
+                "history": history_memory,
+                "session": session_memory,
+                "scoped": memory_service.snapshot(run_id=journal.run_id),
+            },
+            "stats": {
+                "base_paper_count": len(normalized_papers),
+                "extension_paper_count": len(extension_papers),
+                "rounds": rounds,
+                "agent_count": len(active_roles),
+                "mode": "orchestrated",
+                "orchestration_round_task_counts": round_task_totals,
+                "orchestration_round_spawn_counts": round_spawn_totals,
+                "orchestration_event_count": len(journal.events),
+            },
+        }
+
+    def _build_agent_profiles(self, active_roles: list[_RoleSpec]) -> list[AgentProfile]:
+        profiles: list[AgentProfile] = []
+        for role in active_roles:
+            profiles.append(
+                AgentProfile(
+                    profile_id=role.role_id,
+                    role_id=role.role_id,
+                    display_name_zh=role.title_zh,
+                    display_name_en=role.title_en,
+                    skills=self._resolve_role_skills(role.role_id),
+                    allowed_tools=self._resolve_role_tools(role.role_id),
+                    memory_scopes=default_memory_scopes(include_history=True),
+                    max_subagents=max(1, int(self.orchestrator.limits.max_subtasks_per_parent)),
+                )
+            )
+        return profiles
+
+    @staticmethod
+    def _resolve_role_skills(role_id: str) -> tuple[str, ...]:
+        mapping: dict[str, tuple[str, ...]] = {
+            "state_analyst": ("trend_analysis", "evidence_synthesis"),
+            "relation_analyst": ("citation_graph_reasoning", "cluster_mapping"),
+            "innovation_architect": ("architecture_design", "constraint_tradeoff"),
+            "application_designer": ("scenario_design", "value_hypothesis"),
+            "evidence_scout": ("expansion_retrieval", "evidence_validation"),
+            "feasibility_critic": ("execution_planning", "milestone_estimation"),
+            "risk_skeptic": ("risk_modeling", "assumption_audit"),
+            "synthesis_editor": ("multi_view_synthesis", "report_composition"),
+        }
+        return mapping.get(str(role_id or "").strip(), ("general_analysis",))
+
+    @staticmethod
+    def _resolve_role_tools(role_id: str) -> tuple[str, ...]:
+        mapping: dict[str, tuple[str, ...]] = {
+            "state_analyst": ("graph_stats", "history_memory", "llm"),
+            "relation_analyst": ("graph_stats", "paper_catalog", "llm"),
+            "innovation_architect": ("paper_catalog", "history_memory", "llm"),
+            "application_designer": ("paper_catalog", "llm"),
+            "evidence_scout": ("expansion_retrieval", "paper_catalog", "llm"),
+            "feasibility_critic": ("history_memory", "paper_catalog", "llm"),
+            "risk_skeptic": ("history_memory", "paper_catalog", "llm"),
+            "synthesis_editor": ("paper_catalog", "graph_stats", "llm"),
+        }
+        return mapping.get(str(role_id or "").strip(), ("llm",))
+
+    async def _execute_orchestrated_task(
+        self,
+        *,
+        task: AgentTask,
+        worker_id: str,
+        profiles_by_id: dict[str, AgentProfile],
+        role_by_profile_id: dict[str, _RoleSpec],
+        language: str,
+        query: str,
+        papers: list[dict[str, Any]],
+        extension_papers: list[dict[str, Any]],
+        graph_stats: dict[str, int],
+        history_memory: list[str],
+        memory_service: InsightMemoryService,
+    ) -> AgentTaskResult:
+        role = role_by_profile_id.get(task.profile_id)
+        profile = profiles_by_id.get(task.profile_id)
+        if profile is None:
+            return AgentTaskResult(
+                task_id=task.task_id,
+                profile_id=task.profile_id,
+                role_id=task.role_id,
+                status="failed",
+                output="",
+                extra={"error": "unknown_profile_registration"},
+            )
+        if role is None:
+            return AgentTaskResult(
+                task_id=task.task_id,
+                profile_id=task.profile_id,
+                role_id=task.role_id,
+                status="failed",
+                output="",
+                extra={"error": "unknown_profile"},
+            )
+
+        tool_context = {
+            "graph_stats": graph_stats,
+            "papers": papers + extension_papers,
+            "history_memory": history_memory,
+            "extension_papers": extension_papers,
+            "llm_enabled": is_configured(),
+            "query": query,
+            "input_type": task.input_type,
+            "worker_id": worker_id,
+            "depth": task.depth,
+            "context": dict(task.context or {}),
+        }
+        tool_calls: list[AgentToolCallRecord] = []
+        for tool_name in profile.allowed_tools:
+            payload, record = self.tool_gateway.invoke(
+                task_id=task.task_id,
+                profile=profile,
+                tool_name=tool_name,
+                context=tool_context,
+            )
+            tool_calls.append(record)
+            if payload is None:
+                continue
+            tool_context[f"tool::{tool_name}"] = payload
+
+        llm_enabled = any(
+            record.tool_name == "llm" and record.status == "ok"
+            for record in tool_calls
+        )
+        session_memory = memory_service.clone_session_view(run_id=task.run_id)
+        agent_private = memory_service.read_agent(
+            run_id=task.run_id,
+            profile_id=task.profile_id,
+            key="private_notes",
+            limit=4,
+        )
+        effective_objective = str(task.objective or "").strip()
+        if agent_private:
+            effective_objective = (
+                f"{effective_objective}\n"
+                f"Private memory: {agent_private}"
+            ).strip()
+
+        try:
+            output = await self._run_single_role(
+                round_index=task.round_index,
+                role=role,
+                language=language,
+                query=query,
+                papers=papers,
+                extension_papers=extension_papers,
+                graph_stats=graph_stats,
+                history_memory=history_memory,
+                session_memory=session_memory,
+                objective=effective_objective,
+                allow_llm=llm_enabled,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return AgentTaskResult(
+                task_id=task.task_id,
+                profile_id=task.profile_id,
+                role_id=task.role_id,
+                status="failed",
+                output="",
+                tool_calls=tool_calls,
+                extra={"error": str(exc)},
+            )
+
+        memory_writes = self._build_memory_writes_for_output(
+            task=task,
+            role=role,
+            output=output,
+        )
+        subagent_requests = self._build_subagent_requests(
+            task=task,
+            role=role,
+            output=output,
+            role_by_profile_id=role_by_profile_id,
+        )
+        return AgentTaskResult(
+            task_id=task.task_id,
+            profile_id=task.profile_id,
+            role_id=task.role_id,
+            status="completed",
+            output=output,
+            tool_calls=tool_calls,
+            memory_writes=memory_writes,
+            subagent_requests=subagent_requests,
+            extra={
+                "role_id": role.role_id,
+                "depth": task.depth,
+                "parent_task_id": task.parent_task_id,
+                "worker_id": worker_id,
+            },
+        )
+
+    def _build_memory_writes_for_output(
+        self,
+        *,
+        task: AgentTask,
+        role: _RoleSpec,
+        output: str,
+    ) -> list[AgentMemoryWriteRecord]:
+        safe_output = str(output or "").strip()
+        if not safe_output:
+            return []
+        writes: list[AgentMemoryWriteRecord] = [
+            AgentMemoryWriteRecord(
+                task_id=task.task_id,
+                profile_id=task.profile_id,
+                scope="session_shared",
+                key="evidence",
+                value=safe_output[:200],
+            ),
+            AgentMemoryWriteRecord(
+                task_id=task.task_id,
+                profile_id=task.profile_id,
+                scope="session_shared",
+                key="decisions",
+                value=safe_output,
+            ),
+            AgentMemoryWriteRecord(
+                task_id=task.task_id,
+                profile_id=task.profile_id,
+                scope="agent_private",
+                key="private_notes",
+                value=safe_output[:300],
+            ),
+        ]
+        if role.role_id in {"innovation_architect", "application_designer"}:
+            writes.append(
+                AgentMemoryWriteRecord(
+                    task_id=task.task_id,
+                    profile_id=task.profile_id,
+                    scope="session_shared",
+                    key="hypotheses",
+                    value=safe_output,
+                )
+            )
+        if role.role_id in {"risk_skeptic", "feasibility_critic"}:
+            writes.append(
+                AgentMemoryWriteRecord(
+                    task_id=task.task_id,
+                    profile_id=task.profile_id,
+                    scope="session_shared",
+                    key="critic_notes",
+                    value=safe_output,
+                )
+            )
+        return writes
+
+    def _build_subagent_requests(
+        self,
+        *,
+        task: AgentTask,
+        role: _RoleSpec,
+        output: str,
+        role_by_profile_id: dict[str, _RoleSpec],
+    ) -> list[SubAgentRequest]:
+        if task.depth >= int(self.orchestrator.limits.max_subagent_depth):
+            return []
+        focus = str(output or "").strip()[:180]
+        if not focus:
+            return []
+        role_targets: dict[str, str] = {
+            "innovation_architect": "evidence_scout",
+            "application_designer": "evidence_scout",
+            "relation_analyst": "risk_skeptic",
+            "state_analyst": "feasibility_critic",
+            "feasibility_critic": "synthesis_editor",
+        }
+        target_role_id = role_targets.get(role.role_id, "")
+        if not target_role_id:
+            return []
+        target_profile_id = next(
+            (profile_id for profile_id, spec in role_by_profile_id.items() if spec.role_id == target_role_id),
+            "",
+        )
+        if not target_profile_id:
+            return []
+        return [
+            SubAgentRequest(
+                objective=self._format_line(
+                    task.language,
+                    zh=f"围绕以下线索做补充分析并给出可执行建议：{focus}",
+                    en=f"Expand this clue with executable recommendations: {focus}",
+                ),
+                profile_id=target_profile_id,
+                role_id=target_role_id,
+                context_patch={
+                    "parent_role_id": role.role_id,
+                    "parent_task_id": task.task_id,
+                },
+            )
+        ]
+
+    @staticmethod
+    def _apply_memory_writes(
+        *,
+        session_memory: dict[str, list[str]],
+        result: AgentTaskResult,
+    ) -> None:
+        for write in list(result.memory_writes or []):
+            if write.scope != "session_shared":
+                continue
+            key = str(write.key or "").strip()
+            if key not in session_memory:
+                continue
+            value = str(write.value or "").strip()
+            if not value:
+                continue
+            session_memory[key].append(value)
 
     @staticmethod
     def _clamp_int(value: object, *, default: int, min_value: int, max_value: int) -> int:
@@ -475,8 +1070,10 @@ class InsightExplorationService:
         graph_stats: dict[str, int],
         history_memory: list[str],
         session_memory: dict[str, list[str]],
+        objective: str | None = None,
+        allow_llm: bool = True,
     ) -> str:
-        if not is_configured():
+        if (not allow_llm) or (not is_configured()):
             return self._fallback_role_output(
                 round_index=round_index,
                 role=role,
@@ -497,6 +1094,7 @@ class InsightExplorationService:
             graph_stats=graph_stats,
             history_memory=history_memory,
             session_memory=session_memory,
+            objective=objective,
         )
         try:
             response = await asyncio.wait_for(
@@ -547,6 +1145,7 @@ class InsightExplorationService:
         graph_stats: dict[str, int],
         history_memory: list[str],
         session_memory: dict[str, list[str]],
+        objective: str | None = None,
     ) -> str:
         top_papers = self._top_papers_for_prompt(papers + extension_papers, limit=6)
         role_name = role.title_zh if language == "zh" else role.title_en
@@ -555,6 +1154,7 @@ class InsightExplorationService:
             "round": round_index,
             "role": role_name,
             "focus": role.focus,
+            "objective": str(objective or "").strip(),
             "graph_stats": graph_stats,
             "top_papers": top_papers,
             "history_memory": history_memory[:2],
