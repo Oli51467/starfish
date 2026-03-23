@@ -1568,14 +1568,7 @@ export function usePaperWorkflow({
       }, 1200);
     };
 
-    let feedback = '';
-    if (feedbackPayload) {
-      try {
-        feedback = JSON.stringify(feedbackPayload);
-      } catch {
-        feedback = '';
-      }
-    }
+    const feedback = feedbackPayload || '';
 
     try {
       const result = await resumeResearchSession(
@@ -1974,6 +1967,61 @@ export function usePaperWorkflow({
     });
   }
 
+  function handleInsightOrchestratorEvent(event = {}) {
+    const payload = event?.event && typeof event.event === 'object' ? event.event : {};
+    const eventType = String(payload?.type || '').trim().toLowerCase();
+    if (!eventType) return;
+
+    if (eventType === 'insight_orchestrator_task_started') {
+      const roleId = String(payload?.role_id || '').trim() || 'agent';
+      const workerId = String(payload?.worker_id || '').trim() || '-';
+      appendStepLog('insight', {
+        title: 'Insight Orchestrator',
+        detail: `任务启动：${roleId}（worker: ${workerId}）`,
+        status: 'doing'
+      });
+      return;
+    }
+
+    if (eventType === 'insight_orchestrator_task_finished') {
+      const roleId = String(payload?.role_id || '').trim() || 'agent';
+      const status = String(payload?.status || '').trim().toLowerCase() || 'completed';
+      appendStepLog('insight', {
+        title: 'Insight Orchestrator',
+        detail: `任务完成：${roleId}（状态：${status}）`,
+        status: status === 'completed' ? 'done' : 'fallback'
+      });
+      return;
+    }
+
+    if (eventType === 'round_started') {
+      const round = Number(payload?.round_index);
+      const plannedTasks = Number(payload?.planned_tasks);
+      const roundText = Number.isFinite(round) ? `第 ${Math.max(1, Math.round(round))} 轮` : '新一轮';
+      const taskText = Number.isFinite(plannedTasks) ? `，计划任务 ${Math.max(0, Math.round(plannedTasks))} 个` : '';
+      appendStepLog('insight', {
+        title: 'Insight Orchestrator',
+        detail: `${roundText}开始${taskText}。`,
+        status: 'pending'
+      });
+      return;
+    }
+
+    if (eventType === 'round_completed') {
+      const round = Number(payload?.round_index);
+      const completedTasks = Number(payload?.completed_tasks);
+      const spawnedTasks = Number(payload?.spawned_tasks);
+      const roundText = Number.isFinite(round) ? `第 ${Math.max(1, Math.round(round))} 轮` : '当前轮次';
+      const completedText = Number.isFinite(completedTasks) ? `完成 ${Math.max(0, Math.round(completedTasks))}` : '完成 -';
+      const spawnedText = Number.isFinite(spawnedTasks) ? `，子代理扩展 ${Math.max(0, Math.round(spawnedTasks))}` : '';
+      appendStepLog('insight', {
+        title: 'Insight Orchestrator',
+        detail: `${roundText}结束：${completedText}${spawnedText}。`,
+        status: 'done'
+      });
+    }
+  }
+
   async function refreshRuntimeSnapshot({ finalize = false } = {}) {
     const sessionId = String(researchSessionId.value || '').trim();
     if (!sessionId) return null;
@@ -2160,6 +2208,10 @@ export function usePaperWorkflow({
     }
     if (type === 'insight_stream') {
       handleInsightStream(event);
+      return;
+    }
+    if (type === 'insight_orchestrator_event') {
+      handleInsightOrchestratorEvent(event);
       return;
     }
     if (type === 'pause') {

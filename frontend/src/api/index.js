@@ -269,10 +269,19 @@ export function getActiveResearchSession({ accessToken = '' } = {}) {
 }
 
 export function resumeResearchSession(sessionId, feedback = '', { accessToken = '' } = {}) {
+  let payload;
+  if (feedback && typeof feedback === 'object' && !Array.isArray(feedback)) {
+    payload = { ...feedback };
+    if (!Object.prototype.hasOwnProperty.call(payload, 'feedback')) {
+      payload.feedback = '';
+    }
+  } else {
+    payload = { feedback: String(feedback || '') };
+  }
   return request(`/api/research/resume/${encodeURIComponent(sessionId)}`, {
     method: 'POST',
     headers: buildAuthHeaders(accessToken, { 'Content-Type': 'application/json' }),
-    body: JSON.stringify({ feedback: String(feedback || '') })
+    body: JSON.stringify(payload)
   });
 }
 
