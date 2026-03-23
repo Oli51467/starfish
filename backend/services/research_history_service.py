@@ -130,15 +130,20 @@ class ResearchHistoryService:
         graph_payload: dict[str, Any] = {}
         landscape_graph: dict[str, Any] | None = None
         lineage_graph: dict[str, Any] | None = None
+        pipeline_payload: dict[str, Any] | None = None
 
         if isinstance(raw_graph_payload, dict) and isinstance(raw_graph_payload.get("graph"), dict):
             graph_payload = raw_graph_payload.get("graph") or {}
             if isinstance(raw_graph_payload.get("landscape_graph"), dict):
                 landscape_graph = raw_graph_payload.get("landscape_graph")
+            if isinstance(raw_graph_payload.get("pipeline"), dict):
+                pipeline_payload = raw_graph_payload.get("pipeline")
         elif isinstance(raw_graph_payload, dict):
             graph_payload = raw_graph_payload
             if normalized_research_type == "domain" and self._looks_like_landscape_graph(raw_graph_payload):
                 landscape_graph = raw_graph_payload
+            if isinstance(raw_graph_payload.get("pipeline"), dict):
+                pipeline_payload = raw_graph_payload.get("pipeline")
 
         graph = KnowledgeGraphResponse.model_validate(graph_payload or {})
         if normalized_research_type == "domain" and landscape_graph is None:
@@ -162,6 +167,7 @@ class ResearchHistoryService:
             graph=graph,
             landscape_graph=landscape_graph,
             lineage_graph=lineage_graph,
+            pipeline=pipeline_payload,
         )
 
     def record_lineage_status(

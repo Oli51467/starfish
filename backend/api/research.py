@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi.responses import FileResponse
 
 from api.dependencies import get_current_user_profile
 from models.schemas import (
@@ -35,6 +38,7 @@ def _to_state_response(snapshot: dict) -> ResearchSessionStateResponse:
     state = snapshot.get("state") or {}
     graph_payload = state.get("graph_payload") if isinstance(state.get("graph_payload"), dict) else None
     report = state.get("final_report") or state.get("report_draft")
+    insight_payload = state.get("insight") if isinstance(state.get("insight"), dict) else None
 
     return ResearchSessionStateResponse(
         session_id=str(snapshot.get("session_id") or ""),
@@ -57,6 +61,7 @@ def _to_state_response(snapshot: dict) -> ResearchSessionStateResponse:
         lineage=None,
         report=str(report) if report is not None else None,
         report_id=str(state.get("report_id") or "").strip() or None,
+        insight=insight_payload,
         history_id=str(state.get("history_id") or "").strip() or None,
         research_gaps=[
             item for item in (state.get("research_gaps") or [])
@@ -67,6 +72,23 @@ def _to_state_response(snapshot: dict) -> ResearchSessionStateResponse:
         errors=[str(item) for item in (state.get("errors") or []) if str(item).strip()],
         messages=[str(item) for item in (state.get("messages") or []) if str(item).strip()],
     )
+
+
+def _resolve_insight_artifact_path(snapshot: dict, *, artifact_key: str) -> Path | None:
+    state = snapshot.get("state") or {}
+    insight = state.get("insight")
+    if not isinstance(insight, dict):
+        return None
+    artifact = insight.get("artifact")
+    if not isinstance(artifact, dict):
+        return None
+    raw_path = str(artifact.get(artifact_key) or "").strip()
+    if not raw_path:
+        return None
+    path = Path(raw_path)
+    if not path.exists() or not path.is_file():
+        return None
+    return path
 
 
 def _to_active_session_summary(snapshot: dict) -> ResearchActiveSessionSummary:
@@ -166,6 +188,56 @@ async def get_research_session(
             raise HTTPException(status_code=403, detail="forbidden") from exc
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _to_state_response(snapshot)
+
+
+@router.get("/report/{session_id}/markdown")
+async def download_research_report_markdown(
+    session_id: str,
+    user: UserProfile = Depends(get_current_user_profile),
+) -> FileResponse:
+    try:
+        snapshot = await runtime_service.get_session_snapshot(session_id, user.id)
+    except PipelineRuntimeError as exc:
+        if str(exc) == "session_not_found":
+            raise HTTPException(status_code=404, detail="session_not_found") from exc
+        if str(exc) == "forbidden":
+            raise HTTPException(status_code=403, detail="forbidden") from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    path = _resolve_insight_artifact_path(snapshot, artifact_key="markdown_path")
+    if path is None:
+        raise HTTPException(status_code=404, detail="insight_markdown_not_ready")
+
+    return FileResponse(
+        path=str(path),
+        media_type="text/markdown; charset=utf-8",
+        filename=f"{session_id}-insight.md",
+    )
+
+
+@router.get("/report/{session_id}/pdf")
+async def download_research_report_pdf(
+    session_id: str,
+    user: UserProfile = Depends(get_current_user_profile),
+) -> FileResponse:
+    try:
+        snapshot = await runtime_service.get_session_snapshot(session_id, user.id)
+    except PipelineRuntimeError as exc:
+        if str(exc) == "session_not_found":
+            raise HTTPException(status_code=404, detail="session_not_found") from exc
+        if str(exc) == "forbidden":
+            raise HTTPException(status_code=403, detail="forbidden") from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    path = _resolve_insight_artifact_path(snapshot, artifact_key="pdf_path")
+    if path is None:
+        raise HTTPException(status_code=404, detail="insight_pdf_not_ready")
+
+    return FileResponse(
+        path=str(path),
+        media_type="application/pdf",
+        filename=f"{session_id}-insight.pdf",
+    )
 
 
 @router.websocket("/ws/{session_id}")

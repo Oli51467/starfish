@@ -3,6 +3,7 @@ import { computed, onUnmounted, ref } from 'vue';
 import {
   buildKnowledgeGraph,
   createResearchWebSocket,
+  downloadResearchReport,
   getKnowledgeGraph,
   getResearchSession,
   retrieveKnowledgePapers,
@@ -11,6 +12,7 @@ import {
   stopResearchSession,
 } from '../api';
 import { buildKnowledgeGraphSets } from '../components/graph/knowledgeGraphModel';
+import { useGlobalInputDialog } from './useGlobalInputDialog';
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -317,7 +319,9 @@ const RESEARCH_NODE_LABEL = {
   router: 'Router Agent',
   search: 'Retriever Agent',
   graph_build: 'Graph Builder Agent',
-  checkpoint_1: 'Human Checkpoint'
+  checkpoint_1: 'Human Checkpoint',
+  checkpoint_2: 'Insight Checkpoint',
+  insight: 'Insight Agent'
 };
 
 const NEGOTIATION_PROFILE_LABEL = {
@@ -330,15 +334,24 @@ const NEGOTIATION_PROFILE_LABEL = {
   guarded: '稳健策略',
   quickpass: '快速确认',
   lean: '轻量策略',
-  stable: '稳定策略'
+  stable: '稳定策略',
+  breadth: '广覆盖策略'
 };
 
-const STEP_FLOW_ORDER = ['retrieve', 'checkpoint', 'graph'];
+const STEP_FLOW_ORDER = ['retrieve', 'checkpoint', 'graph', 'insight'];
 const STEP_FINAL_NODE = {
   retrieve: 'search',
   checkpoint: 'checkpoint_1',
-  graph: 'graph_build'
+  graph: 'graph_build',
+  insight: 'insight'
 };
+
+const INSIGHT_AGENT_COUNT_DEFAULT = 4;
+const INSIGHT_DEPTH_DEFAULT = 2;
+const INSIGHT_AGENT_COUNT_MIN = 2;
+const INSIGHT_AGENT_COUNT_MAX = 8;
+const INSIGHT_DEPTH_MIN = 1;
+const INSIGHT_DEPTH_MAX = 5;
 
 const ACTIVE_RESEARCH_SESSION_STORAGE_KEY = 'starfish:active-research-session';
 const COMPLETED_WORKFLOW_SNAPSHOT_STORAGE_KEY = 'starfish:workflow-completed-snapshot';
@@ -467,7 +480,8 @@ function createNegotiationStateByStep() {
   return {
     retrieve: createNegotiationStepState(),
     checkpoint: createNegotiationStepState(),
-    graph: createNegotiationStepState()
+    graph: createNegotiationStepState(),
+    insight: createNegotiationStepState()
   };
 }
 
@@ -476,6 +490,7 @@ function resolveStepKeyByNode(rawNode) {
   if (!node) return 'retrieve';
   if (node === 'planner' || node === 'router' || node === 'search') return 'retrieve';
   if (node === 'checkpoint_1') return 'checkpoint';
+  if (node === 'checkpoint_2' || node === 'insight') return 'insight';
   if (node === 'graph_build' || node === 'synthesizer' || node === 'report' || node === 'save') return 'graph';
   return 'retrieve';
 }
@@ -484,6 +499,7 @@ function resolveStepKeyByTaskKind(rawTaskKind) {
   const taskKind = String(rawTaskKind || '').trim().toLowerCase();
   if (!taskKind) return 'retrieve';
   if (taskKind === 'checkpoint_1') return 'checkpoint';
+  if (taskKind === 'checkpoint_2' || taskKind === 'insight') return 'insight';
   if (taskKind === 'graph_build') return 'graph';
   if (taskKind === 'planner' || taskKind === 'router' || taskKind === 'search') return 'retrieve';
   return 'retrieve';
@@ -542,6 +558,7 @@ export function usePaperWorkflow({
   onStepChange
 }) {
   const notifyStepChange = typeof onStepChange === 'function' ? onStepChange : () => {};
+  const { askForInput } = useGlobalInputDialog();
 
   const steps = ref([
     {
@@ -571,12 +588,29 @@ export function usePaperWorkflow({
       status: 'pending',
       message: '',
       logs: []
+    },
+    {
+      index: 4,
+      key: 'insight',
+      title: '探索与洞察',
+      description: '多智能体自主探索并生成可执行洞察报告。',
+      status: 'pending',
+      message: '',
+      logs: [],
+      action: null
     }
   ]);
 
   const graphLoading = ref(false);
   const terminatingWorkflow = ref(false);
   const graphData = ref(null);
+  const insightReportMarkdown = ref('');
+  const insightReportLanguage = ref('zh');
+  const insightReportReady = ref(false);
+  const insightReportStreaming = ref(false);
+  const insightStreamAccumulatedChars = ref(0);
+  const insightMarkdownDownloadLoading = ref(false);
+  const insightPdfDownloadLoading = ref(false);
   const errorMessage = ref('');
   const researchSessionId = ref('');
   const unifiedRuntimeActive = ref(false);
@@ -597,6 +631,10 @@ export function usePaperWorkflow({
       edgeCount: stats.edgeCount,
       directionCount: 0
     };
+  });
+
+  const hasInsightReport = computed(() => {
+    return Boolean(String(insightReportMarkdown.value || '').trim());
   });
 
   const activeStep = computed(() => {
@@ -643,7 +681,12 @@ export function usePaperWorkflow({
     const current = activeStep.value;
     if (!current) return '等待下一步执行。';
     const status = String(current.status || '').toLowerCase();
-    if (status === 'action_required') return '确认后将继续生成知识图谱。';
+    if (status === 'action_required') {
+      if (String(current.key || '').trim() === 'insight') {
+        return '配置探索参数后将启动探索与洞察。';
+      }
+      return '确认后将继续生成知识图谱。';
+    }
 
     const currentIndex = steps.value.findIndex((item) => item.index === current.index);
     for (let index = currentIndex + 1; index < steps.value.length; index += 1) {
@@ -688,12 +731,14 @@ export function usePaperWorkflow({
     const defaultTitleByKey = {
       retrieve: 'Retriever Agent',
       checkpoint: 'Coordinator Agent',
-      graph: 'Graph Builder Agent'
+      graph: 'Graph Builder Agent',
+      insight: 'Insight Agent'
     };
     const defaultDetailByKey = {
       retrieve: '论文检索已完成。',
       checkpoint: '需求确认已完成。',
-      graph: '知识图谱生成已完成。'
+      graph: '知识图谱生成已完成。',
+      insight: '探索与洞察已完成。'
     };
     return {
       title: defaultTitleByKey[key] || 'Coordinator Agent',
@@ -967,6 +1012,8 @@ export function usePaperWorkflow({
     else if (agentId.includes('search')) base = 'Retriever Agent';
     else if (agentId.includes('graph')) base = 'Graph Builder Agent';
     else if (agentId.includes('checkpoint_1')) base = 'Human Checkpoint';
+    else if (agentId.includes('checkpoint_2')) base = 'Insight Checkpoint';
+    else if (agentId.includes('insight')) base = 'Insight Agent';
     const profileLabel = NEGOTIATION_PROFILE_LABEL[profile] || NEGOTIATION_PROFILE_LABEL[agentId.split('_').at(-1)] || '';
     if (!profileLabel) return base;
     return `${base} · ${profileLabel}`;
@@ -1116,7 +1163,10 @@ export function usePaperWorkflow({
     if (!sessionId) return;
     const snapshotProgress = Number(snapshot?.progress);
     const doneCount = steps.value.filter((item) => item.status === 'done').length;
-    const fallbackProgress = Math.max(0, Math.min(100, doneCount * 33));
+    const fallbackProgress = Math.max(
+      0,
+      Math.min(100, Math.round((doneCount / Math.max(1, steps.value.length)) * 100))
+    );
 
     persistActiveResearchSessionRecord({
       session_id: sessionId,
@@ -1203,6 +1253,21 @@ export function usePaperWorkflow({
   }
 
   function hydrateRuntimeArtifacts(snapshot = {}) {
+    if (snapshot?.insight && typeof snapshot.insight === 'object') {
+      const insightPayload = snapshot.insight;
+      const markdown = String(insightPayload?.markdown || '').trim();
+      const language = String(insightPayload?.language || '').trim().toLowerCase();
+      if (markdown) {
+        insightReportMarkdown.value = markdown;
+        insightStreamAccumulatedChars.value = markdown.length;
+      }
+      insightReportLanguage.value = language === 'en' ? 'en' : 'zh';
+      insightReportReady.value = String(insightPayload?.status || '').trim().toLowerCase() === 'completed' || Boolean(markdown);
+      if (insightReportReady.value) {
+        insightReportStreaming.value = false;
+      }
+    }
+
     if (snapshot?.graph && typeof snapshot.graph === 'object') {
       commitGraphData(snapshot.graph, buildGraphSignature(snapshot.graph));
       return;
@@ -1232,13 +1297,19 @@ export function usePaperWorkflow({
 
     writeCompletedWorkflowSnapshot({
       status: 'completed',
+      session_id: String(researchSessionId.value || '').trim(),
       seed_fingerprint: buildWorkflowSeedFingerprint(seedPayload),
       saved_at: new Date().toISOString(),
       steps: stepsPayload,
       negotiation_by_step: safeJsonClone(negotiationByStep.value, createNegotiationStateByStep()),
       graph: graphData.value && typeof graphData.value === 'object'
         ? safeJsonClone(graphData.value, null)
-        : null
+        : null,
+      insight: {
+        markdown: insightReportMarkdown.value,
+        language: insightReportLanguage.value,
+        ready: Boolean(insightReportReady.value)
+      }
     });
   }
 
@@ -1287,10 +1358,26 @@ export function usePaperWorkflow({
       commitGraphData(restoredGraph, buildGraphSignature(restoredGraph));
     }
 
+    const restoredInsight = snapshot?.insight;
+    if (restoredInsight && typeof restoredInsight === 'object') {
+      insightReportMarkdown.value = String(restoredInsight?.markdown || '').trim();
+      insightReportLanguage.value = String(restoredInsight?.language || '').trim().toLowerCase() === 'en' ? 'en' : 'zh';
+      insightReportReady.value = Boolean(restoredInsight?.ready) || Boolean(insightReportMarkdown.value);
+      insightReportStreaming.value = false;
+      insightStreamAccumulatedChars.value = insightReportMarkdown.value.length;
+    }
+
     waitingResearchCheckpoint.value = '';
     runtimeAutoResumingCheckpoint.value = '';
     graphLoading.value = false;
     unifiedRuntimeActive.value = false;
+    researchSessionId.value = String(snapshot?.session_id || '').trim();
+    if (researchSessionId.value) {
+      runtimeSeed.value = {
+        ...runtimeSeed.value,
+        runtime_session_id: researchSessionId.value
+      };
+    }
     errorMessage.value = '';
     clearActiveResearchSessionRecord();
     stopResearchPolling();
@@ -1312,6 +1399,7 @@ export function usePaperWorkflow({
 
     const checkpoint = String(waitingCheckpoint || '').trim().toLowerCase();
     if (checkpoint === 'checkpoint_1') return 'checkpoint';
+    if (checkpoint === 'checkpoint_2') return 'insight';
     return resolveStepKeyByNode(currentNode || 'search');
   }
 
@@ -1330,6 +1418,13 @@ export function usePaperWorkflow({
   function resetSteps() {
     runtimeNodeLogCursor.clear();
     resetNegotiationState();
+    insightReportMarkdown.value = '';
+    insightReportLanguage.value = 'zh';
+    insightReportReady.value = false;
+    insightReportStreaming.value = false;
+    insightStreamAccumulatedChars.value = 0;
+    insightMarkdownDownloadLoading.value = false;
+    insightPdfDownloadLoading.value = false;
     for (const step of steps.value) {
       step.status = 'pending';
       step.message = '';
@@ -1380,20 +1475,80 @@ export function usePaperWorkflow({
     return String(checkpointNode || '').trim().toLowerCase() === 'checkpoint_1';
   }
 
+  function resolveCheckpointForStep(stepKey) {
+    const safeStepKey = String(stepKey || '').trim().toLowerCase();
+    if (safeStepKey === 'checkpoint') return 'checkpoint_1';
+    if (safeStepKey === 'insight') return 'checkpoint_2';
+    return '';
+  }
+
   function resolveAutoCheckpointDoneMessage(checkpointNode) {
     const normalized = String(checkpointNode || '').trim().toLowerCase();
     if (normalized === 'checkpoint_1') {
       return '检索阶段已确认，系统自动继续生成知识图谱。';
     }
+    if (normalized === 'checkpoint_2') {
+      return '探索参数已确认，系统正在启动探索任务。';
+    }
     return '已自动确认，正在继续执行。';
+  }
+
+  async function promptInsightRuntimeConfig() {
+    const rawAgentCount = await askForInput({
+      title: '探索配置',
+      message: `请输入 Agent 数量（${INSIGHT_AGENT_COUNT_MIN}-${INSIGHT_AGENT_COUNT_MAX}）`,
+      placeholder: String(INSIGHT_AGENT_COUNT_DEFAULT),
+      initialValue: String(INSIGHT_AGENT_COUNT_DEFAULT),
+      maxLength: 2,
+      validate: (value) => {
+        const parsed = Number.parseInt(String(value || '').trim(), 10);
+        if (!Number.isFinite(parsed)) return '请输入整数。';
+        if (parsed < INSIGHT_AGENT_COUNT_MIN || parsed > INSIGHT_AGENT_COUNT_MAX) {
+          return `范围必须为 ${INSIGHT_AGENT_COUNT_MIN}-${INSIGHT_AGENT_COUNT_MAX}。`;
+        }
+        return '';
+      }
+    });
+    if (rawAgentCount === null) return null;
+
+    const rawDepth = await askForInput({
+      title: '探索配置',
+      message: `请输入探索深度（${INSIGHT_DEPTH_MIN}-${INSIGHT_DEPTH_MAX}）`,
+      placeholder: String(INSIGHT_DEPTH_DEFAULT),
+      initialValue: String(INSIGHT_DEPTH_DEFAULT),
+      maxLength: 2,
+      validate: (value) => {
+        const parsed = Number.parseInt(String(value || '').trim(), 10);
+        if (!Number.isFinite(parsed)) return '请输入整数。';
+        if (parsed < INSIGHT_DEPTH_MIN || parsed > INSIGHT_DEPTH_MAX) {
+          return `范围必须为 ${INSIGHT_DEPTH_MIN}-${INSIGHT_DEPTH_MAX}。`;
+        }
+        return '';
+      }
+    });
+    if (rawDepth === null) return null;
+
+    const agentCount = Number.parseInt(String(rawAgentCount).trim(), 10);
+    const explorationDepth = Number.parseInt(String(rawDepth).trim(), 10);
+    if (!Number.isFinite(agentCount) || !Number.isFinite(explorationDepth)) {
+      return null;
+    }
+    return {
+      agent_count: Math.max(INSIGHT_AGENT_COUNT_MIN, Math.min(INSIGHT_AGENT_COUNT_MAX, agentCount)),
+      exploration_depth: Math.max(INSIGHT_DEPTH_MIN, Math.min(INSIGHT_DEPTH_MAX, explorationDepth))
+    };
   }
 
   async function continueAfterUnifiedCheckpoint(stepKey, options = {}) {
     const auto = Boolean(options?.auto);
+    const feedbackPayload = options?.feedbackPayload && typeof options.feedbackPayload === 'object'
+      ? options.feedbackPayload
+      : null;
     const safeStepKey = String(stepKey || '').trim();
     const checkpoint = String(waitingResearchCheckpoint.value || '').trim().toLowerCase();
     if (!safeStepKey || !checkpoint) return;
-    if (!(safeStepKey === 'checkpoint' && checkpoint === 'checkpoint_1')) return;
+    const expectedCheckpoint = resolveCheckpointForStep(safeStepKey);
+    if (!expectedCheckpoint || checkpoint !== expectedCheckpoint) return;
 
     const sessionId = String(researchSessionId.value || '').trim();
     if (!sessionId) return;
@@ -1413,10 +1568,19 @@ export function usePaperWorkflow({
       }, 1200);
     };
 
+    let feedback = '';
+    if (feedbackPayload) {
+      try {
+        feedback = JSON.stringify(feedbackPayload);
+      } catch {
+        feedback = '';
+      }
+    }
+
     try {
       const result = await resumeResearchSession(
         sessionId,
-        '',
+        feedback,
         { accessToken: accessTokenRef.value || '' }
       );
       if (!result?.resumed) {
@@ -1434,8 +1598,14 @@ export function usePaperWorkflow({
         setStepStatus(
           target.index,
           'running',
-          auto ? '已自动确认，正在继续执行。' : '已确认，正在继续执行。'
+          auto
+            ? '已自动确认，正在继续执行。'
+            : (safeStepKey === 'insight' ? '参数已确认，正在启动探索与洞察。' : '已确认，正在继续执行。')
         );
+      }
+      if (safeStepKey === 'insight') {
+        setStepAction('insight', null);
+        insightReportStreaming.value = true;
       }
     } catch {
       runtimeAutoResumingCheckpoint.value = '';
@@ -1462,8 +1632,14 @@ export function usePaperWorkflow({
         // keep graph stage resilient when snapshot fetch is transiently unavailable
       });
     }
+    if (node === 'insight') {
+      insightReportStreaming.value = true;
+      insightReportReady.value = false;
+      insightStreamAccumulatedChars.value = Math.max(0, String(insightReportMarkdown.value || '').length);
+    }
 
     setStepAction('checkpoint', null);
+    setStepAction('insight', null);
   }
 
   function handleRuntimeThinking(event = {}) {
@@ -1504,11 +1680,16 @@ export function usePaperWorkflow({
       if (stepKey === 'checkpoint') {
         setStepAction('checkpoint', null);
       }
+      if (stepKey === 'insight') {
+        setStepAction('insight', null);
+        insightReportStreaming.value = false;
+        insightReportReady.value = true;
+      }
     } else {
       setStepStatus(target.index, 'running', summary);
     }
 
-    if (node === 'search' || node === 'graph_build') {
+    if (node === 'search' || node === 'graph_build' || node === 'insight') {
       try {
         const snapshot = await getResearchSession(researchSessionId.value, {
           accessToken: accessTokenRef.value || ''
@@ -1522,37 +1703,73 @@ export function usePaperWorkflow({
 
   function handleRuntimePause(event = {}) {
     const checkpoint = String(event?.checkpoint || '').trim().toLowerCase();
-    if (checkpoint !== 'checkpoint_1') return;
+    if (checkpoint !== 'checkpoint_1' && checkpoint !== 'checkpoint_2') return;
 
     waitingResearchCheckpoint.value = checkpoint;
-    const target = steps.value.find((item) => item.key === 'checkpoint');
+    const stepKey = checkpoint === 'checkpoint_2' ? 'insight' : 'checkpoint';
+    const target = steps.value.find((item) => item.key === stepKey);
     if (!target) return;
 
     if (shouldAutoConfirmCheckpoint(checkpoint)) {
       const autoMessage = resolveAutoCheckpointDoneMessage(checkpoint);
       setStepStatus(target.index, 'done', autoMessage);
-      appendStepLog('checkpoint', {
+      appendStepLog(stepKey, {
         title: resolveNodeLabel(checkpoint),
         detail: autoMessage,
         status: 'done'
       });
-      setStepAction('checkpoint', null);
+      setStepAction(stepKey, null);
       runtimeAutoResumingCheckpoint.value = checkpoint;
-      void continueAfterUnifiedCheckpoint('checkpoint', { auto: true });
+      void continueAfterUnifiedCheckpoint(stepKey, { auto: true });
       return;
     }
 
-    const message = String(event?.message || '').trim() || '等待确认后继续执行。';
+    const message = String(event?.message || '').trim() || (
+      checkpoint === 'checkpoint_2'
+        ? '请先配置探索参数后继续执行。'
+        : '等待确认后继续执行。'
+    );
     setStepStatus(target.index, 'action_required', message);
-    appendStepLog('checkpoint', {
+    appendStepLog(stepKey, {
       title: resolveNodeLabel(checkpoint),
       detail: message,
       status: 'doing'
     });
-    setStepAction('checkpoint', {
-      label: '继续执行',
+    setStepAction(stepKey, {
+      label: checkpoint === 'checkpoint_2' ? '配置参数并开始探索' : '继续执行',
       disabled: false
     });
+  }
+
+  function handleInsightStream(event = {}) {
+    const section = String(event?.section || 'insight_markdown').trim().toLowerCase();
+    if (section && section !== 'insight_markdown') return;
+
+    const chunk = String(event?.chunk || '');
+    const done = Boolean(event?.done);
+    const accumulatedChars = Number(event?.accumulated_chars);
+    const hasAccumulatedChars = Number.isFinite(accumulatedChars) && accumulatedChars >= 0;
+
+    if (chunk) {
+      if (!hasAccumulatedChars || accumulatedChars > insightStreamAccumulatedChars.value) {
+        insightReportMarkdown.value = `${insightReportMarkdown.value}${chunk}`;
+        insightStreamAccumulatedChars.value = hasAccumulatedChars
+          ? Math.max(insightStreamAccumulatedChars.value, Math.round(accumulatedChars))
+          : String(insightReportMarkdown.value || '').length;
+      }
+      insightReportStreaming.value = true;
+      insightReportReady.value = false;
+      setStepStatusByKey('insight', 'running', '正在流式生成探索报告...');
+      return;
+    }
+
+    if (done) {
+      insightReportStreaming.value = false;
+      insightReportReady.value = Boolean(String(insightReportMarkdown.value || '').trim());
+      if (insightReportReady.value) {
+        setStepStatusByKey('insight', 'running', '探索报告已生成，等待流程完成收敛。');
+      }
+    }
   }
 
   function handleNegotiationRoundStarted(event = {}) {
@@ -1784,7 +2001,11 @@ export function usePaperWorkflow({
       setStepStatusByKey('retrieve', 'done', steps.value.find((item) => item.key === 'retrieve')?.message || '论文检索完成。');
       setStepStatusByKey('checkpoint', 'done', steps.value.find((item) => item.key === 'checkpoint')?.message || '需求确认完成。');
       setStepStatusByKey('graph', 'done', steps.value.find((item) => item.key === 'graph')?.message || '知识图谱生成完成。');
+      setStepStatusByKey('insight', 'done', steps.value.find((item) => item.key === 'insight')?.message || '探索与洞察完成。');
       setStepAction('checkpoint', null);
+      setStepAction('insight', null);
+      insightReportStreaming.value = false;
+      insightReportReady.value = Boolean(String(insightReportMarkdown.value || '').trim());
       normalizeNegotiationStateForCompletedWorkflow();
       ensureCompletedWorkflowStepLogs();
       persistCompletedWorkflowSnapshotFromState();
@@ -1813,6 +2034,9 @@ export function usePaperWorkflow({
       appendFailureLog(stepKey, errorMessage.value);
       graphLoading.value = false;
       unifiedRuntimeActive.value = false;
+      setStepAction('checkpoint', null);
+      setStepAction('insight', null);
+      insightReportStreaming.value = false;
       clearActiveResearchSessionRecord();
       stopResearchPolling();
       closeResearchSocket();
@@ -1821,6 +2045,7 @@ export function usePaperWorkflow({
 
     if (status === 'stopped') {
       const step = steps.value.find((item) => String(item?.status || '').trim().toLowerCase() === 'running')
+        || steps.value.find((item) => item.key === 'insight')
         || steps.value.find((item) => item.key === 'graph')
         || steps.value[0];
       if (step) {
@@ -1829,6 +2054,9 @@ export function usePaperWorkflow({
       graphLoading.value = false;
       unifiedRuntimeActive.value = false;
       runtimeAutoResumingCheckpoint.value = '';
+      setStepAction('checkpoint', null);
+      setStepAction('insight', null);
+      insightReportStreaming.value = false;
       clearActiveResearchSessionRecord();
       stopResearchPolling();
       closeResearchSocket();
@@ -1847,6 +2075,16 @@ export function usePaperWorkflow({
         if (target) {
           setStepStatus(target.index, 'done', resolveAutoCheckpointDoneMessage(waiting));
           setStepAction('checkpoint', null);
+        }
+      } else if (waiting === 'checkpoint_2') {
+        const target = steps.value.find((item) => item.key === 'insight');
+        if (target) {
+          const message = '请先配置探索参数后继续执行。';
+          setStepStatus(target.index, 'action_required', message);
+          setStepAction('insight', {
+            label: '配置参数并开始探索',
+            disabled: false
+          });
         }
       }
     } else {
@@ -1877,6 +2115,9 @@ export function usePaperWorkflow({
     appendFailureLog(fallbackStep, message);
     graphLoading.value = false;
     unifiedRuntimeActive.value = false;
+    setStepAction('checkpoint', null);
+    setStepAction('insight', null);
+    insightReportStreaming.value = false;
     clearActiveResearchSessionRecord();
     stopResearchPolling();
     closeResearchSocket();
@@ -1884,6 +2125,7 @@ export function usePaperWorkflow({
 
   function handleRuntimeStopped() {
     const step = steps.value.find((item) => String(item?.status || '').trim().toLowerCase() === 'running')
+      || steps.value.find((item) => item.key === 'insight')
       || steps.value.find((item) => item.key === 'graph')
       || steps.value[0];
     if (step) {
@@ -1892,6 +2134,9 @@ export function usePaperWorkflow({
     graphLoading.value = false;
     unifiedRuntimeActive.value = false;
     waitingResearchCheckpoint.value = '';
+    setStepAction('checkpoint', null);
+    setStepAction('insight', null);
+    insightReportStreaming.value = false;
     clearActiveResearchSessionRecord();
     stopResearchPolling();
     closeResearchSocket();
@@ -1911,6 +2156,10 @@ export function usePaperWorkflow({
     }
     if (type === 'node_complete') {
       await handleRuntimeNodeComplete(event);
+      return;
+    }
+    if (type === 'insight_stream') {
+      handleInsightStream(event);
       return;
     }
     if (type === 'pause') {
@@ -2020,6 +2269,8 @@ export function usePaperWorkflow({
       appendFailureLog(targetStep.key, safeMessage);
     }
     setStepAction('checkpoint', null);
+    setStepAction('insight', null);
+    insightReportStreaming.value = false;
     waitingResearchCheckpoint.value = '';
     runtimeAutoResumingCheckpoint.value = '';
     errorMessage.value = safeMessage;
@@ -2230,6 +2481,7 @@ export function usePaperWorkflow({
           seedInputValue: String(seed?.input_value || '').trim(),
           paperRangeYears
         });
+        setStepStatus(4, 'skipped', '探索与洞察仅在新工作流运行时可用。');
       } catch (graphError) {
         errorMessage.value = graphError?.message || '知识图谱生成失败。';
         setStepStatus(3, 'failed', '知识图谱步骤失败。');
@@ -2312,6 +2564,71 @@ export function usePaperWorkflow({
     const key = String(stepKey || '').trim().toLowerCase();
     if (key === 'checkpoint' && unifiedRuntimeActive.value) {
       await continueAfterUnifiedCheckpoint('checkpoint');
+      return;
+    }
+    if (key === 'insight' && unifiedRuntimeActive.value) {
+      const waiting = String(waitingResearchCheckpoint.value || '').trim().toLowerCase();
+      if (waiting !== 'checkpoint_2') return;
+
+      setStepAction('insight', {
+        label: '配置参数并开始探索',
+        disabled: true
+      });
+      const config = await promptInsightRuntimeConfig();
+      if (!config) {
+        setStepAction('insight', {
+          label: '配置参数并开始探索',
+          disabled: false
+        });
+        return;
+      }
+      await continueAfterUnifiedCheckpoint('insight', { feedbackPayload: config });
+      if (String(waitingResearchCheckpoint.value || '').trim().toLowerCase() === 'checkpoint_2') {
+        setStepAction('insight', {
+          label: '配置参数并开始探索',
+          disabled: false
+        });
+      }
+    }
+  }
+
+  function resolveReportSessionId() {
+    const runtimeSession = String(researchSessionId.value || '').trim();
+    if (runtimeSession) return runtimeSession;
+    return String(runtimeSeed.value?.runtime_session_id || '').trim();
+  }
+
+  async function downloadInsightMarkdown() {
+    if (insightMarkdownDownloadLoading.value) return;
+    const sessionId = resolveReportSessionId();
+    if (!sessionId) {
+      errorMessage.value = '报告会话不存在，无法下载。';
+      return;
+    }
+    insightMarkdownDownloadLoading.value = true;
+    try {
+      await downloadResearchReport(sessionId, 'markdown', { accessToken: accessTokenRef.value || '' });
+    } catch (error) {
+      errorMessage.value = String(error?.message || '').trim() || 'Markdown 下载失败。';
+    } finally {
+      insightMarkdownDownloadLoading.value = false;
+    }
+  }
+
+  async function downloadInsightPdf() {
+    if (insightPdfDownloadLoading.value) return;
+    const sessionId = resolveReportSessionId();
+    if (!sessionId) {
+      errorMessage.value = '报告会话不存在，无法下载。';
+      return;
+    }
+    insightPdfDownloadLoading.value = true;
+    try {
+      await downloadResearchReport(sessionId, 'pdf', { accessToken: accessTokenRef.value || '' });
+    } catch (error) {
+      errorMessage.value = String(error?.message || '').trim() || 'PDF 下载失败。';
+    } finally {
+      insightPdfDownloadLoading.value = false;
     }
   }
 
@@ -2327,6 +2644,13 @@ export function usePaperWorkflow({
     canTerminateWorkflow,
     terminatingWorkflow,
     graphData,
+    insightReportMarkdown,
+    insightReportLanguage,
+    insightReportReady,
+    insightReportStreaming,
+    hasInsightReport,
+    insightMarkdownDownloadLoading,
+    insightPdfDownloadLoading,
     errorMessage,
     graphStats,
     workflowProgress,
@@ -2335,6 +2659,8 @@ export function usePaperWorkflow({
     activeStepHint,
     runWorkflow,
     terminateWorkflow,
-    handleStepAction
+    handleStepAction,
+    downloadInsightMarkdown,
+    downloadInsightPdf
   };
 }

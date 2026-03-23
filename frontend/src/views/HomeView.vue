@@ -59,7 +59,7 @@ const workflowSeed = ref({
 });
 const headerStep = ref({
   index: 1,
-  total: 3,
+  total: 4,
   title: '论文检索'
 });
 const activeSessionNotice = ref(null);
@@ -274,7 +274,7 @@ const activeSessionNoticeDetail = computed(() => {
 function applyHeaderForSeed(seed) {
   headerStep.value = {
     index: 1,
-    total: 3,
+    total: 4,
     title: seed.input_type === 'domain' ? '领域调研' : '论文检索'
   };
 }
@@ -432,7 +432,7 @@ async function resumeActiveSessionWorkflow() {
 function updateHeaderStep(payload) {
   headerStep.value = {
     index: payload.index || 1,
-    total: payload.total || headerStep.value.total || 2,
+    total: payload.total || headerStep.value.total || 4,
     title: payload.title || '论文检索'
   };
 }

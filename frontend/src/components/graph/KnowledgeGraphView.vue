@@ -22,7 +22,7 @@
       </div>
     </div>
 
-    <KnowledgeGraphCanvas ref="graphCanvasRef" :graph="activeGraph">
+    <KnowledgeGraphCanvas ref="graphCanvasRef" :graph="activeGraph" :show-tools="props.showTools">
       <template #tools-extra>
         <slot name="tools-extra"></slot>
       </template>
@@ -44,6 +44,10 @@ const props = defineProps({
   mode: {
     type: String,
     default: 'multi'
+  },
+  showTools: {
+    type: Boolean,
+    default: true
   }
 });
 

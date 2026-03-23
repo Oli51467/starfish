@@ -289,6 +289,45 @@ export function getResearchSession(sessionId, { accessToken = '' } = {}) {
   });
 }
 
+export async function downloadResearchReport(sessionId, type = 'markdown', { accessToken = '' } = {}) {
+  const safeType = String(type || '').trim().toLowerCase() === 'pdf' ? 'pdf' : 'markdown';
+  const safeSessionId = String(sessionId || '').trim();
+  if (!safeSessionId) {
+    throw new Error('session_id_required');
+  }
+
+  const path = safeType === 'pdf'
+    ? `/api/research/report/${encodeURIComponent(safeSessionId)}/pdf`
+    : `/api/research/report/${encodeURIComponent(safeSessionId)}/markdown`;
+  const baseUrl = getApiBaseUrl();
+
+  let response;
+  try {
+    response = await fetch(`${baseUrl}${path}`, {
+      headers: buildAuthHeaders(accessToken)
+    });
+  } catch {
+    throw new Error(`无法连接后端服务（${baseUrl}），请先启动后端。`);
+  }
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload?.detail || `HTTP ${response.status}`);
+  }
+
+  const blob = await response.blob();
+  const downloadUrl = window.URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = downloadUrl;
+  anchor.download = safeType === 'pdf'
+    ? `${safeSessionId}-insight.pdf`
+    : `${safeSessionId}-insight.md`;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  window.URL.revokeObjectURL(downloadUrl);
+}
+
 export function createResearchWebSocket(sessionId, accessToken = '') {
   const token = String(accessToken || '').trim();
   const wsBase = getWsBaseUrl();

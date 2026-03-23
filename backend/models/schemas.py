@@ -114,6 +114,7 @@ PipelineEventType = Literal[
     "thinking",
     "node_complete",
     "pause",
+    "insight_stream",
     "negotiation_round_started",
     "negotiation_bid_received",
     "negotiation_contract_awarded",
@@ -200,6 +201,7 @@ class ResearchSessionStateResponse(BaseModel):
     lineage: dict[str, Any] | None = None
     report: str | None = None
     report_id: str | None = None
+    insight: dict[str, Any] | None = None
     history_id: str | None = None
     research_gaps: list[dict[str, Any]] = Field(default_factory=list)
     critic_notes: list[str] = Field(default_factory=list)
@@ -366,6 +368,7 @@ class ResearchHistoryDetailResponse(BaseModel):
     graph: KnowledgeGraphResponse
     landscape_graph: dict[str, Any] | None = None
     lineage_graph: dict[str, Any] | None = None
+    pipeline: dict[str, Any] | None = None
 
 
 class ResearchHistoryLineageUpdateRequest(BaseModel):

@@ -23,7 +23,9 @@ _TASK_TRANSITIONS: dict[str, tuple[str, ...]] = {
     "router": ("search",),
     "search": ("checkpoint_1",),
     "checkpoint_1": ("graph_build",),
-    "graph_build": (),
+    "graph_build": ("checkpoint_2",),
+    "checkpoint_2": ("insight",),
+    "insight": (),
 }
 
 _TASK_PRIORITY: dict[str, int] = {
@@ -32,6 +34,8 @@ _TASK_PRIORITY: dict[str, int] = {
     "search": 8,
     "checkpoint_1": 7,
     "graph_build": 6,
+    "checkpoint_2": 5,
+    "insight": 4,
 }
 
 _TASK_ESTIMATED_LATENCY_MS: dict[str, int] = {
@@ -40,6 +44,8 @@ _TASK_ESTIMATED_LATENCY_MS: dict[str, int] = {
     "search": 4800,
     "graph_build": 5200,
     "checkpoint_1": 600,
+    "checkpoint_2": 900,
+    "insight": 14000,
 }
 
 _TASK_ESTIMATED_COST: dict[str, float] = {
@@ -48,6 +54,8 @@ _TASK_ESTIMATED_COST: dict[str, float] = {
     "search": 1.2,
     "graph_build": 1.4,
     "checkpoint_1": 0.2,
+    "checkpoint_2": 0.2,
+    "insight": 2.2,
 }
 
 _TASK_BASE_CONFIDENCE: dict[str, float] = {
@@ -56,6 +64,8 @@ _TASK_BASE_CONFIDENCE: dict[str, float] = {
     "search": 0.82,
     "graph_build": 0.80,
     "checkpoint_1": 0.96,
+    "checkpoint_2": 0.96,
+    "insight": 0.78,
 }
 
 NodeCallable = Callable[[PipelineState], Awaitable[PipelineState]]
@@ -212,6 +222,13 @@ class PipelineRuntimeService:
         runtime = await self._require_runtime(session_id)
         runtime.status = "running"
         runtime.updated_at = datetime.now(timezone.utc)
+        runtime.budget_limit = max(
+            float(runtime.budget_limit),
+            self._resolve_session_budget(
+                input_type=str(runtime.state.get("input_type") or "").strip().lower(),
+                quick_mode=bool(runtime.state.get("quick_mode")),
+            ),
+        )
 
         try:
             runtime.agenda = [self._build_task_intent(kind="planner", metadata={"source": "bootstrap"})]
@@ -454,7 +471,7 @@ class PipelineRuntimeService:
                 {
                     "type": "session_complete",
                     "progress": int(runtime.state.get("progress") or 100),
-                    "current_node": runtime.state.get("current_node") or "graph_build",
+                    "current_node": runtime.state.get("current_node") or "insight",
                     "report_id": runtime.state.get("report_id"),
                     "summary": "研究流程执行完成。",
                 },
@@ -508,11 +525,20 @@ class PipelineRuntimeService:
 
     @staticmethod
     def _build_history_pipeline_payload(state: PipelineState) -> dict[str, Any]:
+        insight = state.get("insight") if isinstance(state.get("insight"), dict) else {}
         return {
             "research_goal": state.get("research_goal") or "",
             "execution_plan": list(state.get("execution_plan") or []),
             "final_report": state.get("final_report") or "",
             "checkpoint_feedback": dict(state.get("checkpoint_feedback") or {}),
+            "insight": {
+                "status": str(insight.get("status") or ""),
+                "summary": str(insight.get("summary") or ""),
+                "language": str(insight.get("language") or ""),
+                "agent_count": int(insight.get("agent_count") or 0),
+                "exploration_depth": int(insight.get("exploration_depth") or 0),
+                "generated_at": str(insight.get("generated_at") or ""),
+            } if insight else {},
             "parallel_outputs_summary": {
                 "research_gaps": len(state.get("research_gaps") or []),
                 "critic_notes": len(state.get("critic_notes") or []),
@@ -612,8 +638,9 @@ class PipelineRuntimeService:
             runtime.state["report_id"] = None
 
     def _resolve_agent_registry(self) -> dict[str, _AgentRegistration]:
-        from agents.pipeline.nodes.checkpoints import human_checkpoint_1
+        from agents.pipeline.nodes.checkpoints import human_checkpoint_1, human_checkpoint_2
         from agents.pipeline.nodes.graph_build import graph_build_node
+        from agents.pipeline.nodes.insight import insight_node
         from agents.pipeline.nodes.planner import planner_node
         from agents.pipeline.nodes.router import router_node
         from agents.pipeline.nodes.search import search_node
@@ -739,6 +766,56 @@ class PipelineRuntimeService:
                 latency_multiplier=0.85,
                 critic_strictness=0.92,
             ),
+            "checkpoint_2_guarded": _AgentRegistration(
+                agent_id="checkpoint_2_guarded",
+                task_kinds=("checkpoint_2",),
+                node_fn=human_checkpoint_2,
+                profile="guarded",
+                confidence_bias=0.03,
+                cost_multiplier=1.06,
+                latency_multiplier=1.08,
+                critic_strictness=1.08,
+            ),
+            "checkpoint_2_fastpass": _AgentRegistration(
+                agent_id="checkpoint_2_fastpass",
+                task_kinds=("checkpoint_2",),
+                node_fn=human_checkpoint_2,
+                profile="quickpass",
+                confidence_bias=-0.02,
+                cost_multiplier=0.88,
+                latency_multiplier=0.86,
+                critic_strictness=0.92,
+            ),
+            "insight_balanced": _AgentRegistration(
+                agent_id="insight_balanced",
+                task_kinds=("insight",),
+                node_fn=self._build_profiled_node_fn(insight_node, profile="balanced"),
+                profile="balanced",
+                confidence_bias=0.01,
+                cost_multiplier=1.0,
+                latency_multiplier=1.0,
+                critic_strictness=1.0,
+            ),
+            "insight_breadth": _AgentRegistration(
+                agent_id="insight_breadth",
+                task_kinds=("insight",),
+                node_fn=self._build_profiled_node_fn(insight_node, profile="recall"),
+                profile="recall",
+                confidence_bias=0.03,
+                cost_multiplier=1.22,
+                latency_multiplier=1.16,
+                critic_strictness=1.1,
+            ),
+            "insight_lean": _AgentRegistration(
+                agent_id="insight_lean",
+                task_kinds=("insight",),
+                node_fn=self._build_profiled_node_fn(insight_node, profile="budget"),
+                profile="budget",
+                confidence_bias=-0.05,
+                cost_multiplier=0.76,
+                latency_multiplier=0.78,
+                critic_strictness=0.88,
+            ),
         }
 
     def _build_task_intent(self, *, kind: str, metadata: dict[str, Any] | None = None) -> _TaskIntent:
@@ -781,6 +858,27 @@ class PipelineRuntimeService:
                 execution_state["papers"] = papers[:30]
             else:
                 execution_state["papers"] = papers[:24] if len(papers) > 24 else papers
+
+        if task_kind == "insight":
+            config = dict(execution_state.get("insight_config") or {})
+            try:
+                base_agent_count = int(config.get("agent_count") or 4)
+            except (TypeError, ValueError):
+                base_agent_count = 4
+            try:
+                base_depth = int(config.get("exploration_depth") or 2)
+            except (TypeError, ValueError):
+                base_depth = 2
+            if profile in {"budget", "lean", "fast"}:
+                config["agent_count"] = max(2, min(8, base_agent_count - 1))
+                config["exploration_depth"] = max(1, min(5, base_depth - 1))
+            elif profile in {"recall", "dense"}:
+                config["agent_count"] = max(2, min(8, base_agent_count + 1))
+                config["exploration_depth"] = max(1, min(5, base_depth + 1))
+            else:
+                config["agent_count"] = max(2, min(8, base_agent_count))
+                config["exploration_depth"] = max(1, min(5, base_depth))
+            execution_state["insight_config"] = config
 
         return execution_state
 
@@ -831,10 +929,12 @@ class PipelineRuntimeService:
         return safe_profile
 
     def _resolve_session_budget(self, *, input_type: str, quick_mode: bool) -> float:
-        base = 7.2 if quick_mode else 10.5
+        # Reserve a larger baseline budget so the workflow can consistently
+        # complete through checkpoint_2 + insight even with retries/rebids.
+        base = 20.0 if quick_mode else 26.0
         safe_input_type = str(input_type or "").strip().lower()
         if safe_input_type in {"arxiv_id", "doi"}:
-            base += 0.6
+            base += 1.5
         return round(base, 3)
 
     def _collect_bids(
@@ -952,6 +1052,32 @@ class PipelineRuntimeService:
             return 0.06 if papers else -0.15
         if safe_kind == "checkpoint_1":
             return 0.04 if papers else -0.10
+        if safe_kind == "checkpoint_2":
+            graph_payload = state.get("graph_payload")
+            node_count = len((graph_payload or {}).get("nodes") or []) if isinstance(graph_payload, dict) else 0
+            return 0.05 if node_count > 0 else -0.12
+        if safe_kind == "insight":
+            graph_payload = state.get("graph_payload")
+            node_count = len((graph_payload or {}).get("nodes") or []) if isinstance(graph_payload, dict) else 0
+            config = dict(state.get("insight_config") or {})
+            try:
+                agent_count = int(config.get("agent_count") or 0)
+            except (TypeError, ValueError):
+                agent_count = 0
+            try:
+                exploration_depth = int(config.get("exploration_depth") or 0)
+            except (TypeError, ValueError):
+                exploration_depth = 0
+            has_valid_config = (
+                2 <= agent_count <= 8
+                and 1 <= exploration_depth <= 5
+            )
+            score = 0.02
+            if node_count > 0:
+                score += 0.03
+            if has_valid_config:
+                score += 0.03
+            return score
         return 0.0
 
     def _estimate_bid_cost(
@@ -972,6 +1098,20 @@ class PipelineRuntimeService:
             complexity += min(0.60, float(paper_count) / 60.0)
         elif task_kind == "search":
             complexity += min(0.30, float(keyword_count) / 20.0)
+        elif task_kind == "insight":
+            config = dict(runtime.state.get("insight_config") or {})
+            try:
+                agent_count = int(config.get("agent_count") or 4)
+            except (TypeError, ValueError):
+                agent_count = 4
+            try:
+                depth = int(config.get("exploration_depth") or 2)
+            except (TypeError, ValueError):
+                depth = 2
+            agent_count = max(2, min(8, agent_count))
+            depth = max(1, min(5, depth))
+            complexity += min(0.85, float(agent_count) / 10.0 + float(depth) / 8.0)
+            complexity += min(0.35, float(paper_count) / 90.0)
 
         if bool(runtime.state.get("quick_mode")):
             complexity *= 0.88
@@ -994,6 +1134,20 @@ class PipelineRuntimeService:
         multiplier = float(registration.latency_multiplier) * (1.0 + min(0.40, retry_count * 0.16))
         if task_kind == "graph_build":
             multiplier += min(0.35, float(paper_count) / 80.0)
+        elif task_kind == "insight":
+            config = dict(runtime.state.get("insight_config") or {})
+            try:
+                agent_count = int(config.get("agent_count") or 4)
+            except (TypeError, ValueError):
+                agent_count = 4
+            try:
+                depth = int(config.get("exploration_depth") or 2)
+            except (TypeError, ValueError):
+                depth = 2
+            agent_count = max(2, min(8, agent_count))
+            depth = max(1, min(5, depth))
+            multiplier += min(0.95, float(agent_count - 1) * 0.10 + float(depth - 1) * 0.15)
+            multiplier += min(0.28, float(paper_count) / 110.0)
         return max(1, int(base_latency * multiplier))
 
     def _select_winning_bid(
@@ -1217,6 +1371,36 @@ class PipelineRuntimeService:
                 return _CriticVerdict(False, "检查点状态未更新。", "warning")
             return _CriticVerdict(True, "检查点确认完成。")
 
+        if task_kind == "checkpoint_2":
+            if str(state_after.get("current_node") or "").strip().lower() != "checkpoint_2":
+                return _CriticVerdict(False, "探索检查点状态未更新。", "warning")
+            config = dict(state_after.get("insight_config") or {})
+            try:
+                agent_count = int(config.get("agent_count") or 0)
+                depth = int(config.get("exploration_depth") or 0)
+            except (TypeError, ValueError):
+                return _CriticVerdict(False, "探索参数解析失败。", "warning")
+            if not (2 <= agent_count <= 8 and 1 <= depth <= 5):
+                return _CriticVerdict(False, "探索参数超出允许范围。", "warning")
+            return _CriticVerdict(True, "探索参数确认完成。")
+
+        if task_kind == "insight":
+            insight = state_after.get("insight")
+            if not isinstance(insight, dict):
+                return _CriticVerdict(False, "探索产物缺失。", "warning")
+            markdown = str(insight.get("markdown") or "").strip()
+            summary = str(insight.get("summary") or "").strip()
+            min_length = 700 if strictness >= 1.05 else 420
+            if len(markdown) < min_length:
+                return _CriticVerdict(False, "探索报告内容不足。", "warning")
+            if not summary:
+                return _CriticVerdict(False, "探索摘要缺失。", "warning")
+            artifact = insight.get("artifact") if isinstance(insight.get("artifact"), dict) else {}
+            markdown_path = str(artifact.get("markdown_path") or "").strip()
+            if not markdown_path:
+                return _CriticVerdict(False, "探索报告文件未生成。", "warning")
+            return _CriticVerdict(True, "探索洞察产物可用。")
+
         return _CriticVerdict(True, "无需审核。")
 
     @staticmethod
@@ -1353,6 +1537,28 @@ class PipelineRuntimeService:
             },
         )
 
+    async def emit_insight_stream(
+        self,
+        session_id: str,
+        *,
+        section: str,
+        chunk: str,
+        accumulated_chars: int,
+        done: bool = False,
+    ) -> None:
+        runtime = await self._require_runtime(session_id)
+        await self._publish_event(
+            runtime,
+            {
+                "type": "insight_stream",
+                "node": "insight",
+                "section": str(section or "insight_markdown"),
+                "chunk": str(chunk or ""),
+                "accumulated_chars": max(0, int(accumulated_chars or 0)),
+                "done": bool(done),
+            },
+        )
+
     async def emit_node_complete(
         self,
         session_id: str,
@@ -1422,6 +1628,13 @@ class PipelineRuntimeService:
             raise PipelineRuntimeError("forbidden")
         if runtime.status in _FINAL_STATUSES:
             return False, "session_closed"
+        runtime.budget_limit = max(
+            float(runtime.budget_limit),
+            self._resolve_session_budget(
+                input_type=str(runtime.state.get("input_type") or "").strip().lower(),
+                quick_mode=bool(runtime.state.get("quick_mode")),
+            ),
+        )
         if runtime.waiting_checkpoint is None or runtime.resume_event is None:
             return False, "no_pending_checkpoint"
 

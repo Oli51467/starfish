@@ -175,7 +175,7 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import WorkflowStageStrip from './WorkflowStageStrip.vue';
 
 const NEGOTIATION_TASK_LABEL = {
@@ -183,7 +183,9 @@ const NEGOTIATION_TASK_LABEL = {
   router: '任务路由协商',
   search: '论文检索协商',
   checkpoint_1: '需求确认协商',
-  graph_build: '图谱构建协商'
+  graph_build: '图谱构建协商',
+  checkpoint_2: '探索参数协商',
+  insight: '探索洞察协商'
 };
 
 const props = defineProps({
@@ -218,6 +220,7 @@ const safeProgress = computed(() => {
 });
 
 const collapsedStepState = ref(Object.create(null));
+const previousStepStatusMap = ref(Object.create(null));
 
 function resolveStepCollapseKey(step, index) {
   const stepKey = String(step?.key || '').trim();
@@ -246,6 +249,53 @@ function normalizeStatus(rawStatus) {
   if (status === 'action_required') return 'paused';
   return 'pending';
 }
+
+watch(
+  () => (Array.isArray(props.steps) ? props.steps : []).map((step, index) => ({
+    key: resolveStepCollapseKey(step, index),
+    status: normalizeStatus(step?.status)
+  })),
+  (stepStates) => {
+    if (!Array.isArray(stepStates) || !stepStates.length) {
+      collapsedStepState.value = Object.create(null);
+      previousStepStatusMap.value = Object.create(null);
+      return;
+    }
+
+    let allPending = true;
+    let hasMutation = false;
+    const nextCollapsed = { ...collapsedStepState.value };
+    const nextPrevious = Object.create(null);
+
+    for (const item of stepStates) {
+      const stepKey = String(item?.key || '').trim();
+      const currentStatus = String(item?.status || '').trim().toLowerCase();
+      if (!stepKey) continue;
+      if (currentStatus !== 'pending') {
+        allPending = false;
+      }
+
+      const previousStatus = String(previousStepStatusMap.value?.[stepKey] || '').trim().toLowerCase();
+      if (currentStatus === 'done' && previousStatus !== 'done' && !nextCollapsed[stepKey]) {
+        nextCollapsed[stepKey] = true;
+        hasMutation = true;
+      }
+      if (['active', 'paused', 'failed'].includes(currentStatus) && nextCollapsed[stepKey]) {
+        nextCollapsed[stepKey] = false;
+        hasMutation = true;
+      }
+      nextPrevious[stepKey] = currentStatus;
+    }
+
+    if (allPending) {
+      collapsedStepState.value = Object.create(null);
+    } else if (hasMutation) {
+      collapsedStepState.value = nextCollapsed;
+    }
+    previousStepStatusMap.value = nextPrevious;
+  },
+  { immediate: true, deep: true }
+);
 
 function stepStatus(rawStatus) {
   return normalizeStatus(rawStatus);

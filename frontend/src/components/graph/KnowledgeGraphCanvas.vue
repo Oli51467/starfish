@@ -13,6 +13,7 @@
     ></div>
 
     <div v-if="showTools" class="knowledge-canvas-tools">
+      <slot v-if="showTools" name="tools-extra"></slot>
       <button
         v-if="showTools"
         class="btn graph-refresh-btn"
@@ -45,7 +46,6 @@
           <path v-if="isFullscreen" d="M13.5 10H10v3.5" />
         </svg>
       </button>
-      <slot v-if="showTools" name="tools-extra"></slot>
     </div>
 
     <div v-if="hasDirectionLegend" class="knowledge-legend-overlay" :class="{ 'is-collapsed': !isLegendVisible }">

@@ -38,6 +38,8 @@ class PipelineState(TypedDict):
     # synthesis context
     research_gaps: list[dict[str, Any]]
     critic_notes: list[str]
+    insight_config: dict[str, Any]
+    insight: dict[str, Any] | None
 
     # report
     report_draft: str | None
@@ -98,6 +100,11 @@ def build_initial_state(
         graph_payload=None,
         research_gaps=[],
         critic_notes=[],
+        insight_config={
+            "agent_count": 4,
+            "exploration_depth": 2,
+        },
+        insight=None,
         report_draft=None,
         final_report=None,
         report_id=None,
