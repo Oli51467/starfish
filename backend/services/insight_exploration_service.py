@@ -4,9 +4,11 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
+import json
 import math
 from pathlib import Path
 import re
+import sys
 from typing import Any, Awaitable, Callable
 
 from core.settings import get_settings
@@ -91,9 +93,18 @@ class InsightExplorationService:
         orchestrator: InsightOrchestratorService | None = None,
     ) -> None:
         self.settings = get_settings()
+        self.worker_execution_backend = str(
+            getattr(self.settings, "insight_worker_execution_backend", "subprocess") or "subprocess"
+        ).strip().lower()
+        if self.worker_execution_backend not in {"inprocess", "subprocess"}:
+            self.worker_execution_backend = "subprocess"
+        self.worker_subprocess_timeout_seconds = float(
+            getattr(self.settings, "insight_worker_subprocess_timeout_seconds", 40.0) or 40.0
+        )
         self.graph_service = graph_service or get_graphrag_service()
         self.history_repository = history_repository or get_research_history_repository()
         self.tool_gateway = InsightToolGateway()
+        self.subprocess_worker_script = Path(__file__).resolve().with_name("insight_subprocess_worker.py")
         if orchestrator is not None:
             self.orchestrator = orchestrator
         else:
@@ -316,6 +327,7 @@ class InsightExplorationService:
                 "rounds": rounds,
                 "agent_count": len(active_roles),
                 "mode": resolved_mode,
+                "execution_backend": "inprocess",
             },
         }
 
@@ -476,7 +488,12 @@ class InsightExplorationService:
 
             role_outputs: list[str] = []
             for result in round_result.results:
-                memory_service.write_many(run_id=journal.run_id, records=list(result.memory_writes or []))
+                result_worker_id = str((result.extra or {}).get("worker_id") or "").strip() or "main"
+                memory_service.write_many(
+                    run_id=journal.run_id,
+                    records=list(result.memory_writes or []),
+                    worker_id=result_worker_id,
+                )
                 self._apply_memory_writes(session_memory=session_memory, result=result)
                 output = str(result.output or "").strip()
                 if output:
@@ -554,6 +571,7 @@ class InsightExplorationService:
                 "rounds": rounds,
                 "agent_count": len(active_roles),
                 "mode": "orchestrated",
+                "execution_backend": self.worker_execution_backend,
                 "orchestration_round_task_counts": round_task_totals,
                 "orchestration_round_spawn_counts": round_spawn_totals,
                 "orchestration_event_count": len(journal.events),
@@ -676,6 +694,7 @@ class InsightExplorationService:
             profile_id=task.profile_id,
             key="private_notes",
             limit=4,
+            worker_id=worker_id,
         )
         effective_objective = str(task.objective or "").strip()
         if agent_private:
@@ -684,30 +703,74 @@ class InsightExplorationService:
                 f"Private memory: {agent_private}"
             ).strip()
 
+        execution_backend = "inprocess"
         try:
-            output = await self._run_single_role(
-                round_index=task.round_index,
-                role=role,
-                language=language,
-                query=query,
-                papers=papers,
-                extension_papers=extension_papers,
-                graph_stats=graph_stats,
-                history_memory=history_memory,
-                session_memory=session_memory,
-                objective=effective_objective,
-                allow_llm=llm_enabled,
-            )
+            if self.worker_execution_backend == "subprocess":
+                output = await self._run_single_role_in_subprocess(
+                    round_index=task.round_index,
+                    role=role,
+                    language=language,
+                    query=query,
+                    papers=papers,
+                    extension_papers=extension_papers,
+                    graph_stats=graph_stats,
+                    history_memory=history_memory,
+                    session_memory=session_memory,
+                    objective=effective_objective,
+                    allow_llm=llm_enabled,
+                )
+                execution_backend = "subprocess"
+            else:
+                output = await self._run_single_role(
+                    round_index=task.round_index,
+                    role=role,
+                    language=language,
+                    query=query,
+                    papers=papers,
+                    extension_papers=extension_papers,
+                    graph_stats=graph_stats,
+                    history_memory=history_memory,
+                    session_memory=session_memory,
+                    objective=effective_objective,
+                    allow_llm=llm_enabled,
+                )
         except Exception as exc:  # noqa: BLE001
-            return AgentTaskResult(
-                task_id=task.task_id,
-                profile_id=task.profile_id,
-                role_id=task.role_id,
-                status="failed",
-                output="",
-                tool_calls=tool_calls,
-                extra={"error": str(exc)},
-            )
+            if self.worker_execution_backend == "subprocess":
+                try:
+                    output = await self._run_single_role(
+                        round_index=task.round_index,
+                        role=role,
+                        language=language,
+                        query=query,
+                        papers=papers,
+                        extension_papers=extension_papers,
+                        graph_stats=graph_stats,
+                        history_memory=history_memory,
+                        session_memory=session_memory,
+                        objective=effective_objective,
+                        allow_llm=llm_enabled,
+                    )
+                    execution_backend = "inprocess_fallback"
+                except Exception:  # noqa: BLE001
+                    return AgentTaskResult(
+                        task_id=task.task_id,
+                        profile_id=task.profile_id,
+                        role_id=task.role_id,
+                        status="failed",
+                        output="",
+                        tool_calls=tool_calls,
+                        extra={"error": str(exc)},
+                    )
+            else:
+                return AgentTaskResult(
+                    task_id=task.task_id,
+                    profile_id=task.profile_id,
+                    role_id=task.role_id,
+                    status="failed",
+                    output="",
+                    tool_calls=tool_calls,
+                    extra={"error": str(exc)},
+                )
 
         memory_writes = self._build_memory_writes_for_output(
             task=task,
@@ -734,6 +797,7 @@ class InsightExplorationService:
                 "depth": task.depth,
                 "parent_task_id": task.parent_task_id,
                 "worker_id": worker_id,
+                "execution_backend": execution_backend,
             },
         )
 
@@ -1057,6 +1121,72 @@ class InsightExplorationService:
                 session_memory["hypotheses"].append(content)
             session_memory["evidence"].append(content[:160])
         return outputs
+
+    async def _run_single_role_in_subprocess(
+        self,
+        *,
+        round_index: int,
+        role: _RoleSpec,
+        language: str,
+        query: str,
+        papers: list[dict[str, Any]],
+        extension_papers: list[dict[str, Any]],
+        graph_stats: dict[str, int],
+        history_memory: list[str],
+        session_memory: dict[str, list[str]],
+        objective: str | None = None,
+        allow_llm: bool = True,
+    ) -> str:
+        if not self.subprocess_worker_script.exists():
+            raise RuntimeError("insight_subprocess_worker_not_found")
+
+        payload = {
+            "round_index": int(round_index),
+            "language": str(language or "en"),
+            "query": str(query or ""),
+            "papers": [dict(item) for item in papers if isinstance(item, dict)],
+            "extension_papers": [dict(item) for item in extension_papers if isinstance(item, dict)],
+            "graph_stats": dict(graph_stats or {}),
+            "history_memory": [str(item) for item in history_memory if str(item).strip()],
+            "session_memory": {
+                str(key): [str(line) for line in (lines or []) if str(line).strip()]
+                for key, lines in dict(session_memory or {}).items()
+                if str(key).strip()
+            },
+            "objective": str(objective or ""),
+            "allow_llm": bool(allow_llm),
+            "role": {
+                "role_id": role.role_id,
+                "title_zh": role.title_zh,
+                "title_en": role.title_en,
+                "focus": role.focus,
+            },
+        }
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(self.subprocess_worker_script),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(json.dumps(payload, ensure_ascii=False).encode("utf-8")),
+            timeout=max(5.0, float(self.worker_subprocess_timeout_seconds)),
+        )
+        if process.returncode != 0:
+            detail = stderr.decode("utf-8", errors="ignore").strip()
+            raise RuntimeError(f"insight_worker_process_failed:{process.returncode}:{detail[:300]}")
+
+        raw_output = stdout.decode("utf-8", errors="ignore").strip()
+        if not raw_output:
+            raise RuntimeError("insight_worker_process_empty_output")
+        parsed = json.loads(raw_output)
+        if not isinstance(parsed, dict):
+            raise RuntimeError("insight_worker_process_invalid_payload")
+        content = str(parsed.get("output") or "").strip()
+        if not content:
+            raise RuntimeError("insight_worker_process_no_content")
+        return content
 
     async def _run_single_role(
         self,

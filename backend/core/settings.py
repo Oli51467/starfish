@@ -100,6 +100,15 @@ class Settings:
             choices={"legacy", "orchestrated"},
         )
         self.insight_worker_count = max(1, min(16, int(os.getenv("INSIGHT_WORKER_COUNT", "4"))))
+        self.insight_worker_execution_backend = self._parse_choice(
+            os.getenv("INSIGHT_WORKER_EXECUTION_BACKEND"),
+            default="subprocess",
+            choices={"inprocess", "subprocess"},
+        )
+        self.insight_worker_subprocess_timeout_seconds = max(
+            5.0,
+            min(180.0, float(os.getenv("INSIGHT_WORKER_SUBPROCESS_TIMEOUT_SECONDS", "40"))),
+        )
         self.insight_max_subagent_depth = max(0, min(8, int(os.getenv("INSIGHT_MAX_SUBAGENT_DEPTH", "2"))))
         self.insight_max_subtasks_per_round = max(
             1,
@@ -109,6 +118,7 @@ class Settings:
             1,
             min(8, int(os.getenv("INSIGHT_MAX_SUBTASKS_PER_PARENT", "2"))),
         )
+        self.insight_memory_db_path = (os.getenv("INSIGHT_MEMORY_DB_PATH") or "").strip()
 
         # Auth
         self.google_client_id = (os.getenv("GOOGLE_CLIENT_ID") or "").strip()
