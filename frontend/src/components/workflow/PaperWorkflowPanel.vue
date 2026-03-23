@@ -157,11 +157,91 @@
               </article>
             </div>
 
+            <section
+              v-if="isInsightInlineConfigVisible(step)"
+              class="paper-workflow-insight-config"
+            >
+              <article class="paper-workflow-insight-config-field">
+                <p class="paper-workflow-insight-config-label mono">Agent 数量</p>
+                <div class="paper-workflow-insight-stepper">
+                  <button
+                    class="paper-workflow-insight-stepper-btn mono"
+                    type="button"
+                    :disabled="isInsightConfigControlDisabled() || isInsightMinReached('agent_count')"
+                    aria-label="减少 Agent 数量"
+                    @click="adjustInsightConfig('agent_count', -1)"
+                  >
+                    -
+                  </button>
+                  <input
+                    id="workflow-insight-agent-count"
+                    class="paper-workflow-insight-stepper-input mono"
+                    type="number"
+                    inputmode="numeric"
+                    step="1"
+                    :min="resolveInsightBounds('agent_count').min"
+                    :max="resolveInsightBounds('agent_count').max"
+                    :value="resolveInsightAgentCountValue()"
+                    :disabled="isInsightConfigControlDisabled()"
+                    aria-label="选择 Agent 数量"
+                    @input="onInsightNumberInput('agent_count', $event)"
+                    @blur="onInsightNumberBlur('agent_count', $event)"
+                  />
+                  <button
+                    class="paper-workflow-insight-stepper-btn mono"
+                    type="button"
+                    :disabled="isInsightConfigControlDisabled() || isInsightMaxReached('agent_count')"
+                    aria-label="增加 Agent 数量"
+                    @click="adjustInsightConfig('agent_count', 1)"
+                  >
+                    +
+                  </button>
+                </div>
+              </article>
+              <article class="paper-workflow-insight-config-field">
+                <p class="paper-workflow-insight-config-label mono">探索深度</p>
+                <div class="paper-workflow-insight-stepper">
+                  <button
+                    class="paper-workflow-insight-stepper-btn mono"
+                    type="button"
+                    :disabled="isInsightConfigControlDisabled() || isInsightMinReached('exploration_depth')"
+                    aria-label="减少探索深度"
+                    @click="adjustInsightConfig('exploration_depth', -1)"
+                  >
+                    -
+                  </button>
+                  <input
+                    id="workflow-insight-depth"
+                    class="paper-workflow-insight-stepper-input mono"
+                    type="number"
+                    inputmode="numeric"
+                    step="1"
+                    :min="resolveInsightBounds('exploration_depth').min"
+                    :max="resolveInsightBounds('exploration_depth').max"
+                    :value="resolveInsightDepthValue()"
+                    :disabled="isInsightConfigControlDisabled()"
+                    aria-label="选择探索深度"
+                    @input="onInsightNumberInput('exploration_depth', $event)"
+                    @blur="onInsightNumberBlur('exploration_depth', $event)"
+                  />
+                  <button
+                    class="paper-workflow-insight-stepper-btn mono"
+                    type="button"
+                    :disabled="isInsightConfigControlDisabled() || isInsightMaxReached('exploration_depth')"
+                    aria-label="增加探索深度"
+                    @click="adjustInsightConfig('exploration_depth', 1)"
+                  >
+                    +
+                  </button>
+                </div>
+              </article>
+            </section>
+
             <button
               v-if="isActionRequired(step)"
               class="btn btn-accent mono paper-workflow-action-btn"
               type="button"
-              :disabled="Boolean(step?.action?.disabled)"
+              :disabled="isStepActionDisabled(step)"
               @click="$emit('step-action', step.key)"
             >
               {{ String(step?.action?.label || '继续执行') }}
@@ -201,6 +281,16 @@ const props = defineProps({
     type: Object,
     default: () => ({})
   },
+  insightInlineConfig: {
+    type: Object,
+    default: () => ({
+      agentCount: '4',
+      explorationDepth: '2',
+      agentCountOptions: [],
+      explorationDepthOptions: [],
+      submitting: false
+    })
+  },
   canTerminate: {
     type: Boolean,
     default: false
@@ -211,7 +301,7 @@ const props = defineProps({
   }
 });
 
-defineEmits(['step-action', 'terminate']);
+const emit = defineEmits(['step-action', 'terminate', 'insight-config-change']);
 
 const safeProgress = computed(() => {
   const value = Number(props.progress);
@@ -517,6 +607,132 @@ function isActionRequired(step) {
   const stepKey = String(step?.key || '').trim().toLowerCase();
   if (stepKey === 'checkpoint') return false;
   return String(step?.status || '').trim().toLowerCase() === 'action_required' && Boolean(step?.action);
+}
+
+function isInsightInlineConfigVisible(step) {
+  const stepKey = String(step?.key || '').trim().toLowerCase();
+  return stepKey === 'insight' && isActionRequired(step);
+}
+
+function resolveInsightAgentCountOptions() {
+  const options = Array.isArray(props.insightInlineConfig?.agentCountOptions)
+    ? props.insightInlineConfig.agentCountOptions
+    : [];
+  return options;
+}
+
+function resolveInsightDepthOptions() {
+  const options = Array.isArray(props.insightInlineConfig?.explorationDepthOptions)
+    ? props.insightInlineConfig.explorationDepthOptions
+    : [];
+  return options;
+}
+
+function resolveInsightAgentCountValue() {
+  const current = String(props.insightInlineConfig?.agentCount || '').trim();
+  if (current) return current;
+  const fallback = resolveInsightAgentCountOptions()[0];
+  return String(fallback?.value || '');
+}
+
+function resolveInsightDepthValue() {
+  const current = String(props.insightInlineConfig?.explorationDepth || '').trim();
+  if (current) return current;
+  const fallback = resolveInsightDepthOptions()[0];
+  return String(fallback?.value || '');
+}
+
+function resolveInsightBounds(field) {
+  const safeField = String(field || '').trim().toLowerCase();
+  const source = safeField === 'agent_count'
+    ? resolveInsightAgentCountOptions()
+    : resolveInsightDepthOptions();
+  const numericValues = source
+    .map((item) => Number.parseInt(String(item?.value || '').trim(), 10))
+    .filter((value) => Number.isFinite(value));
+  if (!numericValues.length) {
+    if (safeField === 'agent_count') return { min: 2, max: 8 };
+    return { min: 1, max: 5 };
+  }
+  return {
+    min: Math.min(...numericValues),
+    max: Math.max(...numericValues)
+  };
+}
+
+function resolveInsightCurrentNumber(field) {
+  const safeField = String(field || '').trim().toLowerCase();
+  const { min, max } = resolveInsightBounds(safeField);
+  const raw = safeField === 'agent_count'
+    ? resolveInsightAgentCountValue()
+    : resolveInsightDepthValue();
+  const parsed = Number.parseInt(String(raw || '').trim(), 10);
+  if (!Number.isFinite(parsed)) return min;
+  return Math.max(min, Math.min(max, parsed));
+}
+
+function onInsightConfigFieldChange(field, value) {
+  emit('insight-config-change', {
+    field: String(field || '').trim(),
+    value: String(value || '').trim()
+  });
+}
+
+function onInsightNumberInput(field, event) {
+  const raw = String(event?.target?.value || '').trim();
+  if (!raw) return;
+  const { min, max } = resolveInsightBounds(field);
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) return;
+  const next = Math.max(min, Math.min(max, parsed));
+  onInsightConfigFieldChange(field, String(next));
+}
+
+function onInsightNumberBlur(field, event) {
+  const raw = String(event?.target?.value || '').trim();
+  if (!raw) {
+    onInsightConfigFieldChange(field, String(resolveInsightCurrentNumber(field)));
+    return;
+  }
+  const { min, max } = resolveInsightBounds(field);
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) {
+    onInsightConfigFieldChange(field, String(resolveInsightCurrentNumber(field)));
+    return;
+  }
+  const next = Math.max(min, Math.min(max, parsed));
+  onInsightConfigFieldChange(field, String(next));
+}
+
+function adjustInsightConfig(field, delta) {
+  const safeDelta = Number.isFinite(Number(delta)) ? Math.round(Number(delta)) : 0;
+  if (!safeDelta) return;
+  const { min, max } = resolveInsightBounds(field);
+  const current = resolveInsightCurrentNumber(field);
+  const next = Math.max(min, Math.min(max, current + safeDelta));
+  onInsightConfigFieldChange(field, String(next));
+}
+
+function isInsightMinReached(field) {
+  const { min } = resolveInsightBounds(field);
+  return resolveInsightCurrentNumber(field) <= min;
+}
+
+function isInsightMaxReached(field) {
+  const { max } = resolveInsightBounds(field);
+  return resolveInsightCurrentNumber(field) >= max;
+}
+
+function isInsightConfigControlDisabled() {
+  return Boolean(props.insightInlineConfig?.submitting);
+}
+
+function isStepActionDisabled(step) {
+  if (!step) return true;
+  const baseDisabled = Boolean(step?.action?.disabled);
+  const stepKey = String(step?.key || '').trim().toLowerCase();
+  if (stepKey !== 'insight') return baseDisabled;
+  return baseDisabled || Boolean(props.insightInlineConfig?.submitting);
 }
 </script>
 
@@ -1009,6 +1225,114 @@ function isActionRequired(step) {
   justify-self: center;
 }
 
+.paper-workflow-insight-config {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-left: calc(var(--step-trace-edge-offset) * -1);
+  margin-right: 0;
+  width: calc(100% + var(--step-trace-edge-offset));
+  max-width: calc(100% + var(--step-trace-edge-offset));
+  box-sizing: border-box;
+}
+
+.paper-workflow-insight-config-field {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  padding: 6px 8px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.paper-workflow-insight-config-label {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.paper-workflow-insight-stepper {
+  min-width: 0;
+  height: 32px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) 30px;
+  align-items: stretch;
+  overflow: hidden;
+}
+
+.paper-workflow-insight-stepper-btn {
+  border: 0;
+  border-right: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 0.2s ease, color 0.2s ease;
+  padding: 0;
+}
+
+.paper-workflow-insight-stepper-btn:last-child {
+  border-right: 0;
+  border-left: 1px solid var(--line);
+}
+
+.paper-workflow-insight-stepper-btn:hover:not(:disabled) {
+  background: var(--panel);
+}
+
+.paper-workflow-insight-stepper-btn:disabled {
+  color: var(--muted);
+  background: var(--panel);
+  cursor: not-allowed;
+}
+
+.paper-workflow-insight-stepper-input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+  text-align: center;
+  padding: 0 6px;
+}
+
+.paper-workflow-insight-stepper-input:focus {
+  outline: 0;
+  background: var(--panel);
+}
+
+.paper-workflow-insight-stepper-input:disabled {
+  color: var(--muted);
+  background: var(--panel);
+  cursor: not-allowed;
+}
+
+.paper-workflow-insight-stepper-input::-webkit-outer-spin-button,
+.paper-workflow-insight-stepper-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.paper-workflow-insight-stepper-input[type='number'] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.paper-workflow-insight-stepper:focus-within {
+  border: 1px solid var(--line-2);
+  box-shadow: inset 0 0 0 1px var(--line-2);
+}
+
 @media (max-width: 980px) {
   .paper-workflow-panel {
     min-height: auto;
@@ -1017,6 +1341,11 @@ function isActionRequired(step) {
 
   .paper-workflow-step-list {
     max-height: none;
+  }
+
+  .paper-workflow-insight-config-field {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
   }
 }
 

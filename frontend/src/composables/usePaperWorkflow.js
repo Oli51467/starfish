@@ -12,7 +12,7 @@ import {
   stopResearchSession,
 } from '../api';
 import { buildKnowledgeGraphSets } from '../components/graph/knowledgeGraphModel';
-import { useGlobalInputDialog } from './useGlobalInputDialog';
+import { locale as runtimeLocale } from '../i18n/runtime';
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -241,6 +241,10 @@ function createFallbackBuildLogs(result) {
   ];
 }
 
+function resolveReportLanguageFromLocale() {
+  return String(runtimeLocale.value || '').trim().toLowerCase() === 'en' ? 'en' : 'zh';
+}
+
 function toNodeId(raw, fallback) {
   const value = String(raw || '').trim();
   if (!value) return fallback;
@@ -352,6 +356,26 @@ const INSIGHT_AGENT_COUNT_MIN = 2;
 const INSIGHT_AGENT_COUNT_MAX = 8;
 const INSIGHT_DEPTH_MIN = 1;
 const INSIGHT_DEPTH_MAX = 5;
+const INSIGHT_AGENT_COUNT_OPTIONS = Array.from(
+  { length: INSIGHT_AGENT_COUNT_MAX - INSIGHT_AGENT_COUNT_MIN + 1 },
+  (_, index) => {
+    const value = INSIGHT_AGENT_COUNT_MIN + index;
+    return {
+      label: String(value),
+      value: String(value)
+    };
+  }
+);
+const INSIGHT_DEPTH_OPTIONS = Array.from(
+  { length: INSIGHT_DEPTH_MAX - INSIGHT_DEPTH_MIN + 1 },
+  (_, index) => {
+    const value = INSIGHT_DEPTH_MIN + index;
+    return {
+      label: String(value),
+      value: String(value)
+    };
+  }
+);
 
 const ACTIVE_RESEARCH_SESSION_STORAGE_KEY = 'starfish:active-research-session';
 const COMPLETED_WORKFLOW_SNAPSHOT_STORAGE_KEY = 'starfish:workflow-completed-snapshot';
@@ -558,7 +582,6 @@ export function usePaperWorkflow({
   onStepChange
 }) {
   const notifyStepChange = typeof onStepChange === 'function' ? onStepChange : () => {};
-  const { askForInput } = useGlobalInputDialog();
 
   const steps = ref([
     {
@@ -619,6 +642,9 @@ export function usePaperWorkflow({
   const graphSnapshotSignature = ref('');
   const runtimeSeed = ref(normalizeRuntimeSeed({}));
   const negotiationByStep = ref(createNegotiationStateByStep());
+  const insightAgentCountDraft = ref(String(INSIGHT_AGENT_COUNT_DEFAULT));
+  const insightDepthDraft = ref(String(INSIGHT_DEPTH_DEFAULT));
+  const insightConfigSubmitting = ref(false);
 
   let researchSocket = null;
   let researchPollTimer = null;
@@ -636,6 +662,14 @@ export function usePaperWorkflow({
   const hasInsightReport = computed(() => {
     return Boolean(String(insightReportMarkdown.value || '').trim());
   });
+
+  const insightInlineConfig = computed(() => ({
+    agentCount: String(insightAgentCountDraft.value || ''),
+    explorationDepth: String(insightDepthDraft.value || ''),
+    agentCountOptions: INSIGHT_AGENT_COUNT_OPTIONS,
+    explorationDepthOptions: INSIGHT_DEPTH_OPTIONS,
+    submitting: Boolean(insightConfigSubmitting.value)
+  }));
 
   const activeStep = computed(() => {
     const running = steps.value.find((item) => item.status === 'running');
@@ -1257,6 +1291,10 @@ export function usePaperWorkflow({
       const insightPayload = snapshot.insight;
       const markdown = String(insightPayload?.markdown || '').trim();
       const language = String(insightPayload?.language || '').trim().toLowerCase();
+      syncInsightInlineConfig({
+        agent_count: insightPayload?.agent_count,
+        exploration_depth: insightPayload?.exploration_depth
+      });
       if (markdown) {
         insightReportMarkdown.value = markdown;
         insightStreamAccumulatedChars.value = markdown.length;
@@ -1418,6 +1456,11 @@ export function usePaperWorkflow({
   function resetSteps() {
     runtimeNodeLogCursor.clear();
     resetNegotiationState();
+    syncInsightInlineConfig({
+      agent_count: INSIGHT_AGENT_COUNT_DEFAULT,
+      exploration_depth: INSIGHT_DEPTH_DEFAULT
+    });
+    insightConfigSubmitting.value = false;
     insightReportMarkdown.value = '';
     insightReportLanguage.value = 'zh';
     insightReportReady.value = false;
@@ -1493,50 +1536,44 @@ export function usePaperWorkflow({
     return '已自动确认，正在继续执行。';
   }
 
-  async function promptInsightRuntimeConfig() {
-    const rawAgentCount = await askForInput({
-      title: '探索配置',
-      message: `请输入 Agent 数量（${INSIGHT_AGENT_COUNT_MIN}-${INSIGHT_AGENT_COUNT_MAX}）`,
-      placeholder: String(INSIGHT_AGENT_COUNT_DEFAULT),
-      initialValue: String(INSIGHT_AGENT_COUNT_DEFAULT),
-      maxLength: 2,
-      validate: (value) => {
-        const parsed = Number.parseInt(String(value || '').trim(), 10);
-        if (!Number.isFinite(parsed)) return '请输入整数。';
-        if (parsed < INSIGHT_AGENT_COUNT_MIN || parsed > INSIGHT_AGENT_COUNT_MAX) {
-          return `范围必须为 ${INSIGHT_AGENT_COUNT_MIN}-${INSIGHT_AGENT_COUNT_MAX}。`;
-        }
-        return '';
-      }
-    });
-    if (rawAgentCount === null) return null;
+  function normalizeInsightConfigValue(rawValue, { min, max, fallback }) {
+    const parsed = Number.parseInt(String(rawValue || '').trim(), 10);
+    if (!Number.isFinite(parsed)) return String(fallback);
+    return String(Math.max(min, Math.min(max, parsed)));
+  }
 
-    const rawDepth = await askForInput({
-      title: '探索配置',
-      message: `请输入探索深度（${INSIGHT_DEPTH_MIN}-${INSIGHT_DEPTH_MAX}）`,
-      placeholder: String(INSIGHT_DEPTH_DEFAULT),
-      initialValue: String(INSIGHT_DEPTH_DEFAULT),
-      maxLength: 2,
-      validate: (value) => {
-        const parsed = Number.parseInt(String(value || '').trim(), 10);
-        if (!Number.isFinite(parsed)) return '请输入整数。';
-        if (parsed < INSIGHT_DEPTH_MIN || parsed > INSIGHT_DEPTH_MAX) {
-          return `范围必须为 ${INSIGHT_DEPTH_MIN}-${INSIGHT_DEPTH_MAX}。`;
-        }
-        return '';
-      }
+  function syncInsightInlineConfig(payload = {}) {
+    const nextAgent = normalizeInsightConfigValue(payload?.agent_count, {
+      min: INSIGHT_AGENT_COUNT_MIN,
+      max: INSIGHT_AGENT_COUNT_MAX,
+      fallback: INSIGHT_AGENT_COUNT_DEFAULT
     });
-    if (rawDepth === null) return null;
+    const nextDepth = normalizeInsightConfigValue(payload?.exploration_depth, {
+      min: INSIGHT_DEPTH_MIN,
+      max: INSIGHT_DEPTH_MAX,
+      fallback: INSIGHT_DEPTH_DEFAULT
+    });
+    insightAgentCountDraft.value = nextAgent;
+    insightDepthDraft.value = nextDepth;
+  }
 
-    const agentCount = Number.parseInt(String(rawAgentCount).trim(), 10);
-    const explorationDepth = Number.parseInt(String(rawDepth).trim(), 10);
-    if (!Number.isFinite(agentCount) || !Number.isFinite(explorationDepth)) {
-      return null;
+  function updateInsightInlineConfig(field, value) {
+    const safeField = String(field || '').trim().toLowerCase();
+    if (safeField === 'agent_count') {
+      insightAgentCountDraft.value = normalizeInsightConfigValue(value, {
+        min: INSIGHT_AGENT_COUNT_MIN,
+        max: INSIGHT_AGENT_COUNT_MAX,
+        fallback: INSIGHT_AGENT_COUNT_DEFAULT
+      });
+      return;
     }
-    return {
-      agent_count: Math.max(INSIGHT_AGENT_COUNT_MIN, Math.min(INSIGHT_AGENT_COUNT_MAX, agentCount)),
-      exploration_depth: Math.max(INSIGHT_DEPTH_MIN, Math.min(INSIGHT_DEPTH_MAX, explorationDepth))
-    };
+    if (safeField === 'exploration_depth') {
+      insightDepthDraft.value = normalizeInsightConfigValue(value, {
+        min: INSIGHT_DEPTH_MIN,
+        max: INSIGHT_DEPTH_MAX,
+        fallback: INSIGHT_DEPTH_DEFAULT
+      });
+    }
   }
 
   async function continueAfterUnifiedCheckpoint(stepKey, options = {}) {
@@ -1722,6 +1759,9 @@ export function usePaperWorkflow({
         ? '请先配置探索参数后继续执行。'
         : '等待确认后继续执行。'
     );
+    if (checkpoint === 'checkpoint_2') {
+      insightConfigSubmitting.value = false;
+    }
     setStepStatus(target.index, 'action_required', message);
     appendStepLog(stepKey, {
       title: resolveNodeLabel(checkpoint),
@@ -1730,7 +1770,7 @@ export function usePaperWorkflow({
     });
     setStepAction(stepKey, {
       label: checkpoint === 'checkpoint_2' ? '配置参数并开始探索' : '继续执行',
-      disabled: false
+      disabled: checkpoint === 'checkpoint_2' ? Boolean(insightConfigSubmitting.value) : false
     });
   }
 
@@ -2052,6 +2092,7 @@ export function usePaperWorkflow({
       setStepStatusByKey('insight', 'done', steps.value.find((item) => item.key === 'insight')?.message || '探索与洞察完成。');
       setStepAction('checkpoint', null);
       setStepAction('insight', null);
+      insightConfigSubmitting.value = false;
       insightReportStreaming.value = false;
       insightReportReady.value = Boolean(String(insightReportMarkdown.value || '').trim());
       normalizeNegotiationStateForCompletedWorkflow();
@@ -2084,6 +2125,7 @@ export function usePaperWorkflow({
       unifiedRuntimeActive.value = false;
       setStepAction('checkpoint', null);
       setStepAction('insight', null);
+      insightConfigSubmitting.value = false;
       insightReportStreaming.value = false;
       clearActiveResearchSessionRecord();
       stopResearchPolling();
@@ -2104,6 +2146,7 @@ export function usePaperWorkflow({
       runtimeAutoResumingCheckpoint.value = '';
       setStepAction('checkpoint', null);
       setStepAction('insight', null);
+      insightConfigSubmitting.value = false;
       insightReportStreaming.value = false;
       clearActiveResearchSessionRecord();
       stopResearchPolling();
@@ -2131,7 +2174,7 @@ export function usePaperWorkflow({
           setStepStatus(target.index, 'action_required', message);
           setStepAction('insight', {
             label: '配置参数并开始探索',
-            disabled: false
+            disabled: Boolean(insightConfigSubmitting.value)
           });
         }
       }
@@ -2165,6 +2208,7 @@ export function usePaperWorkflow({
     unifiedRuntimeActive.value = false;
     setStepAction('checkpoint', null);
     setStepAction('insight', null);
+    insightConfigSubmitting.value = false;
     insightReportStreaming.value = false;
     clearActiveResearchSessionRecord();
     stopResearchPolling();
@@ -2184,6 +2228,7 @@ export function usePaperWorkflow({
     waitingResearchCheckpoint.value = '';
     setStepAction('checkpoint', null);
     setStepAction('insight', null);
+    insightConfigSubmitting.value = false;
     insightReportStreaming.value = false;
     clearActiveResearchSessionRecord();
     stopResearchPolling();
@@ -2622,24 +2667,40 @@ export function usePaperWorkflow({
       const waiting = String(waitingResearchCheckpoint.value || '').trim().toLowerCase();
       if (waiting !== 'checkpoint_2') return;
 
+      insightConfigSubmitting.value = true;
       setStepAction('insight', {
         label: '配置参数并开始探索',
         disabled: true
       });
-      const config = await promptInsightRuntimeConfig();
-      if (!config) {
-        setStepAction('insight', {
-          label: '配置参数并开始探索',
-          disabled: false
-        });
-        return;
-      }
-      await continueAfterUnifiedCheckpoint('insight', { feedbackPayload: config });
-      if (String(waitingResearchCheckpoint.value || '').trim().toLowerCase() === 'checkpoint_2') {
-        setStepAction('insight', {
-          label: '配置参数并开始探索',
-          disabled: false
-        });
+      const config = {
+        agent_count: Number.parseInt(
+          normalizeInsightConfigValue(insightAgentCountDraft.value, {
+            min: INSIGHT_AGENT_COUNT_MIN,
+            max: INSIGHT_AGENT_COUNT_MAX,
+            fallback: INSIGHT_AGENT_COUNT_DEFAULT
+          }),
+          10
+        ),
+        exploration_depth: Number.parseInt(
+          normalizeInsightConfigValue(insightDepthDraft.value, {
+            min: INSIGHT_DEPTH_MIN,
+            max: INSIGHT_DEPTH_MAX,
+            fallback: INSIGHT_DEPTH_DEFAULT
+          }),
+          10
+        ),
+        report_language: resolveReportLanguageFromLocale()
+      };
+      try {
+        await continueAfterUnifiedCheckpoint('insight', { feedbackPayload: config });
+      } finally {
+        insightConfigSubmitting.value = false;
+        if (String(waitingResearchCheckpoint.value || '').trim().toLowerCase() === 'checkpoint_2') {
+          setStepAction('insight', {
+            label: '配置参数并开始探索',
+            disabled: false
+          });
+        }
       }
     }
   }
@@ -2692,6 +2753,7 @@ export function usePaperWorkflow({
   return {
     steps,
     negotiationByStep,
+    insightInlineConfig,
     graphLoading,
     canTerminateWorkflow,
     terminatingWorkflow,
@@ -2712,6 +2774,7 @@ export function usePaperWorkflow({
     runWorkflow,
     terminateWorkflow,
     handleStepAction,
+    updateInsightInlineConfig,
     downloadInsightMarkdown,
     downloadInsightPdf
   };

@@ -55,6 +55,7 @@ async def resume_pipeline(
     if (
         request.agent_count is not None
         or request.exploration_depth is not None
+        or request.report_language is not None
         or request.agent_mode is not None
     ):
         payload: dict[str, object] = {}
@@ -64,6 +65,8 @@ async def resume_pipeline(
             payload["agent_count"] = int(request.agent_count)
         if request.exploration_depth is not None:
             payload["exploration_depth"] = int(request.exploration_depth)
+        if request.report_language is not None:
+            payload["report_language"] = str(request.report_language).strip().lower()
         if request.agent_mode is not None:
             payload["agent_mode"] = str(request.agent_mode)
         resume_feedback = json.dumps(payload, ensure_ascii=False)

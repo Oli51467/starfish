@@ -16,6 +16,7 @@
         <h3 id="global-input-title" class="global-confirm-title">{{ dialogState.title }}</h3>
         <p v-if="dialogState.message" id="global-input-message" class="global-confirm-message">{{ dialogState.message }}</p>
         <input
+          v-if="dialogState.inputType !== 'select'"
           ref="inputRef"
           class="text-input mono global-input-field"
           type="text"
@@ -25,6 +26,22 @@
           @input="updateInputValue($event.target.value)"
           @keydown.enter.prevent="confirmInput"
         />
+        <select
+          v-else
+          ref="inputRef"
+          class="text-input mono global-input-field global-input-select"
+          :value="dialogState.value"
+          @change="updateInputValue($event.target.value)"
+          @keydown.enter.prevent="confirmInput"
+        >
+          <option
+            v-for="option in dialogState.optionItems"
+            :key="`${option.value}`"
+            :value="option.value"
+          >
+            {{ option.label }}
+          </option>
+        </select>
         <p v-if="dialogState.errorMessage" class="global-input-error mono">{{ dialogState.errorMessage }}</p>
         <div class="global-confirm-actions">
           <button class="btn mono" type="button" @click="cancelInput">

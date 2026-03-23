@@ -9,11 +9,13 @@ from services.pipeline_runtime_service import get_pipeline_runtime_service
 _DEFAULT_AGENT_COUNT = 4
 _DEFAULT_EXPLORATION_DEPTH = 2
 _DEFAULT_AGENT_MODE = "orchestrated"
+_DEFAULT_REPORT_LANGUAGE = "zh"
 _MIN_AGENT_COUNT = 2
 _MAX_AGENT_COUNT = 8
 _MIN_EXPLORATION_DEPTH = 1
 _MAX_EXPLORATION_DEPTH = 5
 _ALLOWED_AGENT_MODES = {"legacy", "orchestrated"}
+_ALLOWED_REPORT_LANGUAGES = {"zh", "en"}
 
 
 def _is_continue_feedback(feedback: str) -> bool:
@@ -92,6 +94,14 @@ def _resolve_insight_config(feedback: str, state: PipelineState) -> dict[str, ob
         or _DEFAULT_AGENT_MODE
     ).strip().lower()
     agent_mode = raw_mode if raw_mode in _ALLOWED_AGENT_MODES else _DEFAULT_AGENT_MODE
+    raw_language = str(
+        payload.get(
+            "report_language",
+            payload.get("language", baseline.get("report_language", _DEFAULT_REPORT_LANGUAGE)),
+        )
+        or _DEFAULT_REPORT_LANGUAGE
+    ).strip().lower()
+    report_language = raw_language if raw_language in _ALLOWED_REPORT_LANGUAGES else _DEFAULT_REPORT_LANGUAGE
 
     return {
         "agent_count": _clamp_int(
@@ -106,6 +116,7 @@ def _resolve_insight_config(feedback: str, state: PipelineState) -> dict[str, ob
             min_value=_MIN_EXPLORATION_DEPTH,
             max_value=_MAX_EXPLORATION_DEPTH,
         ),
+        "report_language": report_language,
         "agent_mode": agent_mode,
     }
 
@@ -133,7 +144,7 @@ async def human_checkpoint_2(state: PipelineState) -> PipelineState:
     summary = (
         "探索参数已确认："
         f"{config['agent_count']} 个 Agents，探索深度 {config['exploration_depth']}，"
-        f"模式 {config['agent_mode']}。"
+        f"语言 {config['report_language']}，模式 {config['agent_mode']}。"
     )
     await runtime.emit_thinking(session_id, node, summary)
     await runtime.emit_node_complete(session_id, node, 80, summary)

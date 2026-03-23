@@ -25,6 +25,9 @@ async def insight_node(state: PipelineState) -> PipelineState:
     config = dict(state.get("insight_config") or {})
     agent_count = max(2, min(8, _safe_int(config.get("agent_count"), _DEFAULT_AGENT_COUNT)))
     exploration_depth = max(1, min(5, _safe_int(config.get("exploration_depth"), _DEFAULT_EXPLORATION_DEPTH)))
+    report_language = str(config.get("report_language") or "zh").strip().lower()
+    if report_language not in {"zh", "en"}:
+        report_language = "zh"
     agent_mode = str(config.get("agent_mode") or _DEFAULT_AGENT_MODE).strip().lower()
     if agent_mode not in {"legacy", "orchestrated"}:
         agent_mode = _DEFAULT_AGENT_MODE
@@ -60,6 +63,7 @@ async def insight_node(state: PipelineState) -> PipelineState:
         graph_payload=state.get("graph_payload") if isinstance(state.get("graph_payload"), dict) else None,
         agent_count=agent_count,
         exploration_depth=exploration_depth,
+        preferred_language=report_language,
         agent_mode=agent_mode,
         stream_callback=on_stream,
     )

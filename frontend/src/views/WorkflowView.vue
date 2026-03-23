@@ -5,10 +5,12 @@
         class="paper-workflow-side"
         :steps="steps"
         :negotiation-by-step="negotiationByStep"
+        :insight-inline-config="insightInlineConfig"
         :progress="workflowProgress"
         :can-terminate="canTerminateWorkflow"
         :terminating="terminatingWorkflow"
         @step-action="handleStepAction"
+        @insight-config-change="handleInsightConfigChange"
         @terminate="handleWorkflowTerminate"
       />
 
@@ -159,6 +161,7 @@ const resultViewTab = ref('graph');
 const {
   steps,
   negotiationByStep,
+  insightInlineConfig,
   graphLoading,
   canTerminateWorkflow,
   terminatingWorkflow,
@@ -175,6 +178,7 @@ const {
   runWorkflow,
   terminateWorkflow,
   handleStepAction,
+  updateInsightInlineConfig,
   downloadInsightMarkdown,
   downloadInsightPdf
 } = usePaperWorkflow({
@@ -201,6 +205,13 @@ const insightRestContent = computed(() => {
 
 async function handleWorkflowTerminate() {
   await terminateWorkflow();
+}
+
+function handleInsightConfigChange(payload) {
+  const field = String(payload?.field || '').trim();
+  const value = String(payload?.value || '').trim();
+  if (!field) return;
+  updateInsightInlineConfig(field, value);
 }
 
 function resolveGraphId(payload) {

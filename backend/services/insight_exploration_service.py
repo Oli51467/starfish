@@ -134,6 +134,7 @@ class InsightExplorationService:
         graph_payload: dict[str, Any] | None,
         agent_count: int,
         exploration_depth: int,
+        preferred_language: str | None = None,
         agent_mode: str | None = None,
         stream_callback: StreamCallback | None = None,
     ) -> dict[str, Any]:
@@ -157,7 +158,7 @@ class InsightExplorationService:
             max_value=_MAX_EXPLORATION_DEPTH,
         )
         resolved_mode = self._resolve_agent_mode(agent_mode)
-        language = self._detect_language(safe_query)
+        language = self._resolve_report_language(preferred_language, safe_query)
         active_roles = list(self._ROLE_POOL[:resolved_agent_count])
         rounds = max(1, resolved_depth * 2)
 
@@ -925,6 +926,13 @@ class InsightExplorationService:
         except (TypeError, ValueError):
             return default
         return max(min_value, min(max_value, parsed))
+
+    @staticmethod
+    def _resolve_report_language(preferred_language: str | None, query: str) -> str:
+        safe_preferred = str(preferred_language or "").strip().lower()
+        if safe_preferred in {"zh", "en"}:
+            return safe_preferred
+        return InsightExplorationService._detect_language(query)
 
     @staticmethod
     def _detect_language(text: str) -> str:

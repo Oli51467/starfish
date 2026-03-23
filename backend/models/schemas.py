@@ -144,6 +144,7 @@ class PipelineResumeRequest(BaseModel):
     feedback: str = ""
     agent_count: int | None = Field(default=None, ge=2, le=8)
     exploration_depth: int | None = Field(default=None, ge=1, le=5)
+    report_language: Literal["zh", "en"] | None = None
     agent_mode: Literal["legacy", "orchestrated"] | None = None
 
 
@@ -183,6 +184,7 @@ class ResearchSessionResumeRequest(BaseModel):
     feedback: str = ""
     agent_count: int | None = Field(default=None, ge=2, le=8)
     exploration_depth: int | None = Field(default=None, ge=1, le=5)
+    report_language: Literal["zh", "en"] | None = None
     agent_mode: Literal["legacy", "orchestrated"] | None = None
 
 

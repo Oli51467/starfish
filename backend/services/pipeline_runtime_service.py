@@ -876,6 +876,9 @@ class PipelineRuntimeService:
                 base_depth = int(config.get("exploration_depth") or 2)
             except (TypeError, ValueError):
                 base_depth = 2
+            base_language = str(config.get("report_language") or "zh").strip().lower()
+            if base_language not in {"zh", "en"}:
+                base_language = "zh"
             base_mode = str(config.get("agent_mode") or "orchestrated").strip().lower()
             if base_mode not in {"legacy", "orchestrated"}:
                 base_mode = "orchestrated"
@@ -888,6 +891,7 @@ class PipelineRuntimeService:
             else:
                 config["agent_count"] = max(2, min(8, base_agent_count))
                 config["exploration_depth"] = max(1, min(5, base_depth))
+            config["report_language"] = base_language
             config["agent_mode"] = base_mode
             execution_state["insight_config"] = config
 
@@ -1080,9 +1084,11 @@ class PipelineRuntimeService:
             except (TypeError, ValueError):
                 exploration_depth = 0
             agent_mode = str(config.get("agent_mode") or "").strip().lower()
+            report_language = str(config.get("report_language") or "").strip().lower()
             has_valid_config = (
                 2 <= agent_count <= 8
                 and 1 <= exploration_depth <= 5
+                and report_language in {"zh", "en"}
                 and agent_mode in {"legacy", "orchestrated"}
             )
             score = 0.02
@@ -1394,8 +1400,11 @@ class PipelineRuntimeService:
             except (TypeError, ValueError):
                 return _CriticVerdict(False, "探索参数解析失败。", "warning")
             mode = str(config.get("agent_mode") or "").strip().lower()
+            report_language = str(config.get("report_language") or "").strip().lower()
             if mode not in {"legacy", "orchestrated"}:
                 return _CriticVerdict(False, "探索模式参数非法。", "warning")
+            if report_language not in {"zh", "en"}:
+                return _CriticVerdict(False, "探索报告语言参数非法。", "warning")
             if not (2 <= agent_count <= 8 and 1 <= depth <= 5):
                 return _CriticVerdict(False, "探索参数超出允许范围。", "warning")
             return _CriticVerdict(True, "探索参数确认完成。")

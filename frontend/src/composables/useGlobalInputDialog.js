@@ -5,6 +5,8 @@ const INITIAL_STATE = {
   title: '',
   message: '',
   placeholder: '',
+  inputType: 'text',
+  optionItems: [],
   confirmText: '确认',
   cancelText: '取消',
   value: '',
@@ -36,6 +38,27 @@ function normalizeText(value) {
   return String(value ?? '').trim();
 }
 
+function normalizeOptionItems(rawOptions) {
+  if (!Array.isArray(rawOptions)) return [];
+  const items = [];
+  for (const option of rawOptions) {
+    if (option === null || option === undefined) continue;
+    if (typeof option === 'string' || typeof option === 'number') {
+      const normalizedValue = String(option).trim();
+      if (!normalizedValue) continue;
+      items.push({ label: normalizedValue, value: normalizedValue });
+      continue;
+    }
+    if (typeof option === 'object') {
+      const value = String(option.value ?? '').trim();
+      const label = String(option.label ?? value).trim();
+      if (!value || !label) continue;
+      items.push({ label, value });
+    }
+  }
+  return items;
+}
+
 export function useGlobalInputDialog() {
   function askForInput(options = {}) {
     const title = normalizeText(options?.title) || '请输入内容';
@@ -43,13 +66,19 @@ export function useGlobalInputDialog() {
     const placeholder = String(options?.placeholder || '').trim();
     const confirmText = normalizeText(options?.confirmText) || '确认';
     const cancelText = normalizeText(options?.cancelText) || '取消';
-    const value = String(options?.initialValue || '');
     const required = options?.required !== false;
     const requiredMessage = normalizeText(options?.requiredMessage) || '请输入内容。';
     const maxLengthRaw = Number(options?.maxLength);
     const maxLength = Number.isFinite(maxLengthRaw) && maxLengthRaw > 0
       ? Math.min(500, Math.round(maxLengthRaw))
       : INITIAL_STATE.maxLength;
+    const optionItems = normalizeOptionItems(options?.options);
+    const inputType = optionItems.length ? 'select' : 'text';
+    const initialRawValue = String(options?.initialValue || '');
+    const selectValue = optionItems.some((item) => item.value === initialRawValue)
+      ? initialRawValue
+      : String(optionItems[0]?.value || '');
+    const value = inputType === 'select' ? selectValue : initialRawValue;
 
     if (typeof pendingResolver === 'function') {
       pendingResolver(null);
@@ -63,6 +92,8 @@ export function useGlobalInputDialog() {
       title,
       message,
       placeholder,
+      inputType,
+      optionItems,
       confirmText,
       cancelText,
       value,
@@ -91,9 +122,17 @@ export function useGlobalInputDialog() {
   function confirmInput() {
     const rawValue = String(dialogState.value || '');
     const value = rawValue.trim();
+    const isSelect = String(dialogState.inputType || '').trim().toLowerCase() === 'select';
+    const optionItems = Array.isArray(dialogState.optionItems) ? dialogState.optionItems : [];
+    const optionValues = new Set(optionItems.map((item) => String(item.value || '').trim()).filter(Boolean));
 
     if (dialogState.required && !value) {
       dialogState.errorMessage = dialogState.requiredMessage || '请输入内容。';
+      return;
+    }
+
+    if (isSelect && value && !optionValues.has(value)) {
+      dialogState.errorMessage = dialogState.requiredMessage || '请选择有效选项。';
       return;
     }
 
