@@ -178,24 +178,6 @@ class InsightExplorationService:
                 stream_callback=stream_callback,
             )
 
-        streamed_chars = 0
-
-        async def emit_stream_chunk(chunk: str, *, done: bool = False) -> None:
-            nonlocal streamed_chars
-            if stream_callback is None:
-                return
-            safe_chunk = str(chunk or "")
-            if safe_chunk:
-                streamed_chars += len(safe_chunk)
-            await stream_callback(
-                {
-                    "section": "insight_markdown",
-                    "chunk": safe_chunk,
-                    "accumulated_chars": streamed_chars,
-                    "done": bool(done),
-                }
-            )
-
         normalized_papers = self._normalize_papers(papers)
         graph_stats = self._extract_graph_stats(graph_payload or {})
         history_memory = await asyncio.to_thread(self._load_history_memory, safe_user_id)
@@ -207,22 +189,6 @@ class InsightExplorationService:
         }
         extension_notes: list[str] = []
         extension_papers: list[dict[str, Any]] = []
-
-        await emit_stream_chunk(
-            self._format_line(
-                language,
-                zh=(
-                    f"# 探索与洞察正在生成\n"
-                    f"- 查询：`{safe_query}`\n"
-                    f"- 配置：{resolved_agent_count} Agents，探索深度 {resolved_depth}\n"
-                ),
-                en=(
-                    f"# Exploration In Progress\n"
-                    f"- Query: `{safe_query}`\n"
-                    f"- Setup: {resolved_agent_count} agents, depth {resolved_depth}\n"
-                ),
-            )
-        )
 
         for round_index in range(1, rounds + 1):
             expansion_queries = self._build_round_expansion_queries(
@@ -259,23 +225,6 @@ class InsightExplorationService:
                 session_memory=session_memory,
             )
             session_memory["decisions"].extend(role_outputs)
-            await emit_stream_chunk(
-                self._format_line(
-                    language,
-                    zh=(
-                        f"\n### 轮次 {round_index} 进展\n"
-                        f"- 活跃 Agents：{len(active_roles)}\n"
-                        f"- 当前证据池：基础 {len(normalized_papers)} + 扩展 {len(extension_papers)}\n"
-                        f"- 新增洞察片段：{max(0, len(role_outputs))}\n"
-                    ),
-                    en=(
-                        f"\n### Round {round_index} Progress\n"
-                        f"- Active agents: {len(active_roles)}\n"
-                        f"- Evidence pool: base {len(normalized_papers)} + expansion {len(extension_papers)}\n"
-                        f"- New insight snippets: {max(0, len(role_outputs))}\n"
-                    ),
-                )
-            )
 
         markdown = await self._compose_markdown(
             language=language,
@@ -296,7 +245,6 @@ class InsightExplorationService:
                 markdown=markdown,
                 callback=stream_callback,
                 section="insight_markdown",
-                start_accumulated=streamed_chars,
             )
 
         artifact = await asyncio.to_thread(
@@ -359,42 +307,10 @@ class InsightExplorationService:
     ) -> dict[str, Any]:
         streamed_chars = 0
 
-        async def emit_stream_chunk(chunk: str, *, done: bool = False) -> None:
-            nonlocal streamed_chars
-            if stream_callback is None:
-                return
-            safe_chunk = str(chunk or "")
-            if safe_chunk:
-                streamed_chars += len(safe_chunk)
-            await stream_callback(
-                {
-                    "section": "insight_markdown",
-                    "chunk": safe_chunk,
-                    "accumulated_chars": streamed_chars,
-                    "done": bool(done),
-                }
-            )
-
         graph_stats = self._extract_graph_stats(graph_payload or {})
         history_memory = await asyncio.to_thread(self._load_history_memory, user_id)
         extension_notes: list[str] = []
         extension_papers: list[dict[str, Any]] = []
-
-        await emit_stream_chunk(
-            self._format_line(
-                language,
-                zh=(
-                    f"# 探索与洞察正在生成\n"
-                    f"- 查询：`{query}`\n"
-                    f"- 配置：{agent_count} Agents，探索深度 {exploration_depth}（orchestrated）\n"
-                ),
-                en=(
-                    f"# Exploration In Progress\n"
-                    f"- Query: `{query}`\n"
-                    f"- Setup: {agent_count} agents, depth {exploration_depth} (orchestrated)\n"
-                ),
-            )
-        )
 
         profiles = self._build_agent_profiles(active_roles)
         profiles_by_id = {item.profile_id: item for item in profiles}
@@ -501,26 +417,6 @@ class InsightExplorationService:
                     role_outputs.append(output)
             session_memory = memory_service.build_session_view(run_id=journal.run_id)
 
-            await emit_stream_chunk(
-                self._format_line(
-                    language,
-                    zh=(
-                        f"\n### 轮次 {round_index} 进展\n"
-                        f"- 活跃 Agents：{len(active_roles)}\n"
-                        f"- 当前证据池：基础 {len(normalized_papers)} + 扩展 {len(extension_papers)}\n"
-                        f"- 执行任务数：{round_result.total_task_count}（子代理扩展 {round_result.spawned_task_count}）\n"
-                        f"- 新增洞察片段：{max(0, len(role_outputs))}\n"
-                    ),
-                    en=(
-                        f"\n### Round {round_index} Progress\n"
-                        f"- Active agents: {len(active_roles)}\n"
-                        f"- Evidence pool: base {len(normalized_papers)} + expansion {len(extension_papers)}\n"
-                        f"- Executed tasks: {round_result.total_task_count} (spawned {round_result.spawned_task_count})\n"
-                        f"- New insight snippets: {max(0, len(role_outputs))}\n"
-                    ),
-                )
-            )
-
         markdown = await self._compose_markdown(
             language=language,
             query=query,
@@ -539,7 +435,6 @@ class InsightExplorationService:
                 markdown=markdown,
                 callback=stream_callback,
                 section="insight_markdown",
-                start_accumulated=streamed_chars,
             )
 
         artifact = await asyncio.to_thread(
@@ -623,6 +518,34 @@ class InsightExplorationService:
             "synthesis_editor": ("paper_catalog", "graph_stats", "llm"),
         }
         return mapping.get(str(role_id or "").strip(), ("llm",))
+
+    @staticmethod
+    def _resolve_role_report_focus(*, role_id: str, language: str) -> str:
+        safe_language = str(language or "").strip().lower()
+        safe_role_id = str(role_id or "").strip()
+        mapping_zh: dict[str, str] = {
+            "state_analyst": "鼻祖论文起源、早期方法与首批落地应用",
+            "relation_analyst": "鼻祖论文之后的技术分支与延续链条",
+            "innovation_architect": "尚未被充分挖掘的创新方向与架构机会",
+            "application_designer": "当前可落地场景、部署形态与应用价值",
+            "evidence_scout": "关键论文证据与可核验引用线索",
+            "feasibility_critic": "应用落地约束、实施条件与可行路径",
+            "risk_skeptic": "延续路线中的核心风险、假设与反例",
+            "synthesis_editor": "形成完整叙事：起源-延续-应用-创新空白",
+        }
+        mapping_en: dict[str, str] = {
+            "state_analyst": "origin paper, early method rationale, and first deployments",
+            "relation_analyst": "continuation chain and technical branches after the seminal work",
+            "innovation_architect": "under-explored innovation opportunities and architecture ideas",
+            "application_designer": "current deployment scenarios and practical value capture",
+            "evidence_scout": "verifiable paper evidence and citation-quality traceability",
+            "feasibility_critic": "constraints, requirements, and executable implementation paths",
+            "risk_skeptic": "core risks, assumptions, and counter-evidence in continuation tracks",
+            "synthesis_editor": "a coherent narrative from origin to continuation, deployment, and open gaps",
+        }
+        if safe_language == "zh":
+            return mapping_zh.get(safe_role_id, "基于证据补齐该方向的核心研究脉络")
+        return mapping_en.get(safe_role_id, "complete the evidence-backed research storyline")
 
     async def _execute_orchestrated_task(
         self,
@@ -1242,8 +1165,9 @@ class InsightExplorationService:
                         {
                             "role": "system",
                             "content": (
-                                "You are a specialized research sub-agent. "
-                                "Return one concise paragraph with actionable insights."
+                                "You are a specialized research analyst. "
+                                "Return one deep paragraph with evidence-backed and actionable insights. "
+                                "Do not describe workflow or agent collaboration process."
                             ),
                         },
                         {
@@ -1287,11 +1211,13 @@ class InsightExplorationService:
     ) -> str:
         top_papers = self._top_papers_for_prompt(papers + extension_papers, limit=6)
         role_name = role.title_zh if language == "zh" else role.title_en
+        role_focus = self._resolve_role_report_focus(role_id=role.role_id, language=language)
         context = {
             "query": query,
             "round": round_index,
             "role": role_name,
             "focus": role.focus,
+            "report_focus": role_focus,
             "objective": str(objective or "").strip(),
             "graph_stats": graph_stats,
             "top_papers": top_papers,
@@ -1301,14 +1227,18 @@ class InsightExplorationService:
         }
         if language == "zh":
             return (
-                "请作为科研多智能体中的一个子角色，基于上下文输出一段中文洞察。"
-                "内容必须包含：当前发展判断、证据指向、可行创新方向。"
+                "你是科研分析写作助手。请基于上下文输出一段中文深度分析（220-420字）。"
+                f"本段重点：{role_focus}。"
+                "内容必须包含：证据链（引用论文标题/年份）、关键判断、可执行建议。"
+                "禁止描述工作流、Agent、子代理、协商轮次、工具调用过程。"
                 "上下文："
                 f"{context}"
             )
         return (
-            "Act as a sub-agent in a research multi-agent system and provide one concise insight paragraph in English. "
-            "Must include: current status judgment, evidence cue, feasible innovation direction. "
+            "You are a research writing analyst. Produce one deep English paragraph (150-260 words). "
+            f"Primary focus: {role_focus}. "
+            "The paragraph must include evidence links (paper title/year), key judgments, and executable recommendations. "
+            "Do not describe workflow, agents, rounds, or tool invocation process. "
             f"Context: {context}"
         )
 
@@ -1326,14 +1256,16 @@ class InsightExplorationService:
         total_papers = len(papers) + len(extension_papers)
         if language == "zh":
             return (
-                f"[R{round_index}] {role.title_zh}：围绕“{query}”，当前证据池共 {total_papers} 篇论文，"
+                f"围绕“{query}”的证据中，当前样本共 {total_papers} 篇论文，"
                 f"图谱节点 {graph_stats['node_count']}、关系 {graph_stats['edge_count']}。"
-                f"建议优先聚焦“{role.focus}”并设计可验证的增量实验。"
+                f"建议围绕“{self._resolve_role_report_focus(role_id=role.role_id, language='zh')}”"
+                "补齐“起源论文-延续工作-应用落地-创新空白”的连续证据链，并优先规划可验证的小规模试点。"
             )
         return (
-            f"[R{round_index}] {role.title_en}: For '{query}', the evidence pool has {total_papers} papers "
+            f"For '{query}', the evidence pool currently contains {total_papers} papers "
             f"with {graph_stats['node_count']} graph nodes and {graph_stats['edge_count']} relations. "
-            f"Prioritize '{role.focus}' with a verifiable incremental experiment path."
+            f"Prioritize '{self._resolve_role_report_focus(role_id=role.role_id, language='en')}' "
+            "and build a continuous evidence chain from origin paper to continuation work, deployments, and open innovation gaps."
         )
 
     async def _compose_markdown(
@@ -1351,160 +1283,473 @@ class InsightExplorationService:
         rounds: int,
         extension_notes: list[str],
     ) -> str:
-        now_text = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
-        top_papers = self._top_papers_for_prompt(base_papers + extension_papers, limit=8)
-        role_labels = [
-            role.title_zh if language == "zh" else role.title_en
-            for role in active_roles
-        ]
-        hypotheses = (session_memory.get("hypotheses") or [])[:8]
-        critic_notes = (session_memory.get("critic_notes") or [])[:8]
-        decisions = (session_memory.get("decisions") or [])[:10]
+        del input_type, active_roles, rounds
+        safe_language = "zh" if language == "zh" else "en"
+        all_papers = self._merge_papers(
+            base_papers,
+            extension_papers,
+            limit=max(1, len(base_papers) + len(extension_papers)),
+        )
+        papers_sorted_by_year = sorted(
+            [item for item in all_papers if self._safe_int(item.get("year"), 0) > 0],
+            key=lambda item: (
+                self._safe_int(item.get("year"), 0),
+                -self._safe_int(item.get("citation_count"), 0),
+                str(item.get("title") or "").lower(),
+            ),
+        )
+        papers_sorted_by_citation = sorted(
+            all_papers,
+            key=lambda item: (
+                self._safe_int(item.get("citation_count"), 0),
+                self._safe_int(item.get("year"), 0),
+            ),
+            reverse=True,
+        )
 
-        if language == "zh":
+        if papers_sorted_by_year:
+            founder_candidates = papers_sorted_by_year[:3]
+        else:
+            founder_candidates = papers_sorted_by_citation[:3]
+        founder_primary = founder_candidates[0] if founder_candidates else None
+
+        decisions = self._dedupe_report_lines(session_memory.get("decisions") or [], limit=36, language=safe_language)
+        hypotheses = self._dedupe_report_lines(session_memory.get("hypotheses") or [], limit=18, language=safe_language)
+        critic_notes = self._dedupe_report_lines(session_memory.get("critic_notes") or [], limit=18, language=safe_language)
+        history_notes = self._dedupe_report_lines(history_memory or [], limit=8, language=safe_language)
+        del extension_notes
+        narrative_pool = self._dedupe_report_lines(
+            decisions + hypotheses + critic_notes + history_notes,
+            limit=42,
+            language=safe_language,
+        )
+
+        founder_notes = narrative_pool[:10]
+        extension_notes_section = narrative_pool[10:22]
+        application_notes = narrative_pool[22:32]
+        innovation_notes = hypotheses[:10] + critic_notes[:6] + narrative_pool[32:40]
+        application_clusters = self._infer_application_clusters(all_papers, language=safe_language)
+        references = papers_sorted_by_citation[:40]
+
+        if safe_language == "zh":
             sections = [
                 "# 探索与洞察报告",
                 "",
-                f"- 查询主题：`{query}`",
-                f"- 输入类型：`{input_type}`",
-                f"- 生成时间：`{now_text}`",
-                f"- 多智能体配置：`{len(active_roles)} Agents`，`{rounds} 轮协商/探索`",
-                "",
-                "## 1. 领域现状与论文关系",
-                f"- 基础论文池：{len(base_papers)} 篇；扩展论文池：{len(extension_papers)} 篇（总计 {len(base_papers) + len(extension_papers)} 篇）",
-                f"- 图谱规模：节点 {graph_stats['node_count']}，关系 {graph_stats['edge_count']}，论文节点 {graph_stats['paper_node_count']}",
-                "- 当前发展判断：该领域在方法演进与应用落地之间呈现并行推进趋势，部分分支出现快速迭代与结构重组信号。",
-                "",
-                "## 2. 代表论文与关系脉络",
+                "## 1. 该领域/论文的鼻祖论文、由来与最初成果落地",
             ]
-            for item in top_papers:
+            if founder_primary is not None:
+                founder_title = str(founder_primary.get("title") or "未知标题").strip()
+                founder_year = self._safe_int(founder_primary.get("year"), 0)
+                founder_citations = self._safe_int(founder_primary.get("citation_count"), 0)
+                founder_venue = str(founder_primary.get("venue") or "Unknown").strip() or "Unknown"
                 sections.append(
-                    f"- {item['title']} ({item['year'] or '-'}), 引用 {item['citation_count']}，"
-                    f"venue: {item['venue'] or 'Unknown'}"
+                    (
+                        f"基于当前检索样本（共 {len(all_papers)} 篇论文），最早且影响力突出的候选鼻祖论文为"
+                        f"《{founder_title}》（{founder_year or '年份未知'}，引用 {founder_citations}，"
+                        f"发表渠道 {founder_venue}）。以下论述严格以当前样本证据为边界，不做超样本断言。"
+                    )
                 )
-            sections.extend(
-                [
-                    "",
-                    "## 3. 发散性可行性探索（创新点/创新架构/创新应用）",
-                ]
-            )
-            if hypotheses:
-                for note in hypotheses:
+                abstract_summary = self._summarize_abstract_text(
+                    founder_primary.get("abstract"),
+                    max_chars=320,
+                )
+                if abstract_summary:
+                    sections.append(
+                        f"从论文摘要可提炼的起点贡献是：{abstract_summary}"
+                    )
+            else:
+                sections.append(
+                    "当前检索样本不足以唯一锁定单一鼻祖论文，因此以下采用“最早年份 + 引用影响力”的联合标准进行候选判断。"
+                )
+            if founder_candidates:
+                sections.append("鼻祖候选证据：")
+                for item in founder_candidates:
+                    sections.append(
+                        f"- {self._format_paper_reference_line(item, language='zh')}"
+                    )
+            if founder_notes:
+                sections.append("由来路径与早期落地线索：")
+                for note in founder_notes:
                     sections.append(f"- {note}")
             else:
-                sections.append("- 当前可行创新点集中在模块组合优化、任务迁移策略与低成本部署路径。")
-            sections.extend(
-                [
-                    "",
-                    "## 4. 多智能体协作摘要",
-                    f"- 角色集合：{', '.join(role_labels)}",
-                ]
-            )
-            if extension_notes:
-                sections.extend([f"- {note}" for note in extension_notes[:6]])
-            if decisions:
-                sections.extend([f"- {line}" for line in decisions[:6]])
-            sections.extend(
-                [
-                    "",
-                    "## 5. 风险与约束",
-                ]
-            )
-            if critic_notes:
-                sections.extend([f"- {line}" for line in critic_notes[:6]])
-            else:
-                sections.append("- 主要风险包括评估指标偏差、外部数据分布漂移与工程资源预算约束。")
-            sections.extend(
-                [
-                    "",
-                    "## 6. 下一步建议",
-                    "- 建议 1：基于图谱桥接节点构建最小可验证创新原型。",
-                    "- 建议 2：针对高潜力应用场景设计双轨实验（离线评估 + 小规模在线验证）。",
-                    "- 建议 3：将关键假设写入后续记忆库并持续迭代证据。",
-                ]
-            )
-            if history_memory:
                 sections.extend(
                     [
-                        "",
-                        "## 附录：历史记忆参考",
-                        *[f"- {line}" for line in history_memory[:3]],
+                        "- 起源阶段通常由“核心问题定义 + 可复现基线”共同形成。",
+                        "- 首批落地往往出现在可测量收益明确、试点成本较低的场景。",
+                        "- 从早期论文到应用验证之间，关键瓶颈通常是数据、评估与工程可靠性。",
                     ]
                 )
+
+            sections.extend(
+                [
+                    "",
+                    "## 2. 基于鼻祖论文的扩展与延续工作（思路细节）",
+                    "基于已检索论文构造的延续时间线：",
+                ]
+            )
+            for item in papers_sorted_by_year[:16]:
+                sections.append(f"- {self._format_paper_reference_line(item, language='zh')}")
+            if extension_notes_section:
+                sections.append("延续工作中的关键扩展思路：")
+                for note in extension_notes_section[:14]:
+                    sections.append(f"- {note}")
+            else:
+                sections.extend(
+                    [
+                        "- 典型延续路线包括：模型能力增强、任务迁移、数据效率优化和部署成本压缩。",
+                        "- 关键细节通常体现在训练目标调整、结构约束设计和评测协议标准化。",
+                        "- 延续工作是否成立，核心取决于“效果提升是否稳健、代价是否可接受、场景是否可迁移”。",
+                    ]
+                )
+
+            sections.extend(
+                [
+                    "",
+                    "## 3. 当前应用与落地（论文证据与场景）",
+                    (
+                        f"当前样本显示：该方向已有明确应用趋势，证据覆盖 {len(all_papers)} 篇论文，"
+                        f"图谱规模为节点 {graph_stats['node_count']}、关系 {graph_stats['edge_count']}。"
+                    ),
+                ]
+            )
+            if application_clusters:
+                for cluster in application_clusters[:8]:
+                    scenario_name = str(cluster.get("name") or "通用场景")
+                    evidence_lines = cluster.get("evidence") if isinstance(cluster.get("evidence"), list) else []
+                    sections.append(f"- 场景：{scenario_name}")
+                    for line in evidence_lines[:4]:
+                        sections.append(f"  证据：{line}")
+            if application_notes:
+                sections.append("应用落地补充观察：")
+                for note in application_notes[:10]:
+                    sections.append(f"- {note}")
+            else:
+                sections.extend(
+                    [
+                        "- 当前落地多呈现“先局部流程替代，再逐步扩展系统边界”的推进路径。",
+                        "- 高价值场景通常优先关注可量化 KPI，如准确率、时延、单位成本与可靠性。",
+                        "- 论文中的可复现证据与产业部署中的长期稳定性仍存在显著鸿沟，需持续验证。",
+                    ]
+                )
+
+            sections.extend(
+                [
+                    "",
+                    "## 4. 尚未被充分挖掘的创新点（可行性发散）",
+                ]
+            )
+            if innovation_notes:
+                for note in innovation_notes[:16]:
+                    sections.append(f"- {note}")
+            else:
+                sections.extend(
+                    [
+                        "- 创新点 A：跨场景迁移的统一中间表示，降低每个新场景的重新训练成本。",
+                        "- 创新点 B：结合因果约束的评估框架，提升在分布偏移场景下的稳定性。",
+                        "- 创新点 C：以低资源部署为目标的轻量化架构，扩大真实业务可用范围。",
+                        "- 创新点 D：将知识图谱结构先验与生成模型结合，提升复杂关系推理可靠性。",
+                    ]
+                )
+
+            sections.extend(
+                [
+                    "",
+                    "## 5. 总结",
+                    (
+                        f"围绕“{query}”，当前证据显示该方向已经形成“起源论文 -> 连续扩展 -> 多场景落地”的主线，"
+                        "但在可复现性、跨场景稳健性和规模化部署成本方面仍有明显改进空间。"
+                    ),
+                    "- 结论 1：鼻祖论文提供了问题定义与方法起点，后续工作主要沿性能、效率与适配性三条线并行演化。",
+                    "- 结论 2：应用落地已发生，但高质量工程化仍依赖严格评估与持续迭代。",
+                    "- 结论 3：下一阶段创新价值主要来自“架构整合 + 评估升级 + 低成本部署”三者协同。",
+                ]
+            )
+
+            sections.extend(
+                [
+                    "",
+                    "## 6. 引用论文情况（如实列出）",
+                    (
+                        f"以下为本次报告使用的论文样本清单（按引用量降序，样本内共 {len(all_papers)} 篇，"
+                        f"此处展示 {len(references)} 篇）："
+                    ),
+                ]
+            )
+            for index, item in enumerate(references, start=1):
+                sections.append(f"{index}. {self._format_paper_reference_line(item, language='zh')}")
+            if not references:
+                sections.append("- 当前样本中无可引用论文条目。")
             return "\n".join(sections).strip() + "\n"
 
         sections = [
-            "# Exploration & Insight Report",
+            "# Exploration Insight Report",
             "",
-            f"- Query: `{query}`",
-            f"- Input Type: `{input_type}`",
-            f"- Generated At: `{now_text}`",
-            f"- Multi-agent Setup: `{len(active_roles)} agents`, `{rounds} exploration rounds`",
-            "",
-            "## 1. Domain Status and Paper Relationships",
-            f"- Base paper pool: {len(base_papers)}; expansion pool: {len(extension_papers)} (total {len(base_papers) + len(extension_papers)})",
-            (
-                f"- Graph scale: {graph_stats['node_count']} nodes, "
-                f"{graph_stats['edge_count']} edges, {graph_stats['paper_node_count']} paper nodes"
-            ),
-            "- Current status: the field is advancing in parallel tracks of method innovation and application implementation.",
-            "",
-            "## 2. Representative Papers and Relationship Clusters",
+            "## 1. Seminal Paper, Origin Path, and First Deployments",
         ]
-        for item in top_papers:
+        if founder_primary is not None:
+            founder_title = str(founder_primary.get("title") or "Unknown title").strip()
+            founder_year = self._safe_int(founder_primary.get("year"), 0)
+            founder_citations = self._safe_int(founder_primary.get("citation_count"), 0)
+            founder_venue = str(founder_primary.get("venue") or "Unknown").strip() or "Unknown"
             sections.append(
-                f"- {item['title']} ({item['year'] or '-'}), citations {item['citation_count']}, "
-                f"venue: {item['venue'] or 'Unknown'}"
+                (
+                    f"Based on the current evidence pool ({len(all_papers)} papers), the leading seminal-paper candidate is "
+                    f"'{founder_title}' ({founder_year or 'year unknown'}, citations {founder_citations}, venue {founder_venue}). "
+                    "All conclusions below stay within the retrieved evidence scope."
+                )
             )
-        sections.extend(
-            [
-                "",
-                "## 3. Divergent Feasibility Exploration",
-            ]
-        )
-        if hypotheses:
-            sections.extend([f"- {note}" for note in hypotheses[:8]])
+            abstract_summary = self._summarize_abstract_text(
+                founder_primary.get("abstract"),
+                max_chars=420,
+            )
+            if abstract_summary:
+                sections.append(f"Core contribution signal from the abstract: {abstract_summary}")
         else:
-            sections.append("- Practical opportunities are concentrated in modular redesign, transfer strategy, and low-cost deployment.")
+            sections.append(
+                "The current retrieval sample is insufficient to lock a single seminal paper, so candidates are ranked by earliest year plus citation impact."
+            )
+        if founder_candidates:
+            sections.append("Seminal-paper candidates:")
+            for item in founder_candidates:
+                sections.append(f"- {self._format_paper_reference_line(item, language='en')}")
+        if founder_notes:
+            sections.append("Origin and early adoption signals:")
+            for note in founder_notes:
+                sections.append(f"- {note}")
+
         sections.extend(
             [
                 "",
-                "## 4. Multi-agent Deliberation Summary",
-                f"- Active roles: {', '.join(role_labels)}",
+                "## 2. Continuation Chain and Extension Details from the Seminal Work",
+                "Timeline of continuation evidence in retrieved papers:",
             ]
         )
-        if extension_notes:
-            sections.extend([f"- {note}" for note in extension_notes[:6]])
-        if decisions:
-            sections.extend([f"- {line}" for line in decisions[:6]])
+        for item in papers_sorted_by_year[:16]:
+            sections.append(f"- {self._format_paper_reference_line(item, language='en')}")
+        if extension_notes_section:
+            sections.append("Detailed continuation patterns:")
+            for note in extension_notes_section[:14]:
+                sections.append(f"- {note}")
+
         sections.extend(
             [
                 "",
-                "## 5. Risks and Constraints",
+                "## 3. Current Applications and Deployment Status (Papers + Scenarios)",
+                (
+                    f"Current evidence indicates active deployment tracks across {len(all_papers)} papers, "
+                    f"with graph scale {graph_stats['node_count']} nodes and {graph_stats['edge_count']} relations."
+                ),
             ]
         )
-        if critic_notes:
-            sections.extend([f"- {line}" for line in critic_notes[:6]])
+        if application_clusters:
+            for cluster in application_clusters[:8]:
+                scenario_name = str(cluster.get("name") or "General scenario")
+                evidence_lines = cluster.get("evidence") if isinstance(cluster.get("evidence"), list) else []
+                sections.append(f"- Scenario: {scenario_name}")
+                for line in evidence_lines[:4]:
+                    sections.append(f"  Evidence: {line}")
+        if application_notes:
+            sections.append("Additional deployment observations:")
+            for note in application_notes[:10]:
+                sections.append(f"- {note}")
+
+        sections.extend(
+            [
+                "",
+                "## 4. Under-explored Innovation Opportunities",
+            ]
+        )
+        if innovation_notes:
+            for note in innovation_notes[:16]:
+                sections.append(f"- {note}")
         else:
-            sections.append("- Key risks include evaluation mismatch, distribution shift, and engineering budget constraints.")
-        sections.extend(
-            [
-                "",
-                "## 6. Recommended Next Actions",
-                "- Action 1: build a minimum verifiable prototype around graph bridge nodes.",
-                "- Action 2: run dual-track validation (offline benchmark + limited online trial).",
-                "- Action 3: persist critical hypotheses into memory and iterate with new evidence.",
-            ]
-        )
-        if history_memory:
             sections.extend(
                 [
-                    "",
-                    "## Appendix: Historical Memory Signals",
-                    *[f"- {line}" for line in history_memory[:3]],
+                    "- Opportunity A: unified intermediate representations for cross-scenario transfer.",
+                    "- Opportunity B: causality-aware evaluation under distribution shift.",
+                    "- Opportunity C: low-resource deployment architecture for broader real-world adoption.",
+                    "- Opportunity D: graph priors fused with generation for reliable relation reasoning.",
                 ]
             )
+
+        sections.extend(
+            [
+                "",
+                "## 5. Summary",
+                (
+                    f"For '{query}', the evidence suggests a clear trajectory from seminal work to sustained extensions and growing deployment. "
+                    "The next value frontier is the combination of stronger evaluation, robust transfer, and lower deployment cost."
+                ),
+                "- Conclusion 1: continuation work has expanded capability, efficiency, and portability in parallel.",
+                "- Conclusion 2: deployment already exists, but long-horizon stability still needs stronger proof.",
+                "- Conclusion 3: high-impact innovation now lies in architecture integration plus evaluation upgrades.",
+            ]
+        )
+
+        sections.extend(
+            [
+                "",
+                "## 6. Reference Papers (Factual Listing)",
+                (
+                    f"The following references come from the current retrieved sample, ranked by citation count "
+                    f"({len(all_papers)} total papers, showing {len(references)}):"
+                ),
+            ]
+        )
+        for index, item in enumerate(references, start=1):
+            sections.append(f"{index}. {self._format_paper_reference_line(item, language='en')}")
+        if not references:
+            sections.append("- No citable papers are available in the current sample.")
         return "\n".join(sections).strip() + "\n"
+
+    @staticmethod
+    def _dedupe_report_lines(
+        lines: list[str],
+        *,
+        limit: int,
+        language: str,
+    ) -> list[str]:
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for raw_line in lines:
+            normalized = InsightExplorationService._sanitize_report_line(raw_line, language=language)
+            if not normalized:
+                continue
+            key = re.sub(r"\s+", " ", normalized).strip().lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(normalized)
+            if len(deduped) >= max(1, int(limit)):
+                break
+        return deduped
+
+    @staticmethod
+    def _sanitize_report_line(text: object, *, language: str) -> str:
+        safe = str(text or "").strip()
+        if not safe:
+            return ""
+        noise_patterns = [
+            r"\bsub[- ]?agent(s)?\b",
+            r"\bagent(s)?\b",
+            r"\bworkflow\b",
+            r"\bcheckpoint(_\d+)?\b",
+            r"\borchestrated\b",
+            r"\bround\s*\d+\b",
+            r"第\s*\d+\s*轮",
+            r"子代理",
+            r"多智能体",
+            r"智能体",
+            r"工作流",
+            r"协商",
+            r"工具调用",
+        ]
+        for pattern in noise_patterns:
+            safe = re.sub(pattern, "", safe, flags=re.IGNORECASE)
+        safe = re.sub(r"\[[^\]]{0,16}\]", "", safe)
+        safe = re.sub(r"\s+", " ", safe).strip(" -:：;；,.。")
+        if not safe:
+            return ""
+        max_chars = 380 if str(language or "").strip().lower() == "zh" else 420
+        if len(safe) > max_chars:
+            safe = f"{safe[:max(1, max_chars - 3)].rstrip()}..."
+        return safe
+
+    @staticmethod
+    def _summarize_abstract_text(text: object, *, max_chars: int) -> str:
+        safe = str(text or "").strip()
+        if not safe:
+            return ""
+        safe = re.sub(r"\s+", " ", safe)
+        limit = max(40, int(max_chars))
+        if len(safe) <= limit:
+            return safe
+        return f"{safe[: max(1, limit - 3)].rstrip()}..."
+
+    @staticmethod
+    def _format_paper_reference_line(item: dict[str, Any], *, language: str) -> str:
+        title = str(item.get("title") or "Unknown title").strip() or "Unknown title"
+        year = InsightExplorationService._safe_int(item.get("year"), 0)
+        citation_count = InsightExplorationService._safe_int(item.get("citation_count"), 0)
+        venue = str(item.get("venue") or "Unknown").strip() or "Unknown"
+        if language == "zh":
+            return f"{title}（{year or '年份未知'}，引用 {citation_count}，来源 {venue}）"
+        return f"{title} ({year or 'year unknown'}, citations {citation_count}, venue {venue})"
+
+    @staticmethod
+    def _infer_application_clusters(
+        papers: list[dict[str, Any]],
+        *,
+        language: str,
+    ) -> list[dict[str, Any]]:
+        cluster_specs = [
+            {
+                "id": "healthcare",
+                "name_zh": "医疗健康",
+                "name_en": "Healthcare",
+                "keywords": ("medical", "clinical", "diagnosis", "hospital", "healthcare", "medicine", "医疗", "临床"),
+            },
+            {
+                "id": "finance",
+                "name_zh": "金融与风控",
+                "name_en": "Finance and Risk",
+                "keywords": ("finance", "trading", "portfolio", "credit", "risk", "bank", "金融", "风控"),
+            },
+            {
+                "id": "industry",
+                "name_zh": "工业与制造",
+                "name_en": "Industry and Manufacturing",
+                "keywords": ("industrial", "manufacturing", "factory", "process control", "工厂", "制造", "工业"),
+            },
+            {
+                "id": "robotics",
+                "name_zh": "机器人与自动驾驶",
+                "name_en": "Robotics and Autonomous Systems",
+                "keywords": ("robot", "autonomous", "driving", "navigation", "embodied", "机器人", "自动驾驶"),
+            },
+            {
+                "id": "internet",
+                "name_zh": "搜索推荐与内容系统",
+                "name_en": "Search, Recommendation, and Content",
+                "keywords": ("search", "recommendation", "retrieval", "ranking", "ads", "推荐", "搜索", "排序"),
+            },
+            {
+                "id": "science",
+                "name_zh": "科研工具与知识发现",
+                "name_en": "Scientific Discovery and Tooling",
+                "keywords": ("scientific", "discovery", "knowledge graph", "literature", "科研", "知识图谱", "论文"),
+            },
+        ]
+        scored: list[dict[str, Any]] = []
+        for spec in cluster_specs:
+            evidence: list[str] = []
+            for item in papers:
+                title = str(item.get("title") or "").strip()
+                abstract = str(item.get("abstract") or "").strip()
+                if not title and not abstract:
+                    continue
+                haystack = f"{title} {abstract}".lower()
+                if not any(str(keyword).lower() in haystack for keyword in spec["keywords"]):
+                    continue
+                evidence.append(
+                    InsightExplorationService._format_paper_reference_line(
+                        item,
+                        language=language,
+                    )
+                )
+                if len(evidence) >= 6:
+                    break
+            if not evidence:
+                continue
+            scored.append(
+                {
+                    "name": spec["name_zh"] if language == "zh" else spec["name_en"],
+                    "evidence": evidence,
+                    "score": len(evidence),
+                }
+            )
+        scored.sort(key=lambda item: int(item.get("score") or 0), reverse=True)
+        return scored
 
     async def _stream_markdown(
         self,
@@ -1546,7 +1791,7 @@ class InsightExplorationService:
         pdf_path = output_dir / "insight.pdf"
         if _REPORTLAB_AVAILABLE:
             try:
-                self._write_pdf(
+                pdf_path = self.render_markdown_pdf(
                     markdown=markdown,
                     pdf_path=pdf_path,
                     language=language,
@@ -1561,49 +1806,312 @@ class InsightExplorationService:
             "pdf_path": str(pdf_path) if str(pdf_path).strip() else "",
         }
 
+    def render_markdown_pdf(
+        self,
+        *,
+        markdown: str,
+        pdf_path: Path,
+        language: str | None = None,
+    ) -> Path:
+        safe_markdown = str(markdown or "").strip()
+        if not safe_markdown:
+            raise ValueError("insight_markdown_not_ready")
+
+        target_path = Path(pdf_path)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        safe_language = str(language or "").strip().lower()
+        if safe_language not in {"zh", "en"}:
+            safe_language = "zh"
+
+        if not _REPORTLAB_AVAILABLE:
+            raise RuntimeError("insight_pdf_renderer_unavailable")
+
+        self._write_pdf(
+            markdown=safe_markdown,
+            pdf_path=target_path,
+            language=safe_language,
+        )
+        return target_path
+
     def _write_pdf(self, *, markdown: str, pdf_path: Path, language: str) -> None:
         assert _REPORTLAB_AVAILABLE and canvas is not None and A4 is not None
-        font_name = "Helvetica"
+        base_font = "Helvetica"
+        heading_font = "Helvetica-Bold"
+        code_font = "Courier"
+        emulate_heading_bold = False
         if language == "zh":
             try:
                 assert pdfmetrics is not None and UnicodeCIDFont is not None
                 pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
-                font_name = "STSong-Light"
+                base_font = "STSong-Light"
+                heading_font = "STSong-Light"
+                emulate_heading_bold = True
             except Exception:  # noqa: BLE001
-                font_name = "Helvetica"
+                base_font = "Helvetica"
+                heading_font = "Helvetica-Bold"
+                emulate_heading_bold = False
 
         doc = canvas.Canvas(str(pdf_path), pagesize=A4)
         width, height = A4
-        x = 40
-        y = height - 40
-        line_height = 15
-        doc.setFont(font_name, 11)
+        margin_left = 42
+        margin_right = 42
+        margin_top = 42
+        margin_bottom = 45
+        content_width = max(120, width - margin_left - margin_right)
+        y = height - margin_top
+        in_code_block = False
 
+        def reset_page() -> None:
+            nonlocal y
+            doc.showPage()
+            y = height - margin_top
+            doc.setFont(base_font, 11)
+
+        def ensure_space(required_height: float) -> None:
+            nonlocal y
+            if y - max(0.0, required_height) < margin_bottom:
+                reset_page()
+
+        def draw_single_line(
+            text: str,
+            *,
+            x: float,
+            font_name: str,
+            font_size: int,
+            line_height: int,
+            bold: bool = False,
+        ) -> None:
+            nonlocal y
+            ensure_space(float(line_height))
+            doc.setFont(font_name, font_size)
+            doc.drawString(x, y, text)
+            if bold:
+                doc.drawString(x + 0.28, y, text)
+            y -= line_height
+
+        def draw_wrapped_text(
+            text: str,
+            *,
+            font_name: str,
+            font_size: int,
+            line_height: int,
+            indent: float = 0.0,
+            first_prefix: str = "",
+            space_before: int = 0,
+            space_after: int = 0,
+            heading_bold: bool = False,
+        ) -> None:
+            nonlocal y
+            cleaned = self._clean_markdown_inline(text)
+            if not cleaned and not first_prefix:
+                y -= max(0, space_after)
+                return
+
+            if space_before > 0:
+                ensure_space(float(space_before))
+                y -= space_before
+
+            start_x = margin_left + max(0.0, indent)
+            available_width = max(80.0, content_width - max(0.0, indent))
+            prefix_width = self._measure_text_width(first_prefix, font_name=font_name, font_size=font_size) if first_prefix else 0.0
+
+            if first_prefix:
+                wrapped = self._wrap_text_by_width(
+                    cleaned,
+                    font_name=font_name,
+                    font_size=font_size,
+                    max_width=max(40.0, available_width - prefix_width),
+                )
+                if not wrapped:
+                    wrapped = [""]
+                draw_single_line(
+                    f"{first_prefix}{wrapped[0]}",
+                    x=start_x,
+                    font_name=font_name,
+                    font_size=font_size,
+                    line_height=line_height,
+                    bold=heading_bold,
+                )
+                for segment in wrapped[1:]:
+                    draw_single_line(
+                        segment,
+                        x=start_x + prefix_width,
+                        font_name=font_name,
+                        font_size=font_size,
+                        line_height=line_height,
+                        bold=heading_bold,
+                    )
+            else:
+                wrapped = self._wrap_text_by_width(
+                    cleaned,
+                    font_name=font_name,
+                    font_size=font_size,
+                    max_width=available_width,
+                )
+                if not wrapped:
+                    wrapped = [""]
+                for segment in wrapped:
+                    draw_single_line(
+                        segment,
+                        x=start_x,
+                        font_name=font_name,
+                        font_size=font_size,
+                        line_height=line_height,
+                        bold=heading_bold,
+                    )
+
+            if space_after > 0:
+                y -= space_after
+
+        doc.setFont(base_font, 11)
         for raw_line in markdown.splitlines():
-            text = raw_line.rstrip()
-            wrapped = self._wrap_text(text, max_chars=52 if language == "zh" else 96)
-            if not wrapped:
-                wrapped = [""]
-            for segment in wrapped:
-                if y <= 45:
-                    doc.showPage()
-                    doc.setFont(font_name, 11)
-                    y = height - 40
-                doc.drawString(x, y, segment)
-                y -= line_height
+            line = str(raw_line or "").rstrip()
+            stripped = line.strip()
+
+            if stripped.startswith("```"):
+                in_code_block = not in_code_block
+                y -= 3
+                continue
+
+            if in_code_block:
+                draw_wrapped_text(
+                    line,
+                    font_name=code_font,
+                    font_size=9,
+                    line_height=13,
+                    indent=12,
+                    space_before=0,
+                    space_after=1,
+                )
+                continue
+
+            if not stripped:
+                y -= 7
+                continue
+
+            heading_match = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+            if heading_match:
+                level = max(1, min(6, len(heading_match.group(1))))
+                text = heading_match.group(2).strip()
+                heading_size_map = {1: 18, 2: 15, 3: 13, 4: 12, 5: 11, 6: 11}
+                heading_leading_map = {1: 24, 2: 20, 3: 18, 4: 16, 5: 15, 6: 15}
+                heading_before_map = {1: 8, 2: 7, 3: 6, 4: 5, 5: 4, 6: 4}
+                heading_after_map = {1: 4, 2: 3, 3: 2, 4: 2, 5: 2, 6: 1}
+                draw_wrapped_text(
+                    text,
+                    font_name=heading_font,
+                    font_size=heading_size_map[level],
+                    line_height=heading_leading_map[level],
+                    space_before=heading_before_map[level],
+                    space_after=heading_after_map[level],
+                    heading_bold=emulate_heading_bold,
+                )
+                continue
+
+            unordered_match = re.match(r"^\s*[-*+]\s+(.+)$", stripped)
+            if unordered_match:
+                draw_wrapped_text(
+                    unordered_match.group(1),
+                    font_name=base_font,
+                    font_size=11,
+                    line_height=15,
+                    first_prefix="- ",
+                    indent=0,
+                    space_before=0,
+                    space_after=1,
+                )
+                continue
+
+            ordered_match = re.match(r"^\s*(\d+)[.)]\s+(.+)$", stripped)
+            if ordered_match:
+                prefix = f"{ordered_match.group(1)}. "
+                draw_wrapped_text(
+                    ordered_match.group(2),
+                    font_name=base_font,
+                    font_size=11,
+                    line_height=15,
+                    first_prefix=prefix,
+                    indent=0,
+                    space_before=0,
+                    space_after=1,
+                )
+                continue
+
+            if stripped in {"---", "***", "___"}:
+                ensure_space(8)
+                doc.setLineWidth(0.6)
+                doc.line(margin_left, y, width - margin_right, y)
+                y -= 8
+                continue
+
+            draw_wrapped_text(
+                line,
+                font_name=base_font,
+                font_size=11,
+                line_height=16,
+                space_before=0,
+                space_after=2,
+            )
         doc.save()
 
     @staticmethod
-    def _wrap_text(text: str, *, max_chars: int) -> list[str]:
+    def _clean_markdown_inline(text: str) -> str:
+        safe = str(text or "").replace("\t", "    ").strip()
+        if not safe:
+            return ""
+        safe = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", r"\1 (\2)", safe)
+        safe = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 (\2)", safe)
+        safe = re.sub(r"`([^`]*)`", r"\1", safe)
+        safe = re.sub(r"\*\*(.+?)\*\*", r"\1", safe)
+        safe = re.sub(r"__(.+?)__", r"\1", safe)
+        safe = re.sub(r"\*(.+?)\*", r"\1", safe)
+        safe = re.sub(r"_(.+?)_", r"\1", safe)
+        safe = re.sub(r"~~(.+?)~~", r"\1", safe)
+        return safe.strip()
+
+    @staticmethod
+    def _measure_text_width(text: str, *, font_name: str, font_size: int) -> float:
+        safe_text = str(text or "")
+        if not safe_text:
+            return 0.0
+        if pdfmetrics is not None:
+            try:
+                return float(pdfmetrics.stringWidth(safe_text, font_name, font_size))
+            except Exception:  # noqa: BLE001
+                pass
+        return float(len(safe_text)) * float(font_size) * 0.55
+
+    @staticmethod
+    def _wrap_text_by_width(
+        text: str,
+        *,
+        font_name: str,
+        font_size: int,
+        max_width: float,
+    ) -> list[str]:
         safe = str(text or "")
         if not safe:
             return [""]
-        segments: list[str] = []
-        cursor = 0
-        while cursor < len(safe):
-            segments.append(safe[cursor:cursor + max_chars])
-            cursor += max_chars
-        return segments
+        width_limit = max(40.0, float(max_width))
+        lines: list[str] = []
+        current = ""
+
+        for char in safe:
+            candidate = f"{current}{char}"
+            candidate_width = InsightExplorationService._measure_text_width(
+                candidate,
+                font_name=font_name,
+                font_size=font_size,
+            )
+            if current and candidate_width > width_limit:
+                lines.append(current.rstrip())
+                current = char.lstrip()
+                continue
+            current = candidate
+
+        if current or not lines:
+            lines.append(current.rstrip())
+        return [line for line in lines if line] or [""]
 
     def _build_summary(
         self,
@@ -1614,14 +2122,15 @@ class InsightExplorationService:
         rounds: int,
         base_papers: int,
     ) -> str:
+        del role_count, rounds
         if language == "zh":
             return (
-                f"探索完成：{role_count} 个 Agents，{rounds} 轮协作，"
-                f"基础论文 {base_papers} 篇，扩展新增 {extension_count} 篇。"
+                "报告已完成：围绕鼻祖论文、延续工作、当前应用、创新空白、总结与引用清单展开。"
+                f"本次样本包含基础论文 {base_papers} 篇，扩展新增 {extension_count} 篇。"
             )
         return (
-            f"Exploration completed with {role_count} agents across {rounds} rounds, "
-            f"{base_papers} base papers and {extension_count} expanded papers."
+            "Report completed with six sections: seminal origin, continuation chain, current deployment, "
+            f"innovation gaps, summary, and factual references ({base_papers} base papers, {extension_count} expanded papers)."
         )
 
     @staticmethod

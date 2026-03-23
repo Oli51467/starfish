@@ -376,6 +376,17 @@ export async function downloadResearchHistoryReport(historyId, type = 'markdown'
   window.URL.revokeObjectURL(downloadUrl);
 }
 
+export function regenerateResearchHistoryReportPdf(historyId, { accessToken = '' } = {}) {
+  const safeHistoryId = String(historyId || '').trim();
+  if (!safeHistoryId) {
+    throw new Error('history_id_required');
+  }
+  return request(`/api/research-history/${encodeURIComponent(safeHistoryId)}/report/pdf/regenerate`, {
+    method: 'POST',
+    headers: buildAuthHeaders(accessToken)
+  });
+}
+
 export function createResearchWebSocket(sessionId, accessToken = '') {
   const token = String(accessToken || '').trim();
   const wsBase = getWsBaseUrl();

@@ -236,6 +236,19 @@
                           <button
                             class="btn history-canvas-icon-btn"
                             type="button"
+                            :disabled="historyInsightPdfRegenerateLoading || !historyHasInsightReport"
+                            aria-label="重新生成 PDF"
+                            title="重新生成 PDF"
+                            @click="regenerateHistoryInsightPdf"
+                          >
+                            <svg viewBox="0 0 16 16" aria-hidden="true">
+                              <path d="M13.5 8a5.5 5.5 0 1 1-1.16-3.4" />
+                              <path d="M13.5 3.5v3.1h-3.1" />
+                            </svg>
+                          </button>
+                          <button
+                            class="btn history-canvas-icon-btn"
+                            type="button"
                             :disabled="historyInsightMarkdownDownloadLoading"
                             aria-label="下载 MD"
                             title="下载 MD"
@@ -293,7 +306,7 @@ import KnowledgeGraphView from '../components/graph/KnowledgeGraphView.vue';
 import { adaptDomainGraphFromHistoryGraph } from '../components/history/historyGraphAdapter';
 import LoadingState from '../components/common/LoadingState.vue';
 import { useGlobalConfirmDialog } from '../composables/useGlobalConfirmDialog';
-import { downloadResearchHistoryReport, getPaperSignalEvents } from '../api';
+import { downloadResearchHistoryReport, getPaperSignalEvents, regenerateResearchHistoryReportPdf } from '../api';
 import { useAuthStore } from '../stores/authStore';
 import { useResearchHistoryStore } from '../stores/researchHistoryStore';
 
@@ -322,6 +335,7 @@ const {
 
 const historyGraphViewRef = ref(null);
 const historyResultViewTab = ref('graph');
+const historyInsightPdfRegenerateLoading = ref(false);
 const historyInsightMarkdownDownloadLoading = ref(false);
 const historyInsightPdfDownloadLoading = ref(false);
 const selectedHistoryIds = ref([]);
@@ -580,6 +594,25 @@ async function downloadHistoryInsightPdf() {
   }
 }
 
+async function regenerateHistoryInsightPdf() {
+  if (historyInsightPdfRegenerateLoading.value) return;
+  const safeHistoryId = activeHistoryId.value;
+  if (!safeHistoryId) return;
+  historyInsightPdfRegenerateLoading.value = true;
+  errorMessage.value = '';
+  try {
+    await regenerateResearchHistoryReportPdf(
+      safeHistoryId,
+      { accessToken: accessToken.value }
+    );
+    await fetchHistoryDetail(safeHistoryId, { accessToken: accessToken.value });
+  } catch (error) {
+    errorMessage.value = error?.message || 'PDF 重新生成失败。';
+  } finally {
+    historyInsightPdfRegenerateLoading.value = false;
+  }
+}
+
 function formatSignalEventType(eventType) {
   const normalized = String(eventType || '').trim().toLowerCase();
   if (normalized === 'lineage_expanded') return '关联扩展';
@@ -644,6 +677,7 @@ watch(
   () => selectedDetail.value?.history_id,
   async () => {
     historyResultViewTab.value = 'graph';
+    historyInsightPdfRegenerateLoading.value = false;
     historyInsightMarkdownDownloadLoading.value = false;
     historyInsightPdfDownloadLoading.value = false;
     await loadHistorySignalEvents();

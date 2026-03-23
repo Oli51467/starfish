@@ -406,6 +406,12 @@ class ResearchHistoryBatchDeleteResponse(BaseModel):
     deleted_ids: list[str] = Field(default_factory=list)
 
 
+class ResearchHistoryReportRegenerateResponse(BaseModel):
+    history_id: str
+    regenerated: bool = False
+    pdf_path: str = ""
+
+
 class PaperSignal(BaseModel):
     paper_id: str
     paper_title: str = ""

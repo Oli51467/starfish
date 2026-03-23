@@ -56,22 +56,22 @@ def _build_role_prompt(payload: dict[str, Any]) -> str:
     }
     if language == "zh":
         return (
-            "请作为科研多智能体中的一个子角色，基于上下文输出一段中文洞察。"
-            "内容必须包含：当前发展判断、证据指向、可行创新方向。"
+            "你是科研分析写作助手。请基于上下文输出一段中文深度分析（220-420字）。"
+            "内容必须包含：证据链（引用论文标题/年份）、关键判断、可执行建议。"
+            "禁止描述工作流、Agent、子代理、协商轮次、工具调用过程。"
             "上下文："
             f"{context}"
         )
     return (
-        "Act as a sub-agent in a research multi-agent system and provide one concise insight paragraph in English. "
-        "Must include: current status judgment, evidence cue, feasible innovation direction. "
+        "You are a research writing analyst. Produce one deep English paragraph (150-260 words). "
+        "The paragraph must include evidence links (paper title/year), key judgments, and executable recommendations. "
+        "Do not describe workflow, agents, rounds, or tool invocation process. "
         f"Context: {context}"
     )
 
 
 def _fallback_output(payload: dict[str, Any]) -> str:
-    role = payload.get("role") if isinstance(payload.get("role"), dict) else {}
     language = str(payload.get("language") or "en")
-    round_index = _safe_int(payload.get("round_index"), 1)
     query = str(payload.get("query") or "").strip()
     papers = list(payload.get("papers") or [])
     extension_papers = list(payload.get("extension_papers") or [])
@@ -82,14 +82,13 @@ def _fallback_output(payload: dict[str, Any]) -> str:
 
     if language == "zh":
         return (
-            f"[R{round_index}] {str(role.get('title_zh') or '子代理')}：围绕“{query}”，"
-            f"当前证据池共 {total_papers} 篇论文，图谱节点 {node_count}、关系 {edge_count}。"
-            f"建议聚焦“{str(role.get('focus') or '')}”并设计可验证的增量实验。"
+            f"围绕“{query}”的证据样本当前包含 {total_papers} 篇论文，图谱节点 {node_count}、关系 {edge_count}。"
+            "建议围绕“鼻祖论文起源、延续工作细节、当前落地场景、创新空白”形成连续证据链并给出可验证建议。"
         )
     return (
-        f"[R{round_index}] {str(role.get('title_en') or 'Sub-agent')}: For '{query}', "
-        f"the evidence pool has {total_papers} papers with {node_count} graph nodes and {edge_count} relations. "
-        f"Prioritize '{str(role.get('focus') or '')}' with a verifiable incremental experiment path."
+        f"For '{query}', the current evidence sample contains {total_papers} papers "
+        f"with {node_count} graph nodes and {edge_count} relations. "
+        "Build a continuous evidence-backed storyline from seminal origin to continuation works, deployment, and innovation gaps."
     )
 
 
@@ -103,8 +102,8 @@ def execute(payload: dict[str, Any]) -> dict[str, Any]:
                     {
                         "role": "system",
                         "content": (
-                            "You are a specialized research sub-agent. "
-                            "Return one concise paragraph with actionable insights."
+                            "You are a specialized research analyst. "
+                            "Return one deep paragraph with evidence-backed and actionable insights."
                         ),
                     },
                     {"role": "user", "content": prompt},
