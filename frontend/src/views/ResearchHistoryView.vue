@@ -167,13 +167,111 @@
               </div>
             </section>
             <div class="history-detail-stage">
-              <KnowledgeGraphView
-                v-if="historyKnowledgeGraphData"
-                ref="historyGraphViewRef"
-                :graph-data="historyKnowledgeGraphData"
-                mode="panorama_only"
-              />
-              <KnowledgeGraphCanvas v-else-if="domainGraphData" :graph="domainGraphData" :show-tools="true" />
+              <template v-if="historyGraphSource">
+                <KnowledgeGraphView
+                  ref="historyGraphViewRef"
+                  :graph-data="historyGraphSource"
+                  mode="panorama_only"
+                  :show-tools="historyResultViewTab === 'graph'"
+                >
+                  <template #tools-extra>
+                    <div v-if="historyResultViewTab === 'graph' && historyHasInsightReport" class="history-canvas-controls">
+                      <div class="history-canvas-tab-switch" role="tablist" aria-label="历史结果视图切换">
+                        <button
+                          class="history-canvas-tab-btn mono"
+                          :class="{ 'is-active': historyResultViewTab === 'graph' }"
+                          type="button"
+                          role="tab"
+                          :aria-selected="historyResultViewTab === 'graph'"
+                          @click="historyResultViewTab = 'graph'"
+                        >
+                          知识图谱
+                        </button>
+                        <button
+                          class="history-canvas-tab-btn mono"
+                          :class="{ 'is-active': historyResultViewTab === 'report' }"
+                          type="button"
+                          role="tab"
+                          :aria-selected="historyResultViewTab === 'report'"
+                          @click="historyResultViewTab = 'report'"
+                        >
+                          探索报告
+                        </button>
+                      </div>
+                    </div>
+                  </template>
+                </KnowledgeGraphView>
+
+                <section
+                  v-if="historyResultViewTab === 'report' && historyHasInsightReport"
+                  class="panel history-report-panel"
+                >
+                  <div class="history-report-body">
+                    <div class="history-report-head">
+                      <p class="history-report-firstline mono">{{ historyInsightFirstLine }}</p>
+                      <div class="history-report-toolbar">
+                        <div class="history-canvas-tab-switch" role="tablist" aria-label="历史结果视图切换">
+                          <button
+                            class="history-canvas-tab-btn mono"
+                            :class="{ 'is-active': historyResultViewTab === 'graph' }"
+                            type="button"
+                            role="tab"
+                            :aria-selected="historyResultViewTab === 'graph'"
+                            @click="historyResultViewTab = 'graph'"
+                          >
+                            知识图谱
+                          </button>
+                          <button
+                            class="history-canvas-tab-btn mono"
+                            :class="{ 'is-active': historyResultViewTab === 'report' }"
+                            type="button"
+                            role="tab"
+                            :aria-selected="historyResultViewTab === 'report'"
+                            @click="historyResultViewTab = 'report'"
+                          >
+                            探索报告
+                          </button>
+                        </div>
+                        <div class="history-report-download-group">
+                          <button
+                            class="btn history-canvas-icon-btn"
+                            type="button"
+                            :disabled="historyInsightMarkdownDownloadLoading"
+                            aria-label="下载 MD"
+                            title="下载 MD"
+                            @click="downloadHistoryInsightMarkdown"
+                          >
+                            <svg viewBox="0 0 16 16" aria-hidden="true">
+                              <path d="M3.2 2.6h6.1l3.1 3.1v7.7H3.2z" />
+                              <path d="M9.3 2.6v3.1h3.1" />
+                              <path d="M8 7v4.2" />
+                              <path d="M6.3 9.7 8 11.4l1.7-1.7" />
+                            </svg>
+                          </button>
+                          <button
+                            class="btn history-canvas-icon-btn"
+                            type="button"
+                            :disabled="historyInsightPdfDownloadLoading"
+                            aria-label="下载 PDF"
+                            title="下载 PDF"
+                            @click="downloadHistoryInsightPdf"
+                          >
+                            <svg viewBox="0 0 16 16" aria-hidden="true">
+                              <path d="M3.2 2.6h6.1l3.1 3.1v7.7H3.2z" />
+                              <path d="M9.3 2.6v3.1h3.1" />
+                              <path d="M8 7v4.2" />
+                              <path d="M6.3 9.7 8 11.4l1.7-1.7" />
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="history-report-markdown-block">
+                      <pre v-if="historyInsightRestContent" class="history-report-markdown">{{ historyInsightRestContent }}</pre>
+                    </div>
+                  </div>
+                </section>
+              </template>
               <section v-else class="history-detail-empty panel">
                 <p class="muted">该记录缺少可展示的图谱数据。</p>
               </section>
@@ -191,12 +289,11 @@ import { useRouter } from 'vue-router';
 
 import AppHeader from '../components/layout/AppHeader.vue';
 import ErrorBoundary from '../components/common/ErrorBoundary.vue';
-import KnowledgeGraphCanvas from '../components/graph/KnowledgeGraphCanvas.vue';
 import KnowledgeGraphView from '../components/graph/KnowledgeGraphView.vue';
 import { adaptDomainGraphFromHistoryGraph } from '../components/history/historyGraphAdapter';
 import LoadingState from '../components/common/LoadingState.vue';
 import { useGlobalConfirmDialog } from '../composables/useGlobalConfirmDialog';
-import { getPaperSignalEvents } from '../api';
+import { downloadResearchHistoryReport, getPaperSignalEvents } from '../api';
 import { useAuthStore } from '../stores/authStore';
 import { useResearchHistoryStore } from '../stores/researchHistoryStore';
 
@@ -224,6 +321,9 @@ const {
 } = useResearchHistoryStore();
 
 const historyGraphViewRef = ref(null);
+const historyResultViewTab = ref('graph');
+const historyInsightMarkdownDownloadLoading = ref(false);
+const historyInsightPdfDownloadLoading = ref(false);
 const selectedHistoryIds = ref([]);
 const batchSelectMode = ref(false);
 const historySignalEvents = ref([]);
@@ -257,6 +357,39 @@ const historyKnowledgeGraphData = computed(() => {
   const edges = Array.isArray(graph.edges) ? graph.edges : [];
   if (!nodes.length && !edges.length) return null;
   return graph;
+});
+const historyGraphSource = computed(() => {
+  if (historyKnowledgeGraphData.value) return historyKnowledgeGraphData.value;
+  if (domainGraphData.value) return domainGraphData.value;
+  return null;
+});
+const historyPipeline = computed(() => {
+  const pipeline = selectedDetail.value?.pipeline;
+  return pipeline && typeof pipeline === 'object' ? pipeline : null;
+});
+const historyInsight = computed(() => {
+  const insight = historyPipeline.value?.insight;
+  return insight && typeof insight === 'object' ? insight : null;
+});
+const historyInsightMarkdown = computed(() => {
+  const insightMarkdown = String(historyInsight.value?.markdown || '').trim();
+  if (insightMarkdown) return insightMarkdown;
+  return String(historyPipeline.value?.final_report || '').trim();
+});
+const historyHasInsightReport = computed(() => Boolean(historyInsightMarkdown.value));
+const historyInsightFirstLine = computed(() => {
+  const text = historyInsightMarkdown.value;
+  if (!text) return '';
+  const firstBreak = text.indexOf('\n');
+  if (firstBreak < 0) return text;
+  return text.slice(0, firstBreak);
+});
+const historyInsightRestContent = computed(() => {
+  const text = historyInsightMarkdown.value;
+  if (!text) return '';
+  const firstBreak = text.indexOf('\n');
+  if (firstBreak < 0) return '';
+  return text.slice(firstBreak + 1);
 });
 const showSignalPanel = computed(() => {
   const researchType = String(selectedDetail.value?.research_type || '').trim().toLowerCase();
@@ -319,6 +452,7 @@ function syncSelectionWithCurrentPage() {
 
 async function openDetail(historyId) {
   await fetchHistoryDetail(historyId, { accessToken: accessToken.value });
+  historyResultViewTab.value = 'graph';
   await autoCenterPaperHistoryGraph();
 }
 
@@ -401,11 +535,49 @@ async function changePage(nextPage) {
 }
 
 async function autoCenterPaperHistoryGraph() {
-  if (!selectedDetail.value) return;
+  if (!selectedDetail.value || !historyGraphSource.value) return;
   await nextTick();
   await nextTick();
   if (!historyGraphViewRef.value?.refreshGraphDisplay) return;
   await historyGraphViewRef.value.refreshGraphDisplay();
+}
+
+async function downloadHistoryInsightMarkdown() {
+  if (historyInsightMarkdownDownloadLoading.value) return;
+  const safeHistoryId = activeHistoryId.value;
+  if (!safeHistoryId) return;
+  historyInsightMarkdownDownloadLoading.value = true;
+  errorMessage.value = '';
+  try {
+    await downloadResearchHistoryReport(
+      safeHistoryId,
+      'markdown',
+      { accessToken: accessToken.value }
+    );
+  } catch (error) {
+    errorMessage.value = error?.message || 'Markdown 下载失败。';
+  } finally {
+    historyInsightMarkdownDownloadLoading.value = false;
+  }
+}
+
+async function downloadHistoryInsightPdf() {
+  if (historyInsightPdfDownloadLoading.value) return;
+  const safeHistoryId = activeHistoryId.value;
+  if (!safeHistoryId) return;
+  historyInsightPdfDownloadLoading.value = true;
+  errorMessage.value = '';
+  try {
+    await downloadResearchHistoryReport(
+      safeHistoryId,
+      'pdf',
+      { accessToken: accessToken.value }
+    );
+  } catch (error) {
+    errorMessage.value = error?.message || 'PDF 下载失败。';
+  } finally {
+    historyInsightPdfDownloadLoading.value = false;
+  }
 }
 
 function formatSignalEventType(eventType) {
@@ -471,8 +643,20 @@ onMounted(async () => {
 watch(
   () => selectedDetail.value?.history_id,
   async () => {
+    historyResultViewTab.value = 'graph';
+    historyInsightMarkdownDownloadLoading.value = false;
+    historyInsightPdfDownloadLoading.value = false;
     await loadHistorySignalEvents();
     await autoCenterPaperHistoryGraph();
+  }
+);
+
+watch(
+  () => historyHasInsightReport.value,
+  (hasInsight) => {
+    if (!hasInsight && historyResultViewTab.value === 'report') {
+      historyResultViewTab.value = 'graph';
+    }
   }
 );
 

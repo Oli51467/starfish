@@ -25,11 +25,26 @@ def _safe_int(value: object, fallback: int = 0) -> int:
 
 
 def _build_pipeline_payload(state: PipelineState) -> dict:
+    insight = state.get("insight") if isinstance(state.get("insight"), dict) else {}
+    artifact = insight.get("artifact") if isinstance(insight.get("artifact"), dict) else {}
     return {
         "research_goal": state.get("research_goal") or "",
         "execution_plan": list(state.get("execution_plan") or []),
         "final_report": state.get("final_report") or "",
         "checkpoint_feedback": dict(state.get("checkpoint_feedback") or {}),
+        "insight": {
+            "status": str(insight.get("status") or ""),
+            "summary": str(insight.get("summary") or ""),
+            "language": str(insight.get("language") or ""),
+            "agent_count": _safe_int(insight.get("agent_count"), 0),
+            "exploration_depth": _safe_int(insight.get("exploration_depth"), 0),
+            "markdown": str(insight.get("markdown") or ""),
+            "artifact": {
+                "markdown_path": str(artifact.get("markdown_path") or ""),
+                "pdf_path": str(artifact.get("pdf_path") or ""),
+            } if artifact else {},
+            "generated_at": str(insight.get("generated_at") or ""),
+        } if insight else {},
         "parallel_outputs_summary": {
             "research_gaps": len(state.get("research_gaps") or []),
             "critic_notes": len(state.get("critic_notes") or []),

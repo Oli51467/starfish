@@ -526,6 +526,7 @@ class PipelineRuntimeService:
     @staticmethod
     def _build_history_pipeline_payload(state: PipelineState) -> dict[str, Any]:
         insight = state.get("insight") if isinstance(state.get("insight"), dict) else {}
+        artifact = insight.get("artifact") if isinstance(insight.get("artifact"), dict) else {}
         return {
             "research_goal": state.get("research_goal") or "",
             "execution_plan": list(state.get("execution_plan") or []),
@@ -537,6 +538,11 @@ class PipelineRuntimeService:
                 "language": str(insight.get("language") or ""),
                 "agent_count": int(insight.get("agent_count") or 0),
                 "exploration_depth": int(insight.get("exploration_depth") or 0),
+                "markdown": str(insight.get("markdown") or ""),
+                "artifact": {
+                    "markdown_path": str(artifact.get("markdown_path") or ""),
+                    "pdf_path": str(artifact.get("pdf_path") or ""),
+                } if artifact else {},
                 "generated_at": str(insight.get("generated_at") or ""),
             } if insight else {},
             "parallel_outputs_summary": {
