@@ -1504,37 +1504,46 @@ html[data-ui-locale='en'] .workflow-tagline {
 }
 
 .workflow-tagline-typing {
+  --workflow-tagline-steps: 28;
+  --workflow-tagline-width-unit: 1ch;
+  --workflow-tagline-target-width: min(calc(var(--workflow-tagline-steps) * var(--workflow-tagline-width-unit)), 100%);
   display: inline-block;
   width: 0;
   max-width: min(760px, 100%);
   white-space: nowrap;
   overflow: hidden;
   border-right: 1px solid var(--line-2);
-  animation: workflowTypeTagline 4.8s steps(var(--workflow-tagline-steps, 28), end) infinite, workflowTypeCaret 0.9s step-end infinite;
+  animation: workflowTypeTagline 6.2s steps(var(--workflow-tagline-steps), end) infinite, workflowTypeCaret 0.9s step-end infinite;
 }
 
 html[data-ui-locale='en'] .workflow-tagline-typing {
-  --workflow-tagline-steps: 70;
+  --workflow-tagline-steps: 69;
+  --workflow-tagline-width-unit: 1ch;
 }
 
 html[data-ui-locale='zh'] .workflow-tagline-typing {
-  --workflow-tagline-steps: 28;
+  --workflow-tagline-steps: 33;
+  --workflow-tagline-width-unit: 1em;
 }
 
 @keyframes workflowTypeTagline {
-  from {
+  0% {
     width: 0;
   }
 
-  64% {
-    width: min(100%, 76ch);
+  42% {
+    width: var(--workflow-tagline-target-width);
   }
 
-  65% {
+  58% {
+    width: var(--workflow-tagline-target-width);
+  }
+
+  88% {
     width: 0;
   }
 
-  to {
+  100% {
     width: 0;
   }
 }
