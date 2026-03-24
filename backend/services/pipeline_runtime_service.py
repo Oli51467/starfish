@@ -11,12 +11,26 @@ from uuid import uuid4
 
 from models.schemas import UserProfile
 from agents.pipeline.state import PipelineState, build_initial_state
+from services.runtime_evaluation_service import (
+    RuntimeTaskExecutionRecord,
+    RuntimeEvaluationService,
+    get_runtime_evaluation_service,
+)
+from services.unified_memory_service import (
+    UnifiedMemoryService,
+    get_unified_memory_service,
+)
 
 _FINAL_STATUSES = {"completed", "failed", "stopped"}
 
 _DEFAULT_MAX_NEGOTIATION_ROUNDS = 16
 _DEFAULT_MAX_REBID_PER_TASK = 2
 _COORDINATOR_NODE = "coordinator"
+_PARALLEL_CANDIDATE_TASK_KINDS = {"search", "graph_build"}
+_PARALLEL_CANDIDATE_LIMIT: dict[str, int] = {
+    "search": 2,
+    "graph_build": 2,
+}
 
 _TASK_TRANSITIONS: dict[str, tuple[str, ...]] = {
     "planner": ("router",),
@@ -146,6 +160,19 @@ class _CriticVerdict:
 
 
 @dataclass
+class _TaskExecutionResult:
+    contract: _TaskContract
+    registration: _AgentRegistration
+    intent: _TaskIntent
+    next_state: PipelineState | None
+    elapsed_ms: int
+    verdict: _CriticVerdict
+    realized_cost: float
+    execution_error: str = ""
+    is_shadow: bool = False
+
+
+@dataclass
 class _PipelineSessionRuntime:
     session_id: str
     user_id: str
@@ -170,12 +197,18 @@ class _PipelineSessionRuntime:
     budget_spent: float = 0.0
     task_retry_count: dict[str, int] = field(default_factory=dict)
     agent_performance: dict[str, _AgentPerformance] = field(default_factory=dict)
+    eval_prior_cache: dict[str, dict[str, dict[str, float]]] = field(default_factory=dict)
+    memory_prior_cache: dict[str, dict[str, dict[str, float]]] = field(default_factory=dict)
+    prior_cache_round: dict[str, int] = field(default_factory=dict)
+    summary_recorded: bool = False
 
 
 class PipelineRuntimeService:
     def __init__(self) -> None:
         self._sessions: dict[str, _PipelineSessionRuntime] = {}
         self._sessions_lock = asyncio.Lock()
+        self._runtime_eval_service: RuntimeEvaluationService = get_runtime_evaluation_service()
+        self._unified_memory_service: UnifiedMemoryService = get_unified_memory_service()
 
     async def start_session(
         self,
@@ -291,14 +324,17 @@ class PipelineRuntimeService:
                         raise RuntimeError(f"negotiation_budget_exhausted:{intent.kind}")
                     raise RuntimeError(f"no_agent_bid_for_task:{intent.kind}")
 
-                contract = self._award_contract(
+                execution_plan = self._build_execution_plan(
                     runtime=runtime,
                     intent=intent,
-                    bid=winning_bid,
+                    bids=bids,
+                    winning_bid=winning_bid,
+                    registry=registry,
                 )
-                runtime.contracts.append(contract)
-                performance = runtime.agent_performance.setdefault(contract.agent_id, _AgentPerformance())
-                performance.awards += 1
+                if not execution_plan:
+                    raise RuntimeError(f"no_execution_plan:{intent.kind}")
+
+                primary_contract, _, _ = execution_plan[0]
                 await self._publish_event(
                     runtime,
                     {
@@ -307,52 +343,61 @@ class PipelineRuntimeService:
                         "round": runtime.negotiation_round,
                         "task_id": intent.task_id,
                         "task_kind": intent.kind,
-                        "agent_id": contract.agent_id,
-                        "profile": contract.profile,
-                        "contract_id": contract.contract_id,
-                        "confidence": contract.confidence,
-                        "estimated_latency_ms": contract.estimated_latency_ms,
-                        "estimated_cost": contract.estimated_cost,
+                        "agent_id": primary_contract.agent_id,
+                        "profile": primary_contract.profile,
+                        "contract_id": primary_contract.contract_id,
+                        "confidence": primary_contract.confidence,
+                        "estimated_latency_ms": primary_contract.estimated_latency_ms,
+                        "estimated_cost": primary_contract.estimated_cost,
                     },
                 )
 
-                registration = registry.get(contract.agent_id)
-                if registration is None:
-                    raise RuntimeError(f"agent_not_registered:{contract.agent_id}")
-
                 state_before_task = deepcopy(runtime.state)
-                execution_state = self._build_execution_state_for_agent(
-                    state=runtime.state,
-                    registration=registration,
-                    intent=intent,
-                )
-                execution_start = perf_counter()
-                try:
-                    next_state = await registration.node_fn(execution_state)
-                except Exception as exc:
-                    elapsed_ms = int(max(0.0, perf_counter() - execution_start) * 1000)
-                    performance.executions += 1
-                    performance.failures += 1
-                    performance.total_latency_ms += elapsed_ms
-                    realized_cost = self._realize_execution_cost(
-                        contract=contract,
-                        elapsed_ms=elapsed_ms,
-                        approved=False,
+                execution_tasks: list[Awaitable[_TaskExecutionResult]] = []
+                for contract, registration, is_shadow in execution_plan:
+                    runtime.contracts.append(contract)
+                    performance = runtime.agent_performance.setdefault(contract.agent_id, _AgentPerformance())
+                    performance.awards += 1
+                    if is_shadow:
+                        await self._publish_event(
+                            runtime,
+                            {
+                                "type": "negotiation_parallel_shadow_scheduled",
+                                "node": _COORDINATOR_NODE,
+                                "round": runtime.negotiation_round,
+                                "task_id": intent.task_id,
+                                "task_kind": intent.kind,
+                                "agent_id": contract.agent_id,
+                                "profile": contract.profile,
+                                "contract_id": contract.contract_id,
+                                "confidence": contract.confidence,
+                                "estimated_latency_ms": contract.estimated_latency_ms,
+                                "estimated_cost": contract.estimated_cost,
+                            },
+                        )
+                    execution_tasks.append(
+                        self._execute_task_contract(
+                            runtime=runtime,
+                            intent=intent,
+                            contract=contract,
+                            registration=registration,
+                            state_before_task=state_before_task,
+                            is_shadow=is_shadow,
+                        )
                     )
-                    self._apply_runtime_budget_spend(runtime=runtime, realized_cost=realized_cost)
-                    budget_snapshot = self._build_runtime_budget_snapshot(runtime)
-                    await self._publish_event(
-                        runtime,
-                        {
-                            "type": "negotiation_budget_update",
-                            "node": _COORDINATOR_NODE,
-                            "round": runtime.negotiation_round,
-                            "task_kind": intent.kind,
-                            "agent_id": contract.agent_id,
-                            **budget_snapshot,
-                        },
+
+                execution_results = await asyncio.gather(*execution_tasks)
+                for result in execution_results:
+                    await self._ingest_execution_result(
+                        runtime=runtime,
+                        result=result,
                     )
-                    if self._schedule_rebid(runtime=runtime, intent=intent, reason="execution_error"):
+
+                selected_result = self._select_best_execution_result(execution_results)
+                if selected_result is None or not isinstance(selected_result.next_state, dict):
+                    runtime.state = state_before_task
+                    rejection_reason = self._resolve_rejection_reason(execution_results)
+                    if self._schedule_rebid(runtime=runtime, intent=intent, reason=rejection_reason):
                         await self._publish_event(
                             runtime,
                             {
@@ -360,87 +405,31 @@ class PipelineRuntimeService:
                                 "node": _COORDINATOR_NODE,
                                 "round": runtime.negotiation_round,
                                 "task_kind": intent.kind,
-                                "reason": "execution_error",
+                                "reason": rejection_reason,
                                 "retry_count": int(runtime.task_retry_count.get(intent.kind) or 0),
                             },
                         )
                         continue
-                    raise RuntimeError(f"agent_execution_failed:{intent.kind}:{str(exc)}") from exc
+                    raise RuntimeError(self._build_execution_failure_error(intent=intent, results=execution_results))
 
-                if not isinstance(next_state, dict):
-                    raise RuntimeError(f"invalid_agent_state:{intent.kind}")
-
-                runtime.state = self._normalize_agent_output_state(
-                    baseline_state=state_before_task,
-                    execution_state=execution_state,
-                    next_state=next_state,
-                    registration=registration,
-                    intent=intent,
-                )
+                runtime.state = selected_result.next_state
                 runtime.updated_at = datetime.now(timezone.utc)
-                elapsed_ms = int(max(0.0, perf_counter() - execution_start) * 1000)
-
-                verdict = self._critic_review(
-                    intent=intent,
-                    contract=contract,
-                    state_before=state_before_task,
-                    state_after=runtime.state,
-                )
-                realized_cost = self._realize_execution_cost(
-                    contract=contract,
-                    elapsed_ms=elapsed_ms,
-                    approved=verdict.approved,
-                )
-                self._apply_runtime_budget_spend(runtime=runtime, realized_cost=realized_cost)
-                performance.executions += 1
-                performance.total_latency_ms += elapsed_ms
-                budget_snapshot = self._build_runtime_budget_snapshot(runtime)
-                await self._publish_event(
-                    runtime,
-                    {
-                        "type": "negotiation_budget_update",
-                        "node": _COORDINATOR_NODE,
-                        "round": runtime.negotiation_round,
-                        "task_kind": intent.kind,
-                        "agent_id": contract.agent_id,
-                        **budget_snapshot,
-                    },
-                )
-
-                if not verdict.approved:
-                    performance.vetoes += 1
-                    runtime.state = state_before_task
+                runtime.task_retry_count.pop(intent.kind, None)
+                if selected_result.contract.contract_id != primary_contract.contract_id:
                     await self._publish_event(
                         runtime,
                         {
-                            "type": "negotiation_critic_veto",
+                            "type": "negotiation_parallel_winner_promoted",
                             "node": _COORDINATOR_NODE,
                             "round": runtime.negotiation_round,
                             "task_id": intent.task_id,
                             "task_kind": intent.kind,
-                            "agent_id": contract.agent_id,
-                            "profile": contract.profile,
-                            "reason": verdict.reason,
-                            "severity": verdict.severity,
+                            "awarded_contract_id": primary_contract.contract_id,
+                            "selected_contract_id": selected_result.contract.contract_id,
+                            "agent_id": selected_result.contract.agent_id,
+                            "profile": selected_result.contract.profile,
                         },
                     )
-                    if self._schedule_rebid(runtime=runtime, intent=intent, reason=verdict.reason):
-                        await self._publish_event(
-                            runtime,
-                            {
-                                "type": "negotiation_rebid_scheduled",
-                                "node": _COORDINATOR_NODE,
-                                "round": runtime.negotiation_round,
-                                "task_kind": intent.kind,
-                                "reason": verdict.reason,
-                                "retry_count": int(runtime.task_retry_count.get(intent.kind) or 0),
-                            },
-                        )
-                        continue
-                    raise RuntimeError(f"critic_rejected:{intent.kind}:{verdict.reason}")
-
-                performance.successes += 1
-                runtime.task_retry_count.pop(intent.kind, None)
 
                 for next_kind in _TASK_TRANSITIONS.get(intent.kind, ()):
                     runtime.agenda.append(
@@ -509,6 +498,457 @@ class PipelineRuntimeService:
                     "error": str(exc),
                 },
             )
+        finally:
+            await self._record_session_observability(runtime)
+
+    def _build_execution_plan(
+        self,
+        *,
+        runtime: _PipelineSessionRuntime,
+        intent: _TaskIntent,
+        bids: list[_AgentBid],
+        winning_bid: _AgentBid,
+        registry: dict[str, _AgentRegistration],
+    ) -> list[tuple[_TaskContract, _AgentRegistration, bool]]:
+        selected_bids: list[_AgentBid] = [winning_bid]
+        task_kind = str(intent.kind or "").strip().lower()
+        if task_kind in _PARALLEL_CANDIDATE_TASK_KINDS:
+            parallel_limit = max(1, int(_PARALLEL_CANDIDATE_LIMIT.get(task_kind, 1)))
+            reserve = self._estimate_reserved_downstream_cost(task_kind=task_kind)
+            projected_parallel_cost = float(winning_bid.estimated_cost)
+            candidate_pool = [item for item in bids if item.bid_id != winning_bid.bid_id]
+            candidate_pool.sort(
+                key=lambda item: (
+                    -self._score_bid(runtime=runtime, bid=item),
+                    -float(item.confidence),
+                    float(item.estimated_cost),
+                    int(item.estimated_latency_ms),
+                    item.agent_id,
+                )
+            )
+            for candidate in candidate_pool:
+                if len(selected_bids) >= parallel_limit:
+                    break
+                duplicate = any(
+                    item.agent_id == candidate.agent_id
+                    and self._normalize_profile_alias(item.profile) == self._normalize_profile_alias(candidate.profile)
+                    for item in selected_bids
+                )
+                if duplicate:
+                    continue
+                projected_spend = (
+                    float(runtime.budget_spent)
+                    + projected_parallel_cost
+                    + float(candidate.estimated_cost)
+                )
+                if projected_spend + reserve > float(runtime.budget_limit) + 1e-9:
+                    continue
+                selected_bids.append(candidate)
+                projected_parallel_cost += float(candidate.estimated_cost)
+
+        plan: list[tuple[_TaskContract, _AgentRegistration, bool]] = []
+        for index, bid in enumerate(selected_bids):
+            contract = self._award_contract(
+                runtime=runtime,
+                intent=intent,
+                bid=bid,
+            )
+            registration = registry.get(contract.agent_id)
+            if registration is None:
+                raise RuntimeError(f"agent_not_registered:{contract.agent_id}")
+            plan.append((contract, registration, index > 0))
+        return plan
+
+    async def _execute_task_contract(
+        self,
+        *,
+        runtime: _PipelineSessionRuntime,
+        intent: _TaskIntent,
+        contract: _TaskContract,
+        registration: _AgentRegistration,
+        state_before_task: PipelineState,
+        is_shadow: bool,
+    ) -> _TaskExecutionResult:
+        _ = runtime
+        execution_state = self._build_execution_state_for_agent(
+            state=state_before_task,
+            registration=registration,
+            intent=intent,
+        )
+        if is_shadow:
+            execution_state["runtime_silent_mode"] = True
+        execution_state["runtime_agent_id"] = registration.agent_id
+        execution_state["runtime_profile"] = registration.profile
+
+        execution_start = perf_counter()
+        try:
+            next_state = await registration.node_fn(execution_state)
+        except Exception as exc:  # noqa: BLE001
+            elapsed_ms = int(max(0.0, perf_counter() - execution_start) * 1000)
+            verdict = _CriticVerdict(
+                approved=False,
+                reason="候选执行异常。",
+                severity="error",
+            )
+            realized_cost = self._realize_execution_cost(
+                contract=contract,
+                elapsed_ms=elapsed_ms,
+                approved=False,
+            )
+            return _TaskExecutionResult(
+                contract=contract,
+                registration=registration,
+                intent=intent,
+                next_state=None,
+                elapsed_ms=elapsed_ms,
+                verdict=verdict,
+                realized_cost=realized_cost,
+                execution_error=str(exc),
+                is_shadow=is_shadow,
+            )
+
+        elapsed_ms = int(max(0.0, perf_counter() - execution_start) * 1000)
+        if not isinstance(next_state, dict):
+            verdict = _CriticVerdict(
+                approved=False,
+                reason="候选输出状态无效。",
+                severity="error",
+            )
+            realized_cost = self._realize_execution_cost(
+                contract=contract,
+                elapsed_ms=elapsed_ms,
+                approved=False,
+            )
+            return _TaskExecutionResult(
+                contract=contract,
+                registration=registration,
+                intent=intent,
+                next_state=None,
+                elapsed_ms=elapsed_ms,
+                verdict=verdict,
+                realized_cost=realized_cost,
+                execution_error="invalid_agent_state",
+                is_shadow=is_shadow,
+            )
+
+        normalized_state = self._normalize_agent_output_state(
+            baseline_state=state_before_task,
+            execution_state=execution_state,
+            next_state=next_state,
+            registration=registration,
+            intent=intent,
+        )
+        verdict = self._critic_review(
+            intent=intent,
+            contract=contract,
+            state_before=state_before_task,
+            state_after=normalized_state,
+        )
+        realized_cost = self._realize_execution_cost(
+            contract=contract,
+            elapsed_ms=elapsed_ms,
+            approved=verdict.approved,
+        )
+        return _TaskExecutionResult(
+            contract=contract,
+            registration=registration,
+            intent=intent,
+            next_state=normalized_state,
+            elapsed_ms=elapsed_ms,
+            verdict=verdict,
+            realized_cost=realized_cost,
+            execution_error="",
+            is_shadow=is_shadow,
+        )
+
+    async def _ingest_execution_result(
+        self,
+        *,
+        runtime: _PipelineSessionRuntime,
+        result: _TaskExecutionResult,
+    ) -> None:
+        performance = runtime.agent_performance.setdefault(result.contract.agent_id, _AgentPerformance())
+        performance.executions += 1
+        performance.total_latency_ms += max(0, int(result.elapsed_ms))
+        if result.execution_error:
+            performance.failures += 1
+        elif result.verdict.approved:
+            performance.successes += 1
+        else:
+            performance.vetoes += 1
+
+        self._apply_runtime_budget_spend(runtime=runtime, realized_cost=result.realized_cost)
+        budget_snapshot = self._build_runtime_budget_snapshot(runtime)
+        await self._publish_event(
+            runtime,
+            {
+                "type": "negotiation_budget_update",
+                "node": _COORDINATOR_NODE,
+                "round": result.contract.round_index,
+                "task_kind": result.intent.kind,
+                "agent_id": result.contract.agent_id,
+                **budget_snapshot,
+            },
+        )
+
+        if result.execution_error:
+            await self._publish_event(
+                runtime,
+                {
+                    "type": "negotiation_candidate_failed",
+                    "node": _COORDINATOR_NODE,
+                    "round": result.contract.round_index,
+                    "task_id": result.intent.task_id,
+                    "task_kind": result.intent.kind,
+                    "agent_id": result.contract.agent_id,
+                    "profile": result.contract.profile,
+                    "is_shadow": bool(result.is_shadow),
+                    "reason": result.execution_error,
+                },
+            )
+        elif not result.verdict.approved:
+            await self._publish_event(
+                runtime,
+                {
+                    "type": "negotiation_critic_veto",
+                    "node": _COORDINATOR_NODE,
+                    "round": result.contract.round_index,
+                    "task_id": result.intent.task_id,
+                    "task_kind": result.intent.kind,
+                    "agent_id": result.contract.agent_id,
+                    "profile": result.contract.profile,
+                    "reason": result.verdict.reason,
+                    "severity": result.verdict.severity,
+                    "is_shadow": bool(result.is_shadow),
+                },
+            )
+
+        await self._record_task_execution_observability(
+            runtime=runtime,
+            result=result,
+        )
+
+    async def _record_task_execution_observability(
+        self,
+        *,
+        runtime: _PipelineSessionRuntime,
+        result: _TaskExecutionResult,
+    ) -> None:
+        try:
+            await asyncio.to_thread(
+                self._runtime_eval_service.record_task_execution,
+                RuntimeTaskExecutionRecord(
+                    session_id=runtime.session_id,
+                    user_id=runtime.user_id,
+                    task_kind=result.intent.kind,
+                    agent_id=result.contract.agent_id,
+                    profile=result.contract.profile,
+                    contract_id=result.contract.contract_id,
+                    round_index=result.contract.round_index,
+                    confidence=float(result.contract.confidence),
+                    estimated_latency_ms=int(result.contract.estimated_latency_ms),
+                    estimated_cost=float(result.contract.estimated_cost),
+                    elapsed_ms=max(0, int(result.elapsed_ms)),
+                    approved=bool(result.verdict.approved),
+                    critic_reason=str(
+                        result.execution_error or result.verdict.reason or "unknown"
+                    ),
+                    critic_severity=str(result.verdict.severity or "info"),
+                    realized_cost=max(0.0, float(result.realized_cost)),
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            await asyncio.to_thread(
+                self._unified_memory_service.write_entry,
+                user_id=runtime.user_id,
+                session_id=runtime.session_id,
+                scope="strategy",
+                task_kind=result.intent.kind,
+                key=f"{result.intent.task_id}:{result.contract.contract_id}",
+                value={
+                    "agent_id": result.contract.agent_id,
+                    "profile": result.contract.profile,
+                    "contract_id": result.contract.contract_id,
+                    "round_index": result.contract.round_index,
+                    "confidence": round(float(result.contract.confidence), 4),
+                    "estimated_latency_ms": int(result.contract.estimated_latency_ms),
+                    "estimated_cost": round(float(result.contract.estimated_cost), 4),
+                    "elapsed_ms": max(0, int(result.elapsed_ms)),
+                    "realized_cost": round(max(0.0, float(result.realized_cost)), 4),
+                    "approved": bool(result.verdict.approved),
+                    "critic_reason": str(result.execution_error or result.verdict.reason or ""),
+                    "critic_severity": str(result.verdict.severity or "info"),
+                    "is_shadow": bool(result.is_shadow),
+                },
+                tags={
+                    "task_kind": result.intent.kind,
+                    "agent_id": result.contract.agent_id,
+                    "approved": bool(result.verdict.approved),
+                    "is_shadow": bool(result.is_shadow),
+                    "round_index": int(result.contract.round_index),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _select_best_execution_result(
+        self,
+        execution_results: list[_TaskExecutionResult],
+    ) -> _TaskExecutionResult | None:
+        approved_results = [
+            item
+            for item in execution_results
+            if item.verdict.approved and isinstance(item.next_state, dict)
+        ]
+        if not approved_results:
+            return None
+        approved_results.sort(
+            key=lambda item: (
+                -self._score_execution_result(item),
+                float(item.realized_cost),
+                int(item.elapsed_ms),
+                item.contract.agent_id,
+            )
+        )
+        return approved_results[0]
+
+    def _score_execution_result(self, result: _TaskExecutionResult) -> float:
+        expected_latency = max(1, int(result.contract.estimated_latency_ms))
+        latency_ratio = min(3.0, float(max(0, int(result.elapsed_ms))) / float(expected_latency))
+        expected_cost = max(0.01, float(result.contract.estimated_cost))
+        cost_ratio = min(3.0, float(max(0.0, float(result.realized_cost))) / float(expected_cost))
+        shadow_penalty = 0.008 if result.is_shadow else 0.0
+        return (
+            float(result.contract.confidence) * 0.82
+            - latency_ratio * 0.09
+            - cost_ratio * 0.13
+            - shadow_penalty
+        )
+
+    def _resolve_rejection_reason(self, execution_results: list[_TaskExecutionResult]) -> str:
+        for item in execution_results:
+            if item.execution_error:
+                return f"execution_error:{item.contract.agent_id}"
+        for item in execution_results:
+            reason = str(item.verdict.reason or "").strip()
+            if reason:
+                return reason
+        return "all_candidates_rejected"
+
+    def _build_execution_failure_error(
+        self,
+        *,
+        intent: _TaskIntent,
+        results: list[_TaskExecutionResult],
+    ) -> str:
+        for item in results:
+            if item.execution_error:
+                return f"agent_execution_failed:{intent.kind}:{item.execution_error}"
+        reason = self._resolve_rejection_reason(results)
+        return f"critic_rejected:{intent.kind}:{reason}"
+
+    async def _record_session_observability(self, runtime: _PipelineSessionRuntime) -> None:
+        if runtime.summary_recorded:
+            return
+        runtime.summary_recorded = True
+
+        state = runtime.state
+        status = str(runtime.status or "unknown").strip().lower() or "unknown"
+        duration_ms = max(
+            0,
+            int((runtime.updated_at - runtime.created_at).total_seconds() * 1000),
+        )
+        history_id = str(state.get("history_id") or "").strip()
+        report_id = str(state.get("report_id") or "").strip()
+        graph_payload = state.get("graph_payload") if isinstance(state.get("graph_payload"), dict) else {}
+        graph_node_count = len(graph_payload.get("nodes") or []) if isinstance(graph_payload, dict) else 0
+        graph_edge_count = len(graph_payload.get("edges") or []) if isinstance(graph_payload, dict) else 0
+
+        try:
+            await asyncio.to_thread(
+                self._runtime_eval_service.record_session_summary,
+                session_id=runtime.session_id,
+                user_id=runtime.user_id,
+                status=status,
+                input_type=str(state.get("input_type") or "unknown"),
+                input_value=str(state.get("input_value") or ""),
+                quick_mode=bool(state.get("quick_mode")),
+                rounds=max(0, int(runtime.negotiation_round)),
+                total_cost=max(0.0, float(runtime.budget_spent)),
+                duration_ms=duration_ms,
+                history_id=history_id,
+                report_id=report_id,
+                error=str(runtime.error or ""),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            await asyncio.to_thread(
+                self._unified_memory_service.write_entry,
+                user_id=runtime.user_id,
+                session_id=runtime.session_id,
+                scope="session",
+                task_kind="session",
+                key=f"summary:{runtime.session_id}",
+                value={
+                    "status": status,
+                    "input_type": str(state.get("input_type") or "unknown"),
+                    "input_value": str(state.get("input_value") or ""),
+                    "quick_mode": bool(state.get("quick_mode")),
+                    "rounds": max(0, int(runtime.negotiation_round)),
+                    "total_cost": round(max(0.0, float(runtime.budget_spent)), 4),
+                    "duration_ms": duration_ms,
+                    "history_id": history_id,
+                    "report_id": report_id,
+                    "error": str(runtime.error or ""),
+                },
+                tags={
+                    "status": status,
+                    "has_history": bool(history_id),
+                    "has_report": bool(report_id),
+                },
+            )
+            if history_id or report_id:
+                await asyncio.to_thread(
+                    self._unified_memory_service.write_entry,
+                    user_id=runtime.user_id,
+                    session_id=runtime.session_id,
+                    scope="history",
+                    task_kind="session",
+                    key=f"history_anchor:{runtime.session_id}",
+                    value={
+                        "history_id": history_id,
+                        "report_id": report_id,
+                    },
+                    tags={
+                        "history_id": history_id,
+                        "report_id": report_id,
+                    },
+                )
+            if graph_node_count > 0:
+                await asyncio.to_thread(
+                    self._unified_memory_service.write_entry,
+                    user_id=runtime.user_id,
+                    session_id=runtime.session_id,
+                    scope="graph",
+                    task_kind="graph_build",
+                    key=f"graph_anchor:{runtime.session_id}",
+                    value={
+                        "graph_id": str(state.get("graph_id") or ""),
+                        "node_count": graph_node_count,
+                        "edge_count": graph_edge_count,
+                    },
+                    tags={
+                        "node_count": graph_node_count,
+                        "edge_count": graph_edge_count,
+                    },
+                )
+        except Exception:  # noqa: BLE001
+            pass
 
     @staticmethod
     def _format_search_range_for_history(*, input_type: str, paper_range_years: Any) -> str:
@@ -910,6 +1350,11 @@ class PipelineRuntimeService:
         normalized_state = dict(next_state)
         task_kind = str(intent.kind or "").strip().lower()
 
+        # Strip runtime-only execution metadata before persisting session state.
+        normalized_state.pop("runtime_silent_mode", None)
+        normalized_state.pop("runtime_agent_id", None)
+        normalized_state.pop("runtime_profile", None)
+
         # Keep stable session-level controls; strategy-specific mutations are execution-only.
         normalized_state["quick_mode"] = bool(baseline_state.get("quick_mode"))
         normalized_state["paper_range_years"] = baseline_state.get("paper_range_years")
@@ -1011,6 +1456,102 @@ class PipelineRuntimeService:
         )
         return bids
 
+    def _get_task_priors(
+        self,
+        *,
+        runtime: _PipelineSessionRuntime,
+        task_kind: str,
+    ) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]]]:
+        safe_task_kind = str(task_kind or "").strip().lower()
+        if not safe_task_kind:
+            return {}, {}
+        if int(runtime.prior_cache_round.get(safe_task_kind) or -1) == int(runtime.negotiation_round):
+            return (
+                dict(runtime.eval_prior_cache.get(safe_task_kind) or {}),
+                dict(runtime.memory_prior_cache.get(safe_task_kind) or {}),
+            )
+
+        eval_priors: dict[str, dict[str, float]] = {}
+        memory_priors: dict[str, dict[str, float]] = {}
+        try:
+            eval_priors = self._runtime_eval_service.get_agent_priors(
+                task_kind=safe_task_kind,
+                lookback_days=45,
+            )
+        except Exception:  # noqa: BLE001
+            eval_priors = {}
+        try:
+            memory_priors = self._unified_memory_service.summarize_task_strategy_priors(
+                user_id=runtime.user_id,
+                task_kind=safe_task_kind,
+                limit=96,
+            )
+        except Exception:  # noqa: BLE001
+            memory_priors = {}
+
+        runtime.eval_prior_cache[safe_task_kind] = eval_priors
+        runtime.memory_prior_cache[safe_task_kind] = memory_priors
+        runtime.prior_cache_round[safe_task_kind] = int(runtime.negotiation_round)
+        return eval_priors, memory_priors
+
+    def _compute_prior_confidence_delta(
+        self,
+        *,
+        task_kind: str,
+        agent_id: str,
+        eval_priors: dict[str, dict[str, float]],
+        memory_priors: dict[str, dict[str, float]],
+    ) -> float:
+        safe_task_kind = str(task_kind or "").strip().lower()
+        safe_agent_id = str(agent_id or "").strip()
+        if not safe_task_kind or not safe_agent_id:
+            return 0.0
+
+        base_latency = max(1.0, float(_TASK_ESTIMATED_LATENCY_MS.get(safe_task_kind, 1200)))
+        base_cost = max(0.01, float(_TASK_ESTIMATED_COST.get(safe_task_kind, 0.4)))
+        delta = 0.0
+
+        eval_item = dict(eval_priors.get(safe_agent_id) or {})
+        eval_sample_size = float(eval_item.get("sample_size") or 0.0)
+        if eval_sample_size >= 2.0:
+            eval_success = max(0.0, min(1.0, float(eval_item.get("success_rate") or 0.0)))
+            delta += (eval_success - 0.58) * 0.18
+            avg_elapsed = max(0.0, float(eval_item.get("avg_elapsed_ms") or 0.0))
+            avg_cost = max(0.0, float(eval_item.get("avg_realized_cost") or 0.0))
+            if avg_elapsed > base_latency * 1.35:
+                delta -= 0.03
+            if avg_cost > base_cost * 1.45:
+                delta -= 0.03
+            if eval_sample_size >= 10.0:
+                delta += 0.01
+
+        memory_item = dict(memory_priors.get(safe_agent_id) or {})
+        memory_sample_size = float(memory_item.get("sample_size") or 0.0)
+        if memory_sample_size >= 2.0:
+            memory_success = max(0.0, min(1.0, float(memory_item.get("success_rate") or 0.0)))
+            delta += (memory_success - 0.56) * 0.10
+            memory_avg_cost = max(0.0, float(memory_item.get("avg_realized_cost") or 0.0))
+            if memory_avg_cost > base_cost * 1.5:
+                delta -= 0.02
+
+        return max(-0.15, min(0.15, delta))
+
+    def _compute_prior_bid_score_delta(
+        self,
+        *,
+        task_kind: str,
+        agent_id: str,
+        eval_priors: dict[str, dict[str, float]],
+        memory_priors: dict[str, dict[str, float]],
+    ) -> float:
+        delta = self._compute_prior_confidence_delta(
+            task_kind=task_kind,
+            agent_id=agent_id,
+            eval_priors=eval_priors,
+            memory_priors=memory_priors,
+        )
+        return max(-0.08, min(0.08, delta * 0.6))
+
     def _compute_dynamic_confidence(
         self,
         *,
@@ -1033,6 +1574,14 @@ class PipelineRuntimeService:
             base_latency = float(_TASK_ESTIMATED_LATENCY_MS.get(task_kind, 1200))
             if average_latency > base_latency * 1.5:
                 base -= 0.04
+
+        eval_priors, memory_priors = self._get_task_priors(runtime=runtime, task_kind=task_kind)
+        base += self._compute_prior_confidence_delta(
+            task_kind=task_kind,
+            agent_id=registration.agent_id,
+            eval_priors=eval_priors,
+            memory_priors=memory_priors,
+        )
 
         base += self._state_alignment_delta(task_kind=task_kind, state=runtime.state)
 
@@ -1264,6 +1813,7 @@ class PipelineRuntimeService:
         return round(max(0.0, reserve), 4)
 
     def _score_bid(self, *, runtime: _PipelineSessionRuntime, bid: _AgentBid) -> float:
+        task_kind = str(bid.task_kind or "").strip().lower()
         remaining = max(0.01, float(runtime.budget_limit) - float(runtime.budget_spent))
         cost_ratio = min(3.0, float(bid.estimated_cost) / remaining)
         latency_ratio = min(3.0, float(bid.estimated_latency_ms) / 10000.0)
@@ -1279,6 +1829,13 @@ class PipelineRuntimeService:
             mode_alignment += 0.03
         if (not bool(runtime.state.get("quick_mode"))) and profile in {"recall", "dense", "balanced"}:
             mode_alignment += 0.02
+        eval_priors, memory_priors = self._get_task_priors(runtime=runtime, task_kind=task_kind)
+        prior_delta = self._compute_prior_bid_score_delta(
+            task_kind=task_kind,
+            agent_id=bid.agent_id,
+            eval_priors=eval_priors,
+            memory_priors=memory_priors,
+        )
         return (
             float(bid.confidence) * 1.0
             - cost_ratio * 0.22
@@ -1286,6 +1843,7 @@ class PipelineRuntimeService:
             - veto_penalty
             + exploration_bonus
             + mode_alignment
+            + prior_delta
         )
 
     def _schedule_rebid(

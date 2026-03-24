@@ -9,10 +9,11 @@ import math
 from pathlib import Path
 import re
 import sys
+from time import perf_counter
 from typing import Any, Awaitable, Callable
 
 from core.settings import get_settings
-from core.llm_client import chat, is_configured
+from core.llm_client import chat, get_client, is_configured
 from models.schemas import KnowledgeGraphRetrieveRequest
 from repositories.research_history_repository import (
     ResearchHistoryRepository,
@@ -63,6 +64,7 @@ _MAX_EXPLORATION_DEPTH = 5
 _MAX_EXPANSION_PAPERS = 24
 _MAX_EXPANSION_QUERIES_PER_ROUND = 2
 _ALLOWED_AGENT_MODES = {"legacy", "orchestrated"}
+_DEFAULT_ARTIFACT_PDF_TIMEOUT_SECONDS = 15.0
 
 
 @dataclass(frozen=True)
@@ -71,6 +73,13 @@ class _RoleSpec:
     title_zh: str
     title_en: str
     focus: str
+
+
+@dataclass(frozen=True)
+class _ComposeMarkdownResult:
+    markdown: str
+    streamed: bool = False
+    streamed_chars: int = 0
 
 
 class InsightExplorationService:
@@ -122,6 +131,11 @@ class InsightExplorationService:
                 ),
             )
         self.report_root = Path(__file__).resolve().parents[1] / "cache" / "reports"
+        configured_pdf_timeout = float(
+            getattr(self.settings, "insight_pdf_render_timeout_seconds", _DEFAULT_ARTIFACT_PDF_TIMEOUT_SECONDS)
+            or _DEFAULT_ARTIFACT_PDF_TIMEOUT_SECONDS
+        )
+        self.artifact_pdf_timeout_seconds = max(8.0, min(90.0, configured_pdf_timeout))
 
     async def generate_report(
         self,
@@ -226,7 +240,21 @@ class InsightExplorationService:
             )
             session_memory["decisions"].extend(role_outputs)
 
-        markdown = await self._compose_markdown(
+        compose_started_at = perf_counter()
+        await self._emit_lifecycle_event(
+            stream_callback=stream_callback,
+            session_id=safe_session_id,
+            event_type="insight_report_compose_started",
+        )
+        stream_started_at: float | None = None
+        if stream_callback is not None:
+            stream_started_at = perf_counter()
+            await self._emit_lifecycle_event(
+                stream_callback=stream_callback,
+                session_id=safe_session_id,
+                event_type="insight_report_stream_started",
+            )
+        compose_result = await self._compose_markdown(
             language=language,
             query=safe_query,
             input_type=safe_input_type,
@@ -238,27 +266,114 @@ class InsightExplorationService:
             active_roles=active_roles,
             rounds=rounds,
             extension_notes=extension_notes,
+            stream_callback=stream_callback,
+            stream_start_accumulated=0,
+        )
+        markdown = str(compose_result.markdown or "")
+        await self._emit_lifecycle_event(
+            stream_callback=stream_callback,
+            session_id=safe_session_id,
+            event_type="insight_report_compose_completed",
+            stage_started_at=compose_started_at,
+            details={
+                "markdown_chars": len(markdown),
+            },
         )
 
+        stream_completed_chars = 0
         if stream_callback is not None:
-            await self._stream_markdown(
-                markdown=markdown,
-                callback=stream_callback,
-                section="insight_markdown",
+            if compose_result.streamed:
+                stream_completed_chars = max(
+                    int(compose_result.streamed_chars or 0),
+                    len(markdown),
+                )
+                await self._emit_stream_done(
+                    callback=stream_callback,
+                    section="insight_markdown",
+                    accumulated_chars=stream_completed_chars,
+                )
+            else:
+                await self._stream_markdown(
+                    markdown=markdown,
+                    callback=stream_callback,
+                    section="insight_markdown",
+                )
+                stream_completed_chars = len(markdown)
+            await self._emit_lifecycle_event(
+                stream_callback=stream_callback,
+                session_id=safe_session_id,
+                event_type="insight_report_stream_completed",
+                stage_started_at=stream_started_at or perf_counter(),
+                accumulated_chars=stream_completed_chars,
+                details={
+                    "markdown_chars": len(markdown),
+                },
             )
 
-        artifact = await asyncio.to_thread(
-            self._persist_artifacts,
+        artifact_started_at = perf_counter()
+        await self._emit_lifecycle_event(
+            stream_callback=stream_callback,
+            session_id=safe_session_id,
+            event_type="insight_artifact_persist_started",
+            accumulated_chars=stream_completed_chars,
+        )
+        markdown_path = await asyncio.to_thread(
+            self._persist_markdown_artifact,
             session_id=safe_session_id,
             markdown=markdown,
-            language=language,
         )
+        pdf_path = ""
+        artifact_warning = ""
+        try:
+            pdf_path = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._persist_pdf_artifact,
+                    markdown=markdown,
+                    markdown_path=markdown_path,
+                    language=language,
+                ),
+                timeout=float(self.artifact_pdf_timeout_seconds),
+            )
+        except TimeoutError:
+            artifact_warning = "pdf_generation_timeout"
+        except Exception:
+            artifact_warning = "pdf_generation_failed"
+        artifact = {
+            "markdown_path": str(markdown_path or ""),
+            "pdf_path": str(pdf_path or ""),
+        }
+        await self._emit_lifecycle_event(
+            stream_callback=stream_callback,
+            session_id=safe_session_id,
+            event_type="insight_artifact_persist_completed",
+            stage_started_at=artifact_started_at,
+            accumulated_chars=stream_completed_chars,
+            level="warning" if artifact_warning else "info",
+            details={
+                "markdown_path": artifact["markdown_path"],
+                "pdf_path": artifact["pdf_path"],
+                "warning": artifact_warning,
+            },
+        )
+
+        finalize_started_at = perf_counter()
         summary = self._build_summary(
             language=language,
             extension_count=len(extension_papers),
             role_count=len(active_roles),
             rounds=rounds,
             base_papers=len(normalized_papers),
+        )
+        await self._emit_lifecycle_event(
+            stream_callback=stream_callback,
+            session_id=safe_session_id,
+            event_type="insight_finalize_completed",
+            stage_started_at=finalize_started_at,
+            accumulated_chars=stream_completed_chars,
+            details={
+                "pdf_available": bool(str(artifact.get("pdf_path") or "").strip()),
+                "warning": artifact_warning,
+            },
         )
         return {
             "language": language,
@@ -417,7 +532,23 @@ class InsightExplorationService:
                     role_outputs.append(output)
             session_memory = memory_service.build_session_view(run_id=journal.run_id)
 
-        markdown = await self._compose_markdown(
+        compose_started_at = perf_counter()
+        await self._emit_lifecycle_event(
+            stream_callback=stream_callback,
+            session_id=session_id,
+            event_type="insight_report_compose_started",
+            accumulated_chars=streamed_chars,
+        )
+        stream_started_at: float | None = None
+        if stream_callback is not None:
+            stream_started_at = perf_counter()
+            await self._emit_lifecycle_event(
+                stream_callback=stream_callback,
+                session_id=session_id,
+                event_type="insight_report_stream_started",
+                accumulated_chars=streamed_chars,
+            )
+        compose_result = await self._compose_markdown(
             language=language,
             query=query,
             input_type=input_type,
@@ -429,26 +560,117 @@ class InsightExplorationService:
             active_roles=active_roles,
             rounds=rounds,
             extension_notes=extension_notes,
+            stream_callback=stream_callback,
+            stream_start_accumulated=streamed_chars,
+        )
+        markdown = str(compose_result.markdown or "")
+        await self._emit_lifecycle_event(
+            stream_callback=stream_callback,
+            session_id=session_id,
+            event_type="insight_report_compose_completed",
+            stage_started_at=compose_started_at,
+            accumulated_chars=streamed_chars,
+            details={
+                "markdown_chars": len(markdown),
+            },
         )
         if stream_callback is not None:
-            await self._stream_markdown(
-                markdown=markdown,
-                callback=stream_callback,
-                section="insight_markdown",
-            )
+            if compose_result.streamed:
+                streamed_chars = max(
+                    int(compose_result.streamed_chars or 0),
+                    len(markdown),
+                )
+                await self._emit_stream_done(
+                    callback=stream_callback,
+                    section="insight_markdown",
+                    accumulated_chars=streamed_chars,
+                )
+            else:
+                await self._stream_markdown(
+                    markdown=markdown,
+                    callback=stream_callback,
+                    section="insight_markdown",
+                    start_accumulated=streamed_chars,
+                )
+                streamed_chars += len(markdown)
+        else:
+            streamed_chars = len(markdown)
+        await self._emit_lifecycle_event(
+            stream_callback=stream_callback,
+            session_id=session_id,
+            event_type="insight_report_stream_completed",
+            stage_started_at=stream_started_at or perf_counter(),
+            accumulated_chars=streamed_chars,
+            details={
+                "markdown_chars": len(markdown),
+            },
+        )
 
-        artifact = await asyncio.to_thread(
-            self._persist_artifacts,
+        artifact_started_at = perf_counter()
+        await self._emit_lifecycle_event(
+            stream_callback=stream_callback,
+            session_id=session_id,
+            event_type="insight_artifact_persist_started",
+            accumulated_chars=streamed_chars,
+        )
+        markdown_path = await asyncio.to_thread(
+            self._persist_markdown_artifact,
             session_id=session_id,
             markdown=markdown,
-            language=language,
         )
+        pdf_path = ""
+        artifact_warning = ""
+        try:
+            pdf_path = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._persist_pdf_artifact,
+                    markdown=markdown,
+                    markdown_path=markdown_path,
+                    language=language,
+                ),
+                timeout=float(self.artifact_pdf_timeout_seconds),
+            )
+        except TimeoutError:
+            artifact_warning = "pdf_generation_timeout"
+        except Exception:
+            artifact_warning = "pdf_generation_failed"
+
+        artifact = {
+            "markdown_path": str(markdown_path or ""),
+            "pdf_path": str(pdf_path or ""),
+        }
+        await self._emit_lifecycle_event(
+            stream_callback=stream_callback,
+            session_id=session_id,
+            event_type="insight_artifact_persist_completed",
+            stage_started_at=artifact_started_at,
+            accumulated_chars=streamed_chars,
+            level="warning" if artifact_warning else "info",
+            details={
+                "markdown_path": artifact["markdown_path"],
+                "pdf_path": artifact["pdf_path"],
+                "warning": artifact_warning,
+            },
+        )
+
+        finalize_started_at = perf_counter()
         summary = self._build_summary(
             language=language,
             extension_count=len(extension_papers),
             role_count=len(active_roles),
             rounds=rounds,
             base_papers=len(normalized_papers),
+        )
+        await self._emit_lifecycle_event(
+            stream_callback=stream_callback,
+            session_id=session_id,
+            event_type="insight_finalize_completed",
+            stage_started_at=finalize_started_at,
+            accumulated_chars=streamed_chars,
+            details={
+                "pdf_available": bool(str(artifact.get("pdf_path") or "").strip()),
+                "warning": artifact_warning,
+            },
         )
         return {
             "language": language,
@@ -1165,9 +1387,9 @@ class InsightExplorationService:
                         {
                             "role": "system",
                             "content": (
-                                "You are a specialized research analyst. "
-                                "Return one deep paragraph with evidence-backed and actionable insights. "
-                                "Do not describe workflow or agent collaboration process."
+                                "You are a senior scientific analyst. "
+                                "Write rigorous, evidence-grounded content only. "
+                                "Do not mention workflows, agents, orchestration, rounds, or tool calls."
                             ),
                         },
                         {
@@ -1212,6 +1434,17 @@ class InsightExplorationService:
         top_papers = self._top_papers_for_prompt(papers + extension_papers, limit=6)
         role_name = role.title_zh if language == "zh" else role.title_en
         role_focus = self._resolve_role_report_focus(role_id=role.role_id, language=language)
+        evidence_cards = [
+            {
+                "id": f"E{index}",
+                "title": str(item.get("title") or "Unknown title").strip() or "Unknown title",
+                "year": self._safe_int(item.get("year"), 0),
+                "venue": str(item.get("venue") or "Unknown").strip() or "Unknown",
+                "citations": self._safe_int(item.get("citation_count"), 0),
+                "abstract_hint": self._summarize_abstract_text(item.get("abstract"), max_chars=180),
+            }
+            for index, item in enumerate(top_papers, start=1)
+        ]
         context = {
             "query": query,
             "round": round_index,
@@ -1220,25 +1453,37 @@ class InsightExplorationService:
             "report_focus": role_focus,
             "objective": str(objective or "").strip(),
             "graph_stats": graph_stats,
-            "top_papers": top_papers,
+            "evidence_cards": evidence_cards,
             "history_memory": history_memory[:2],
             "session_hypotheses": (session_memory.get("hypotheses") or [])[-2:],
             "session_critic_notes": (session_memory.get("critic_notes") or [])[-2:],
         }
         if language == "zh":
             return (
-                "你是科研分析写作助手。请基于上下文输出一段中文深度分析（220-420字）。"
-                f"本段重点：{role_focus}。"
-                "内容必须包含：证据链（引用论文标题/年份）、关键判断、可执行建议。"
-                "禁止描述工作流、Agent、子代理、协商轮次、工具调用过程。"
-                "上下文："
-                f"{context}"
+                "你是科研分析写作助手，请输出严谨、可核验、可执行的中文分析。"
+                f"当前角色：{role_name}；本轮重点：{role_focus}。"
+                "严格要求："
+                "1) 只使用上下文给出的证据，不得臆造论文；"
+                "2) 不得出现工作流、智能体、子代理、轮次、工具调用等过程描述；"
+                "3) 必须给出至少2条带证据编号(E1/E2...)的判断依据；"
+                "4) 给出可执行建议和一个主要不确定性。"
+                "输出格式固定为四行（不要额外小标题）："
+                "核心判断：..."
+                "证据条目：...（示例：[E1] 论文名(年份)）"
+                "可执行建议：..."
+                "不确定性：..."
+                f"上下文：{context}"
             )
         return (
-            "You are a research writing analyst. Produce one deep English paragraph (150-260 words). "
-            f"Primary focus: {role_focus}. "
-            "The paragraph must include evidence links (paper title/year), key judgments, and executable recommendations. "
-            "Do not describe workflow, agents, rounds, or tool invocation process. "
+            "You are a scientific writing analyst and must produce rigorous, evidence-grounded English analysis. "
+            f"Role: {role_name}. Focus: {role_focus}. "
+            "Strict rules: use only provided evidence, no fabricated papers, no workflow/agent/tool narration, "
+            "include at least two evidence-linked judgments with E1/E2 markers, add executable recommendation and one uncertainty. "
+            "Output must be exactly four lines with these prefixes only: "
+            "Core Judgment: ... "
+            "Evidence: ... (example: [E1] Paper Title (Year)) "
+            "Actionable Recommendation: ... "
+            "Uncertainty: ... "
             f"Context: {context}"
         )
 
@@ -1253,19 +1498,57 @@ class InsightExplorationService:
         extension_papers: list[dict[str, Any]],
         graph_stats: dict[str, int],
     ) -> str:
+        del round_index
         total_papers = len(papers) + len(extension_papers)
+        focus_label = self._resolve_role_report_focus(role_id=role.role_id, language=language)
+        ranked = self._rank_papers_by_query_relevance(
+            papers + extension_papers,
+            query=query,
+            limit=2,
+        )
+        top_item = ranked[0] if ranked else None
+        evidence_line = self._format_paper_reference_line(top_item, language=language) if top_item else ""
         if language == "zh":
-            return (
-                f"围绕“{query}”的证据中，当前样本共 {total_papers} 篇论文，"
-                f"图谱节点 {graph_stats['node_count']}、关系 {graph_stats['edge_count']}。"
-                f"建议围绕“{self._resolve_role_report_focus(role_id=role.role_id, language='zh')}”"
-                "补齐“起源论文-延续工作-应用落地-创新空白”的连续证据链，并优先规划可验证的小规模试点。"
+            return "\n".join(
+                [
+                    f"核心判断：围绕“{query}”的现有证据显示，{focus_label}是下一步最应优先验证的主线。",
+                    (
+                        "证据条目："
+                        f"{evidence_line if evidence_line else '当前样本未提供可直接引用的高置信论文。'}"
+                    ),
+                    (
+                        "可执行建议：先以2-3篇高相关论文构建最小证据链，"
+                        "再设计可量化评测（准确率/时延/成本）的小规模试点。"
+                    ),
+                    (
+                        "不确定性：样本规模目前为"
+                        f"{total_papers}篇（图谱节点{graph_stats['node_count']}、关系{graph_stats['edge_count']}），"
+                        "跨场景泛化结论仍需补充证据。"
+                    ),
+                ]
             )
         return (
-            f"For '{query}', the evidence pool currently contains {total_papers} papers "
-            f"with {graph_stats['node_count']} graph nodes and {graph_stats['edge_count']} relations. "
-            f"Prioritize '{self._resolve_role_report_focus(role_id=role.role_id, language='en')}' "
-            "and build a continuous evidence chain from origin paper to continuation work, deployments, and open innovation gaps."
+            "\n".join(
+                [
+                    (
+                        f"Core Judgment: For '{query}', the strongest next validation axis is {focus_label} "
+                        "based on the current evidence scope."
+                    ),
+                    (
+                        "Evidence: "
+                        f"{evidence_line if evidence_line else 'No high-confidence paper is directly citable in the current sample.'}"
+                    ),
+                    (
+                        "Actionable Recommendation: Start with a minimal evidence chain from 2-3 highly relevant papers "
+                        "and evaluate by measurable metrics (quality, latency, and cost)."
+                    ),
+                    (
+                        "Uncertainty: The sample size is "
+                        f"{total_papers} papers ({graph_stats['node_count']} nodes, {graph_stats['edge_count']} relations), "
+                        "so cross-domain generalization remains uncertain."
+                    ),
+                ]
+            )
         )
 
     async def _compose_markdown(
@@ -1282,7 +1565,9 @@ class InsightExplorationService:
         active_roles: list[_RoleSpec],
         rounds: int,
         extension_notes: list[str],
-    ) -> str:
+        stream_callback: StreamCallback | None = None,
+        stream_start_accumulated: int = 0,
+    ) -> _ComposeMarkdownResult:
         del input_type, active_roles, rounds
         safe_language = "zh" if language == "zh" else "en"
         all_papers = self._merge_papers(
@@ -1290,8 +1575,16 @@ class InsightExplorationService:
             extension_papers,
             limit=max(1, len(base_papers) + len(extension_papers)),
         )
+        ranked_papers = self._rank_papers_by_query_relevance(
+            all_papers,
+            query=query,
+            limit=min(36, max(1, len(all_papers))),
+        )
+        focus_pool = ranked_papers if ranked_papers else self._top_papers_for_prompt(all_papers, limit=min(24, max(1, len(all_papers))))
+        focus_papers = focus_pool[: min(24, max(1, len(focus_pool)))] if focus_pool else []
+
         papers_sorted_by_year = sorted(
-            [item for item in all_papers if self._safe_int(item.get("year"), 0) > 0],
+            [item for item in focus_papers if self._safe_int(item.get("year"), 0) > 0],
             key=lambda item: (
                 self._safe_int(item.get("year"), 0),
                 -self._safe_int(item.get("citation_count"), 0),
@@ -1299,308 +1592,655 @@ class InsightExplorationService:
             ),
         )
         papers_sorted_by_citation = sorted(
-            all_papers,
+            focus_papers,
             key=lambda item: (
                 self._safe_int(item.get("citation_count"), 0),
                 self._safe_int(item.get("year"), 0),
             ),
             reverse=True,
         )
-
-        if papers_sorted_by_year:
-            founder_candidates = papers_sorted_by_year[:3]
-        else:
-            founder_candidates = papers_sorted_by_citation[:3]
+        founder_source = papers_sorted_by_year[:12] if papers_sorted_by_year else papers_sorted_by_citation[:12]
+        founder_candidates = founder_source[:3]
         founder_primary = founder_candidates[0] if founder_candidates else None
 
-        decisions = self._dedupe_report_lines(session_memory.get("decisions") or [], limit=36, language=safe_language)
-        hypotheses = self._dedupe_report_lines(session_memory.get("hypotheses") or [], limit=18, language=safe_language)
-        critic_notes = self._dedupe_report_lines(session_memory.get("critic_notes") or [], limit=18, language=safe_language)
-        history_notes = self._dedupe_report_lines(history_memory or [], limit=8, language=safe_language)
-        del extension_notes
-        narrative_pool = self._dedupe_report_lines(
-            decisions + hypotheses + critic_notes + history_notes,
-            limit=42,
+        decisions = self._dedupe_report_lines(session_memory.get("decisions") or [], limit=32, language=safe_language)
+        hypotheses = self._dedupe_report_lines(session_memory.get("hypotheses") or [], limit=16, language=safe_language)
+        critic_notes = self._dedupe_report_lines(session_memory.get("critic_notes") or [], limit=16, language=safe_language)
+        history_notes = self._dedupe_report_lines(history_memory or [], limit=6, language=safe_language)
+        extension_signals = self._dedupe_report_lines(extension_notes or [], limit=6, language=safe_language)
+        role_signals = self._dedupe_report_lines(
+            decisions + hypotheses + critic_notes + history_notes + extension_signals,
+            limit=24,
             language=safe_language,
         )
+        innovation_points = self._dedupe_report_lines(
+            hypotheses + critic_notes,
+            limit=10,
+            language=safe_language,
+        )
+        application_clusters = self._infer_application_clusters(focus_papers, language=safe_language)
 
-        founder_notes = narrative_pool[:10]
-        extension_notes_section = narrative_pool[10:22]
-        application_notes = narrative_pool[22:32]
-        innovation_notes = hypotheses[:10] + critic_notes[:6] + narrative_pool[32:40]
-        application_clusters = self._infer_application_clusters(all_papers, language=safe_language)
-        references = papers_sorted_by_citation[:40]
+        reference_seed = focus_papers if focus_papers else all_papers
+        reference_candidates = self._top_papers_for_prompt(reference_seed, limit=min(24, max(1, len(reference_seed))))
+        reference_catalog = self._build_reference_catalog(reference_candidates, language=safe_language)
 
-        if safe_language == "zh":
+        llm_result = await self._compose_markdown_with_llm(
+            language=safe_language,
+            query=query,
+            graph_stats=graph_stats,
+            all_paper_count=len(all_papers),
+            founder_candidates=founder_candidates,
+            timeline_papers=papers_sorted_by_year[:14],
+            application_clusters=application_clusters[:6],
+            role_signals=role_signals[:14],
+            innovation_points=innovation_points[:8],
+            reference_catalog=reference_catalog,
+            stream_callback=stream_callback,
+            stream_start_accumulated=stream_start_accumulated,
+        )
+        if llm_result.markdown:
+            return llm_result
+
+        fallback_markdown = self._compose_markdown_fallback(
+            language=safe_language,
+            query=query,
+            graph_stats=graph_stats,
+            all_paper_count=len(all_papers),
+            founder_primary=founder_primary,
+            founder_candidates=founder_candidates,
+            timeline_papers=papers_sorted_by_year[:12],
+            role_signals=role_signals[:12],
+            application_clusters=application_clusters[:6],
+            innovation_points=innovation_points[:8],
+            critic_notes=critic_notes[:6],
+            reference_catalog=reference_catalog,
+        )
+        return _ComposeMarkdownResult(markdown=fallback_markdown, streamed=False, streamed_chars=0)
+
+    async def _compose_markdown_with_llm(
+        self,
+        *,
+        language: str,
+        query: str,
+        graph_stats: dict[str, int],
+        all_paper_count: int,
+        founder_candidates: list[dict[str, Any]],
+        timeline_papers: list[dict[str, Any]],
+        application_clusters: list[dict[str, Any]],
+        role_signals: list[str],
+        innovation_points: list[str],
+        reference_catalog: list[dict[str, Any]],
+        stream_callback: StreamCallback | None = None,
+        stream_start_accumulated: int = 0,
+    ) -> _ComposeMarkdownResult:
+        if not is_configured():
+            return _ComposeMarkdownResult(markdown="", streamed=False, streamed_chars=0)
+
+        context = {
+            "query": query,
+            "graph_stats": {
+                "node_count": int(graph_stats.get("node_count") or 0),
+                "edge_count": int(graph_stats.get("edge_count") or 0),
+                "paper_node_count": int(graph_stats.get("paper_node_count") or 0),
+                "paper_count": int(all_paper_count),
+            },
+            "founder_candidates": [
+                self._format_paper_reference_line(item, language=language)
+                for item in founder_candidates
+            ],
+            "timeline_evidence": [
+                self._format_paper_reference_line(item, language=language)
+                for item in timeline_papers
+            ],
+            "application_clusters": application_clusters,
+            "role_signals": role_signals,
+            "innovation_points": innovation_points,
+            "references": reference_catalog,
+        }
+
+        if language == "zh":
+            user_prompt = (
+                "请基于下方证据，生成一份中文科研风格 Markdown 报告。\n"
+                "硬性约束：\n"
+                "1) 只能使用给定 references 中的信息，禁止臆造论文或数值；\n"
+                "2) 严禁出现 workflow/agent/子代理/协同轮次/工具调用等过程描述；\n"
+                "3) 全文只用中文叙述（论文标题可保留原文）；\n"
+                "4) 每个关键判断后必须给文内引用编号，如 [R3] 或 [R3][R8]；\n"
+                "5) 避免模板化重复句，不要输出空洞口号。\n"
+                "请使用以下固定结构标题：\n"
+                f"# 研究洞察报告：{query}\n"
+                "## 摘要\n"
+                "## 1. 研究起源与关键演进\n"
+                "## 2. 关键证据与机制分析\n"
+                "## 3. 应用落地与产业化进展\n"
+                "## 4. 创新机会与研究议程\n"
+                "## 5. 局限性与风险\n"
+                "## 6. 结论\n"
+                "## 参考文献\n"
+                "其中“参考文献”仅列正文实际引用过的条目，格式为：\n"
+                "- [R1] Title（Year，Venue，引用 N）\n"
+                "如果证据不足，请明确写“当前证据不足以支持该结论”。\n"
+                f"证据上下文(JSON)：{json.dumps(context, ensure_ascii=False)}"
+            )
+        else:
+            user_prompt = (
+                "Generate a scientific-style Markdown report strictly from the evidence below.\n"
+                "Hard constraints:\n"
+                "1) Use only facts from the provided references; do not invent papers or numbers.\n"
+                "2) Never mention workflow, agents, orchestration rounds, or tool calls.\n"
+                "3) Keep language consistent in English.\n"
+                "4) Every key claim must carry in-text citations, e.g., [R3] or [R3][R8].\n"
+                "5) Avoid repetitive template filler and generic slogans.\n"
+                "Use this exact heading structure:\n"
+                f"# Research Insight Report: {query}\n"
+                "## Abstract\n"
+                "## 1. Research Origin and Evolution\n"
+                "## 2. Evidence-Based Findings and Mechanisms\n"
+                "## 3. Applications and Industrial Adoption\n"
+                "## 4. Innovation Opportunities and Research Agenda\n"
+                "## 5. Limitations and Risks\n"
+                "## 6. Conclusion\n"
+                "## References\n"
+                "In the References section, include only cited entries with format:\n"
+                "- [R1] Title (Year, Venue, citations N)\n"
+                "If evidence is insufficient, explicitly state: 'Current evidence is insufficient to support this claim.'\n"
+                f"Evidence context (JSON): {json.dumps(context, ensure_ascii=False)}"
+            )
+
+        try:
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a senior research report writer. "
+                        "Deliver precise, evidence-constrained, publication-style synthesis."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": user_prompt,
+                },
+            ]
+            raw_content = ""
+            streamed_chars = 0
+            streamed = False
+            if stream_callback is not None:
+                raw_content, streamed_chars = await asyncio.wait_for(
+                    self._stream_chat_completion_content(
+                        messages=messages,
+                        temperature=0.15,
+                        timeout_seconds=45,
+                        stream_callback=stream_callback,
+                        section="insight_markdown",
+                        start_accumulated=stream_start_accumulated,
+                    ),
+                    timeout=90,
+                )
+                streamed = bool(raw_content)
+            else:
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        chat,
+                        messages,
+                        temperature=0.15,
+                        timeout=45,
+                    ),
+                    timeout=52,
+                )
+                raw_content = str(response.choices[0].message.content or "").strip()
+                streamed_chars = 0
+                streamed = False
+            if not raw_content:
+                return _ComposeMarkdownResult(markdown="", streamed=False, streamed_chars=0)
+            cleaned = (
+                self._normalize_streamed_report_markdown(raw_content, language=language)
+                if streamed
+                else self._clean_report_markdown(raw_content, language=language)
+            )
+            if not cleaned:
+                return _ComposeMarkdownResult(markdown="", streamed=False, streamed_chars=0)
+            if streamed:
+                return _ComposeMarkdownResult(
+                    markdown=cleaned if cleaned.endswith("\n") else f"{cleaned}\n",
+                    streamed=True,
+                    streamed_chars=max(0, int(streamed_chars)),
+                )
+            has_reference_section = bool(
+                re.search(
+                    r"^##\s*(参考文献|references)\b",
+                    cleaned,
+                    flags=re.IGNORECASE | re.MULTILINE,
+                )
+            )
+            if has_reference_section:
+                return _ComposeMarkdownResult(
+                    markdown=cleaned if cleaned.endswith("\n") else f"{cleaned}\n",
+                    streamed=False,
+                    streamed_chars=0,
+                )
+        except Exception:  # noqa: BLE001
+            return _ComposeMarkdownResult(markdown="", streamed=False, streamed_chars=0)
+        return _ComposeMarkdownResult(markdown="", streamed=False, streamed_chars=0)
+
+    def _compose_markdown_fallback(
+        self,
+        *,
+        language: str,
+        query: str,
+        graph_stats: dict[str, int],
+        all_paper_count: int,
+        founder_primary: dict[str, Any] | None,
+        founder_candidates: list[dict[str, Any]],
+        timeline_papers: list[dict[str, Any]],
+        role_signals: list[str],
+        application_clusters: list[dict[str, Any]],
+        innovation_points: list[str],
+        critic_notes: list[str],
+        reference_catalog: list[dict[str, Any]],
+    ) -> str:
+        ref_lookup = {
+            self._paper_title_key(str(item.get("title") or "")): str(item.get("id") or "").strip()
+            for item in reference_catalog
+        }
+
+        def _ref_marker(item: dict[str, Any] | None) -> str:
+            if not isinstance(item, dict):
+                return ""
+            key = self._paper_title_key(str(item.get("title") or ""))
+            ref_id = ref_lookup.get(key, "")
+            return f"[{ref_id}]" if ref_id else ""
+
+        if language == "zh":
             sections = [
-                "# 探索与洞察报告",
+                f"# 研究洞察报告：{query}",
                 "",
-                "## 1. 该领域/论文的鼻祖论文、由来与最初成果落地",
+                "## 摘要",
+                (
+                    f"本报告基于当前检索到的 {all_paper_count} 篇论文及知识图谱证据（节点 {graph_stats['node_count']}、"
+                    f"关系 {graph_stats['edge_count']}）进行归纳。结论聚焦于研究起源、关键机制、应用落地与可执行创新方向，"
+                    "并在证据不足处显式标注不确定性。"
+                ),
+                "",
+                "## 1. 研究起源与关键演进",
             ]
             if founder_primary is not None:
-                founder_title = str(founder_primary.get("title") or "未知标题").strip()
-                founder_year = self._safe_int(founder_primary.get("year"), 0)
-                founder_citations = self._safe_int(founder_primary.get("citation_count"), 0)
-                founder_venue = str(founder_primary.get("venue") or "Unknown").strip() or "Unknown"
+                marker = _ref_marker(founder_primary)
+                marker_text = f" {marker}" if marker else ""
                 sections.append(
                     (
-                        f"基于当前检索样本（共 {len(all_papers)} 篇论文），最早且影响力突出的候选鼻祖论文为"
-                        f"《{founder_title}》（{founder_year or '年份未知'}，引用 {founder_citations}，"
-                        f"发表渠道 {founder_venue}）。以下论述严格以当前样本证据为边界，不做超样本断言。"
+                        f"在当前高相关样本中，{self._format_paper_reference_line(founder_primary, language='zh')}"
+                        f"{marker_text} 可作为“起点候选”进行追踪。该候选仅代表当前样本内的最优证据，不构成领域唯一结论。"
                     )
                 )
-                abstract_summary = self._summarize_abstract_text(
-                    founder_primary.get("abstract"),
-                    max_chars=320,
-                )
-                if abstract_summary:
-                    sections.append(
-                        f"从论文摘要可提炼的起点贡献是：{abstract_summary}"
-                    )
             else:
-                sections.append(
-                    "当前检索样本不足以唯一锁定单一鼻祖论文，因此以下采用“最早年份 + 引用影响力”的联合标准进行候选判断。"
-                )
+                sections.append("当前证据不足以锁定单一鼻祖论文，需补充早期论文与后续引用链数据。")
             if founder_candidates:
-                sections.append("鼻祖候选证据：")
+                sections.append("候选起源证据：")
                 for item in founder_candidates:
-                    sections.append(
-                        f"- {self._format_paper_reference_line(item, language='zh')}"
-                    )
-            if founder_notes:
-                sections.append("由来路径与早期落地线索：")
-                for note in founder_notes:
-                    sections.append(f"- {note}")
-            else:
-                sections.extend(
-                    [
-                        "- 起源阶段通常由“核心问题定义 + 可复现基线”共同形成。",
-                        "- 首批落地往往出现在可测量收益明确、试点成本较低的场景。",
-                        "- 从早期论文到应用验证之间，关键瓶颈通常是数据、评估与工程可靠性。",
-                    ]
-                )
+                    marker = _ref_marker(item)
+                    prefix = f"{marker} " if marker else ""
+                    sections.append(f"- {prefix}{self._format_paper_reference_line(item, language='zh')}")
+            if timeline_papers:
+                sections.append("关键演进节点：")
+                for item in timeline_papers[:8]:
+                    marker = _ref_marker(item)
+                    prefix = f"{marker} " if marker else ""
+                    sections.append(f"- {prefix}{self._format_paper_reference_line(item, language='zh')}")
 
             sections.extend(
                 [
                     "",
-                    "## 2. 基于鼻祖论文的扩展与延续工作（思路细节）",
-                    "基于已检索论文构造的延续时间线：",
+                    "## 2. 关键证据与机制分析",
                 ]
             )
-            for item in papers_sorted_by_year[:16]:
-                sections.append(f"- {self._format_paper_reference_line(item, language='zh')}")
-            if extension_notes_section:
-                sections.append("延续工作中的关键扩展思路：")
-                for note in extension_notes_section[:14]:
-                    sections.append(f"- {note}")
+            if role_signals:
+                for line in role_signals[:8]:
+                    sections.append(f"- {line}")
             else:
-                sections.extend(
-                    [
-                        "- 典型延续路线包括：模型能力增强、任务迁移、数据效率优化和部署成本压缩。",
-                        "- 关键细节通常体现在训练目标调整、结构约束设计和评测协议标准化。",
-                        "- 延续工作是否成立，核心取决于“效果提升是否稳健、代价是否可接受、场景是否可迁移”。",
-                    ]
-                )
+                sections.append("- 当前证据不足以支持细粒度机制分析，建议补充可复现实验与对照结果。")
 
             sections.extend(
                 [
                     "",
-                    "## 3. 当前应用与落地（论文证据与场景）",
-                    (
-                        f"当前样本显示：该方向已有明确应用趋势，证据覆盖 {len(all_papers)} 篇论文，"
-                        f"图谱规模为节点 {graph_stats['node_count']}、关系 {graph_stats['edge_count']}。"
-                    ),
+                    "## 3. 应用落地与产业化进展",
                 ]
             )
             if application_clusters:
-                for cluster in application_clusters[:8]:
-                    scenario_name = str(cluster.get("name") or "通用场景")
-                    evidence_lines = cluster.get("evidence") if isinstance(cluster.get("evidence"), list) else []
-                    sections.append(f"- 场景：{scenario_name}")
-                    for line in evidence_lines[:4]:
-                        sections.append(f"  证据：{line}")
-            if application_notes:
-                sections.append("应用落地补充观察：")
-                for note in application_notes[:10]:
-                    sections.append(f"- {note}")
+                for cluster in application_clusters[:5]:
+                    sections.append(f"- 场景：{str(cluster.get('name') or '通用场景')}")
+                    for evidence in list(cluster.get("evidence") or [])[:3]:
+                        sections.append(f"  证据：{evidence}")
+            else:
+                sections.append("- 当前样本尚未形成稳定的应用簇，产业化路径仍待验证。")
+
+            sections.extend(
+                [
+                    "",
+                    "## 4. 创新机会与研究议程",
+                ]
+            )
+            if innovation_points:
+                for point in innovation_points[:6]:
+                    sections.append(f"- {point}")
             else:
                 sections.extend(
                     [
-                        "- 当前落地多呈现“先局部流程替代，再逐步扩展系统边界”的推进路径。",
-                        "- 高价值场景通常优先关注可量化 KPI，如准确率、时延、单位成本与可靠性。",
-                        "- 论文中的可复现证据与产业部署中的长期稳定性仍存在显著鸿沟，需持续验证。",
+                        "- 构建统一评测基线（效果、成本、稳定性三维）并形成公开可复现协议。",
+                        "- 强化跨场景迁移能力，降低新场景部署的微调与数据成本。",
+                        "- 将结构化知识约束引入生成流程，以降低关键任务中的幻觉风险。",
                     ]
                 )
 
             sections.extend(
                 [
                     "",
-                    "## 4. 尚未被充分挖掘的创新点（可行性发散）",
+                    "## 5. 局限性与风险",
                 ]
             )
-            if innovation_notes:
-                for note in innovation_notes[:16]:
+            if critic_notes:
+                for note in critic_notes[:5]:
                     sections.append(f"- {note}")
             else:
-                sections.extend(
-                    [
-                        "- 创新点 A：跨场景迁移的统一中间表示，降低每个新场景的重新训练成本。",
-                        "- 创新点 B：结合因果约束的评估框架，提升在分布偏移场景下的稳定性。",
-                        "- 创新点 C：以低资源部署为目标的轻量化架构，扩大真实业务可用范围。",
-                        "- 创新点 D：将知识图谱结构先验与生成模型结合，提升复杂关系推理可靠性。",
-                    ]
-                )
+                sections.append("- 当前证据覆盖仍偏窄，结论对数据集与评测协议具有依赖性。")
 
             sections.extend(
                 [
                     "",
-                    "## 5. 总结",
+                    "## 6. 结论",
                     (
-                        f"围绕“{query}”，当前证据显示该方向已经形成“起源论文 -> 连续扩展 -> 多场景落地”的主线，"
-                        "但在可复现性、跨场景稳健性和规模化部署成本方面仍有明显改进空间。"
+                        "现有证据支持该方向已进入“方法演进 + 场景渗透”的阶段，"
+                        "下一步增量价值取决于严格评测闭环、可复现证据链和工程化成本控制。"
                     ),
-                    "- 结论 1：鼻祖论文提供了问题定义与方法起点，后续工作主要沿性能、效率与适配性三条线并行演化。",
-                    "- 结论 2：应用落地已发生，但高质量工程化仍依赖严格评估与持续迭代。",
-                    "- 结论 3：下一阶段创新价值主要来自“架构整合 + 评估升级 + 低成本部署”三者协同。",
-                ]
-            )
-
-            sections.extend(
-                [
                     "",
-                    "## 6. 引用论文情况（如实列出）",
-                    (
-                        f"以下为本次报告使用的论文样本清单（按引用量降序，样本内共 {len(all_papers)} 篇，"
-                        f"此处展示 {len(references)} 篇）："
-                    ),
+                    "## 参考文献",
                 ]
             )
-            for index, item in enumerate(references, start=1):
-                sections.append(f"{index}. {self._format_paper_reference_line(item, language='zh')}")
-            if not references:
-                sections.append("- 当前样本中无可引用论文条目。")
+            if reference_catalog:
+                for item in reference_catalog[:20]:
+                    sections.append(
+                        f"- [{item['id']}] {item['title']}（{item['year'] or '年份未知'}，{item['venue']}，引用 {item['citations']}）"
+                    )
+            else:
+                sections.append("- 当前样本中无可用参考文献条目。")
             return "\n".join(sections).strip() + "\n"
 
         sections = [
-            "# Exploration Insight Report",
+            f"# Research Insight Report: {query}",
             "",
-            "## 1. Seminal Paper, Origin Path, and First Deployments",
+            "## Abstract",
+            (
+                f"This report synthesizes {all_paper_count} retrieved papers and graph evidence "
+                f"({graph_stats['node_count']} nodes, {graph_stats['edge_count']} relations). "
+                "It focuses on origin, mechanism-level findings, adoption status, and executable innovation directions, "
+                "while explicitly stating uncertainty where evidence is insufficient."
+            ),
+            "",
+            "## 1. Research Origin and Evolution",
         ]
         if founder_primary is not None:
-            founder_title = str(founder_primary.get("title") or "Unknown title").strip()
-            founder_year = self._safe_int(founder_primary.get("year"), 0)
-            founder_citations = self._safe_int(founder_primary.get("citation_count"), 0)
-            founder_venue = str(founder_primary.get("venue") or "Unknown").strip() or "Unknown"
+            marker = _ref_marker(founder_primary)
+            marker_text = f" {marker}" if marker else ""
             sections.append(
                 (
-                    f"Based on the current evidence pool ({len(all_papers)} papers), the leading seminal-paper candidate is "
-                    f"'{founder_title}' ({founder_year or 'year unknown'}, citations {founder_citations}, venue {founder_venue}). "
-                    "All conclusions below stay within the retrieved evidence scope."
+                    f"Within the highest-relevance sample, {self._format_paper_reference_line(founder_primary, language='en')}"
+                    f"{marker_text} is treated as a leading origin candidate. This is a best-fit inference inside the current sample, "
+                    "not a universal historical claim."
                 )
             )
-            abstract_summary = self._summarize_abstract_text(
-                founder_primary.get("abstract"),
-                max_chars=420,
-            )
-            if abstract_summary:
-                sections.append(f"Core contribution signal from the abstract: {abstract_summary}")
         else:
-            sections.append(
-                "The current retrieval sample is insufficient to lock a single seminal paper, so candidates are ranked by earliest year plus citation impact."
-            )
+            sections.append("Current evidence is insufficient to identify a single seminal paper with confidence.")
         if founder_candidates:
-            sections.append("Seminal-paper candidates:")
+            sections.append("Origin candidates:")
             for item in founder_candidates:
-                sections.append(f"- {self._format_paper_reference_line(item, language='en')}")
-        if founder_notes:
-            sections.append("Origin and early adoption signals:")
-            for note in founder_notes:
-                sections.append(f"- {note}")
+                marker = _ref_marker(item)
+                prefix = f"{marker} " if marker else ""
+                sections.append(f"- {prefix}{self._format_paper_reference_line(item, language='en')}")
+        if timeline_papers:
+            sections.append("Key evolution milestones:")
+            for item in timeline_papers[:8]:
+                marker = _ref_marker(item)
+                prefix = f"{marker} " if marker else ""
+                sections.append(f"- {prefix}{self._format_paper_reference_line(item, language='en')}")
 
         sections.extend(
             [
                 "",
-                "## 2. Continuation Chain and Extension Details from the Seminal Work",
-                "Timeline of continuation evidence in retrieved papers:",
+                "## 2. Evidence-Based Findings and Mechanisms",
             ]
         )
-        for item in papers_sorted_by_year[:16]:
-            sections.append(f"- {self._format_paper_reference_line(item, language='en')}")
-        if extension_notes_section:
-            sections.append("Detailed continuation patterns:")
-            for note in extension_notes_section[:14]:
-                sections.append(f"- {note}")
+        if role_signals:
+            for line in role_signals[:8]:
+                sections.append(f"- {line}")
+        else:
+            sections.append("- Current evidence is insufficient for robust mechanism-level synthesis.")
 
         sections.extend(
             [
                 "",
-                "## 3. Current Applications and Deployment Status (Papers + Scenarios)",
-                (
-                    f"Current evidence indicates active deployment tracks across {len(all_papers)} papers, "
-                    f"with graph scale {graph_stats['node_count']} nodes and {graph_stats['edge_count']} relations."
-                ),
+                "## 3. Applications and Industrial Adoption",
             ]
         )
         if application_clusters:
-            for cluster in application_clusters[:8]:
-                scenario_name = str(cluster.get("name") or "General scenario")
-                evidence_lines = cluster.get("evidence") if isinstance(cluster.get("evidence"), list) else []
-                sections.append(f"- Scenario: {scenario_name}")
-                for line in evidence_lines[:4]:
-                    sections.append(f"  Evidence: {line}")
-        if application_notes:
-            sections.append("Additional deployment observations:")
-            for note in application_notes[:10]:
-                sections.append(f"- {note}")
+            for cluster in application_clusters[:5]:
+                sections.append(f"- Scenario: {str(cluster.get('name') or 'General scenario')}")
+                for evidence in list(cluster.get("evidence") or [])[:3]:
+                    sections.append(f"  Evidence: {evidence}")
+        else:
+            sections.append("- No stable application cluster can be inferred from the current sample.")
 
         sections.extend(
             [
                 "",
-                "## 4. Under-explored Innovation Opportunities",
+                "## 4. Innovation Opportunities and Research Agenda",
             ]
         )
-        if innovation_notes:
-            for note in innovation_notes[:16]:
-                sections.append(f"- {note}")
+        if innovation_points:
+            for point in innovation_points[:6]:
+                sections.append(f"- {point}")
         else:
             sections.extend(
                 [
-                    "- Opportunity A: unified intermediate representations for cross-scenario transfer.",
-                    "- Opportunity B: causality-aware evaluation under distribution shift.",
-                    "- Opportunity C: low-resource deployment architecture for broader real-world adoption.",
-                    "- Opportunity D: graph priors fused with generation for reliable relation reasoning.",
+                    "- Build a unified evaluation baseline across quality, latency, and cost.",
+                    "- Improve cross-domain transfer to reduce adaptation cost per new scenario.",
+                    "- Integrate structured knowledge constraints to reduce hallucination risk in critical tasks.",
                 ]
             )
 
         sections.extend(
             [
                 "",
-                "## 5. Summary",
-                (
-                    f"For '{query}', the evidence suggests a clear trajectory from seminal work to sustained extensions and growing deployment. "
-                    "The next value frontier is the combination of stronger evaluation, robust transfer, and lower deployment cost."
-                ),
-                "- Conclusion 1: continuation work has expanded capability, efficiency, and portability in parallel.",
-                "- Conclusion 2: deployment already exists, but long-horizon stability still needs stronger proof.",
-                "- Conclusion 3: high-impact innovation now lies in architecture integration plus evaluation upgrades.",
+                "## 5. Limitations and Risks",
             ]
         )
+        if critic_notes:
+            for note in critic_notes[:5]:
+                sections.append(f"- {note}")
+        else:
+            sections.append("- Current evidence coverage is limited, and conclusions are sensitive to evaluation setup.")
 
         sections.extend(
             [
                 "",
-                "## 6. Reference Papers (Factual Listing)",
+                "## 6. Conclusion",
                 (
-                    f"The following references come from the current retrieved sample, ranked by citation count "
-                    f"({len(all_papers)} total papers, showing {len(references)}):"
+                    "The evidence indicates a transition from capability growth to deployment-driven value creation. "
+                    "The next impact frontier depends on reproducible evaluation loops, stronger evidence traceability, and lower deployment cost."
                 ),
+                "",
+                "## References",
             ]
         )
-        for index, item in enumerate(references, start=1):
-            sections.append(f"{index}. {self._format_paper_reference_line(item, language='en')}")
-        if not references:
-            sections.append("- No citable papers are available in the current sample.")
+        if reference_catalog:
+            for item in reference_catalog[:20]:
+                sections.append(
+                    f"- [{item['id']}] {item['title']} ({item['year'] or 'year unknown'}, {item['venue']}, citations {item['citations']})"
+                )
+        else:
+            sections.append("- No citable references are available in the current sample.")
         return "\n".join(sections).strip() + "\n"
+
+    @staticmethod
+    def _paper_title_key(title: str) -> str:
+        safe = re.sub(r"\s+", " ", str(title or "").strip().lower())
+        return safe
+
+    @staticmethod
+    def _extract_query_terms(query: str) -> list[str]:
+        safe_query = re.sub(r"\s+", " ", str(query or "").strip().lower())
+        if not safe_query:
+            return []
+        english_terms = re.findall(r"[a-z0-9][a-z0-9\-]{2,}", safe_query)
+        cjk_terms = [item for item in re.findall(r"[\u4e00-\u9fff]{2,}", safe_query) if len(item) >= 2]
+        terms: list[str] = []
+        seen: set[str] = set()
+        for token in [safe_query, *english_terms, *cjk_terms]:
+            normalized = str(token or "").strip()
+            if not normalized:
+                continue
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            terms.append(normalized)
+            if len(terms) >= 12:
+                break
+        return terms
+
+    def _rank_papers_by_query_relevance(
+        self,
+        papers: list[dict[str, Any]],
+        *,
+        query: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        terms = self._extract_query_terms(query)
+        if not terms:
+            return self._top_papers_for_prompt(papers, limit=max(1, int(limit)))
+        full_phrase = terms[0]
+        scored: list[tuple[float, dict[str, Any]]] = []
+        for item in papers:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            abstract = str(item.get("abstract") or "").strip()
+            if not title and not abstract:
+                continue
+            title_lc = title.lower()
+            abstract_lc = abstract.lower()
+            score = 0.0
+            if full_phrase and full_phrase in title_lc:
+                score += 10.0
+            elif full_phrase and full_phrase in abstract_lc:
+                score += 6.0
+            for token in terms[1:]:
+                if token in title_lc:
+                    score += 3.6
+                elif token in abstract_lc:
+                    score += 1.8
+            citations = self._safe_int(item.get("citation_count"), 0)
+            year = self._safe_int(item.get("year"), 0)
+            score += min(8.0, float(max(0, citations)) / 900.0)
+            if year >= 2020:
+                score += 1.2
+            elif year >= 2016:
+                score += 0.7
+            scored.append((score, dict(item)))
+        scored.sort(
+            key=lambda pair: (
+                pair[0],
+                self._safe_int(pair[1].get("citation_count"), 0),
+                self._safe_int(pair[1].get("year"), 0),
+            ),
+            reverse=True,
+        )
+        return [item for _, item in scored[: max(1, int(limit))]]
+
+    def _build_reference_catalog(
+        self,
+        papers: list[dict[str, Any]],
+        *,
+        language: str,
+    ) -> list[dict[str, Any]]:
+        catalog: list[dict[str, Any]] = []
+        for index, item in enumerate(papers, start=1):
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            if not title:
+                continue
+            year = self._safe_int(item.get("year"), 0)
+            citations = self._safe_int(item.get("citation_count"), 0)
+            venue = str(item.get("venue") or "Unknown").strip() or "Unknown"
+            catalog.append(
+                {
+                    "id": f"R{index}",
+                    "title": title,
+                    "year": year,
+                    "venue": venue,
+                    "citations": citations,
+                    "abstract_hint": self._summarize_abstract_text(
+                        item.get("abstract"),
+                        max_chars=180 if language == "zh" else 220,
+                    ),
+                }
+            )
+        return catalog
+
+    def _clean_report_markdown(self, markdown: str, *, language: str) -> str:
+        safe = str(markdown or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not safe:
+            return ""
+        noise_patterns = [
+            r"\bsub[- ]?agent(s)?\b",
+            r"\bagent(s)?\b",
+            r"\bworkflow\b",
+            r"\borchestrat(e|ed|ion)\b",
+            r"\btool call(s)?\b",
+            r"子代理",
+            r"智能体",
+            r"工作流",
+            r"协同轮次",
+            r"工具调用",
+        ]
+        deduped_lines: list[str] = []
+        seen: set[str] = set()
+        blank_streak = 0
+        for raw_line in safe.split("\n"):
+            line = str(raw_line or "").rstrip()
+            stripped = line.strip()
+            if stripped:
+                lower = stripped.lower()
+                if any(re.search(pattern, lower, flags=re.IGNORECASE) for pattern in noise_patterns):
+                    continue
+                normalized_key = re.sub(r"\s+", " ", stripped).strip().lower()
+                if normalized_key in seen:
+                    continue
+                seen.add(normalized_key)
+                deduped_lines.append(stripped)
+                blank_streak = 0
+                continue
+            blank_streak += 1
+            if blank_streak <= 1:
+                deduped_lines.append("")
+
+        cleaned = "\n".join(deduped_lines).strip()
+        if not cleaned:
+            return ""
+        if language == "zh" and not cleaned.startswith("# "):
+            cleaned = f"# 研究洞察报告\n\n{cleaned}"
+        if language == "en" and not cleaned.startswith("# "):
+            cleaned = f"# Research Insight Report\n\n{cleaned}"
+        return cleaned
+
+    @staticmethod
+    def _normalize_streamed_report_markdown(markdown: str, *, language: str) -> str:
+        safe = str(markdown or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not safe:
+            return ""
+        if language == "zh" and not safe.startswith("# "):
+            safe = f"# 研究洞察报告\n\n{safe}"
+        if language == "en" and not safe.startswith("# "):
+            safe = f"# Research Insight Report\n\n{safe}"
+        return safe
 
     @staticmethod
     def _dedupe_report_lines(
@@ -1636,13 +2276,20 @@ class InsightExplorationService:
             r"\bcheckpoint(_\d+)?\b",
             r"\borchestrated\b",
             r"\bround\s*\d+\b",
+            r"\bexploration completed\b",
+            r"\btask completed\b",
+            r"\binsight orchestrator\b",
             r"第\s*\d+\s*轮",
+            r"任务完成",
+            r"已完成",
+            r"正在实时生成报告内容",
             r"子代理",
             r"多智能体",
             r"智能体",
             r"工作流",
             r"协商",
             r"工具调用",
+            r"<\/?scp>",
         ]
         for pattern in noise_patterns:
             safe = re.sub(pattern, "", safe, flags=re.IGNORECASE)
@@ -1782,29 +2429,195 @@ class InsightExplorationService:
             }
         )
 
+    async def _emit_stream_done(
+        self,
+        *,
+        callback: StreamCallback,
+        section: str,
+        accumulated_chars: int,
+    ) -> None:
+        try:
+            await callback(
+                {
+                    "section": str(section or "insight_markdown"),
+                    "chunk": "",
+                    "accumulated_chars": max(0, int(accumulated_chars or 0)),
+                    "done": True,
+                }
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _stream_chat_completion_content(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        temperature: float,
+        timeout_seconds: float,
+        stream_callback: StreamCallback,
+        section: str,
+        start_accumulated: int = 0,
+    ) -> tuple[str, int]:
+        loop = asyncio.get_running_loop()
+        safe_section = str(section or "insight_markdown").strip().lower() or "insight_markdown"
+        safe_timeout = max(10.0, float(timeout_seconds or 10.0))
+        initial_accumulated = max(0, int(start_accumulated or 0))
+
+        def _producer() -> tuple[str, int]:
+            pieces: list[str] = []
+            accumulated = initial_accumulated
+            try:
+                client = get_client()
+                stream = client.chat.completions.create(
+                    model=str(self.settings.openai_model),
+                    messages=messages,
+                    temperature=float(temperature),
+                    timeout=safe_timeout,
+                    stream=True,
+                )
+                for event in stream:
+                    delta = self._extract_stream_delta_content(event)
+                    if not delta:
+                        continue
+                    pieces.append(delta)
+                    accumulated += len(delta)
+                    try:
+                        future = asyncio.run_coroutine_threadsafe(
+                            stream_callback(
+                                {
+                                    "section": safe_section,
+                                    "chunk": delta,
+                                    "accumulated_chars": accumulated,
+                                    "done": False,
+                                }
+                            ),
+                            loop,
+                        )
+                        future.result(timeout=5.0)
+                    except Exception:  # noqa: BLE001
+                        continue
+            except Exception:  # noqa: BLE001
+                pass
+            return ("".join(pieces), accumulated)
+
+        return await asyncio.to_thread(_producer)
+
+    @staticmethod
+    def _extract_stream_delta_content(chunk: Any) -> str:
+        try:
+            choices = getattr(chunk, "choices", None)
+            if not choices:
+                return ""
+            first_choice = choices[0]
+            delta = getattr(first_choice, "delta", None)
+            if delta is None:
+                return ""
+            content = getattr(delta, "content", None)
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                parts: list[str] = []
+                for item in content:
+                    if isinstance(item, dict):
+                        text = item.get("text")
+                        if isinstance(text, str) and text:
+                            parts.append(text)
+                return "".join(parts)
+        except Exception:  # noqa: BLE001
+            return ""
+        return ""
+
+    async def _emit_lifecycle_event(
+        self,
+        *,
+        stream_callback: StreamCallback | None,
+        session_id: str,
+        event_type: str,
+        stage_started_at: float | None = None,
+        accumulated_chars: int = 0,
+        level: str = "info",
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        if stream_callback is None:
+            return
+        safe_event_type = str(event_type or "").strip().lower()
+        if not safe_event_type:
+            return
+        payload: dict[str, Any] = {
+            "type": safe_event_type,
+            "session_id": str(session_id or "").strip(),
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "elapsed_ms": 0,
+        }
+        if stage_started_at is not None:
+            payload["elapsed_ms"] = max(0, int((perf_counter() - float(stage_started_at)) * 1000))
+        safe_level = str(level or "").strip().lower()
+        if safe_level in {"warning", "error"}:
+            payload["level"] = safe_level
+        for key, value in dict(details or {}).items():
+            safe_key = str(key or "").strip()
+            if not safe_key:
+                continue
+            payload[safe_key] = value
+        try:
+            await stream_callback(
+                {
+                    "section": "insight_orchestrator_event",
+                    "event": payload,
+                    "chunk": "",
+                    "accumulated_chars": max(0, int(accumulated_chars or 0)),
+                    "done": False,
+                }
+            )
+        except Exception:  # noqa: BLE001
+            # Lifecycle telemetry should not block report generation.
+            pass
+
     def _persist_artifacts(self, *, session_id: str, markdown: str, language: str) -> dict[str, str]:
-        output_dir = self.report_root / session_id
+        md_path = self._persist_markdown_artifact(
+            session_id=session_id,
+            markdown=markdown,
+        )
+        pdf_path = ""
+        try:
+            pdf_path = self._persist_pdf_artifact(
+                markdown=markdown,
+                markdown_path=md_path,
+                language=language,
+            )
+        except Exception:  # noqa: BLE001
+            pdf_path = ""
+        return {
+            "markdown_path": str(md_path or ""),
+            "pdf_path": str(pdf_path or ""),
+        }
+
+    def _persist_markdown_artifact(self, *, session_id: str, markdown: str) -> str:
+        output_dir = self.report_root / str(session_id or "").strip()
         output_dir.mkdir(parents=True, exist_ok=True)
         md_path = output_dir / "insight.md"
-        md_path.write_text(markdown, encoding="utf-8")
+        md_path.write_text(str(markdown or ""), encoding="utf-8")
+        return str(md_path)
 
-        pdf_path = output_dir / "insight.pdf"
-        if _REPORTLAB_AVAILABLE:
-            try:
-                pdf_path = self.render_markdown_pdf(
-                    markdown=markdown,
-                    pdf_path=pdf_path,
-                    language=language,
-                )
-            except Exception:  # noqa: BLE001
-                pdf_path = Path("")
-        else:
-            pdf_path = Path("")
-
-        return {
-            "markdown_path": str(md_path),
-            "pdf_path": str(pdf_path) if str(pdf_path).strip() else "",
-        }
+    def _persist_pdf_artifact(
+        self,
+        *,
+        markdown: str,
+        markdown_path: str,
+        language: str,
+    ) -> str:
+        if not _REPORTLAB_AVAILABLE:
+            return ""
+        md_path = Path(str(markdown_path or "").strip())
+        if not md_path.parent.exists():
+            md_path.parent.mkdir(parents=True, exist_ok=True)
+        target_pdf_path = md_path.parent / "insight.pdf"
+        rendered_path = self.render_markdown_pdf(
+            markdown=markdown,
+            pdf_path=target_pdf_path,
+            language=language,
+        )
+        return str(rendered_path) if str(rendered_path).strip() else ""
 
     def render_markdown_pdf(
         self,

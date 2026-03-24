@@ -4,6 +4,7 @@ import {
   buildKnowledgeGraph,
   createResearchWebSocket,
   downloadResearchReport,
+  getActiveResearchSession,
   getKnowledgeGraph,
   getResearchSession,
   retrieveKnowledgePapers,
@@ -379,6 +380,9 @@ const INSIGHT_DEPTH_OPTIONS = Array.from(
 
 const ACTIVE_RESEARCH_SESSION_STORAGE_KEY = 'starfish:active-research-session';
 const COMPLETED_WORKFLOW_SNAPSHOT_STORAGE_KEY = 'starfish:workflow-completed-snapshot';
+const INSIGHT_STREAM_STALL_MS = 15000;
+const INSIGHT_STREAM_WATCHDOG_INTERVAL_MS = 2000;
+const RUNTIME_EVENT_CLOCK_SKEW_MS = 1200;
 
 function safeJsonClone(value, fallback = null) {
   try {
@@ -551,6 +555,38 @@ function normalizeRuntimeSeed(seed = {}) {
   };
 }
 
+function normalizeRuntimeSeedFromActiveSession(activeSession = {}, fallbackSeed = {}) {
+  const normalizedFallback = normalizeRuntimeSeed(fallbackSeed || {});
+  const sessionId = String(activeSession?.session_id || '').trim();
+  if (!sessionId) return null;
+
+  const inputTypeRaw = String(activeSession?.input_type || normalizedFallback.input_type || 'domain').trim().toLowerCase();
+  const inputType = inputTypeRaw === 'domain'
+    ? 'domain'
+    : (inputTypeRaw === 'doi' ? 'doi' : 'arxiv_id');
+  const inputValue = String(
+    activeSession?.input_value !== undefined
+      ? activeSession.input_value
+      : normalizedFallback.input_value
+  ).trim();
+  const quickMode = activeSession?.quick_mode !== undefined
+    ? Boolean(activeSession.quick_mode)
+    : Boolean(normalizedFallback.quick_mode);
+  const paperRangeYears = parsePaperRangeYears(
+    activeSession?.paper_range_years !== undefined
+      ? activeSession.paper_range_years
+      : normalizedFallback.paper_range_years
+  );
+
+  return normalizeRuntimeSeed({
+    input_type: inputType,
+    input_value: inputValue,
+    paper_range_years: paperRangeYears,
+    quick_mode: quickMode,
+    runtime_session_id: sessionId
+  });
+}
+
 function toFiniteNegotiationNumber(rawValue) {
   if (rawValue === null || rawValue === undefined) return null;
   if (typeof rawValue === 'string' && !rawValue.trim()) return null;
@@ -632,6 +668,7 @@ export function usePaperWorkflow({
   const insightReportReady = ref(false);
   const insightReportStreaming = ref(false);
   const insightStreamAccumulatedChars = ref(0);
+  const lastInsightStreamAt = ref(0);
   const insightMarkdownDownloadLoading = ref(false);
   const insightPdfDownloadLoading = ref(false);
   const errorMessage = ref('');
@@ -648,6 +685,9 @@ export function usePaperWorkflow({
 
   let researchSocket = null;
   let researchPollTimer = null;
+  let insightStreamWatchdogTimer = null;
+  let insightStreamReconcileInFlight = false;
+  let runtimeLastEventTsMs = 0;
   const runtimeNodeLogCursor = new Map();
 
   const graphStats = computed(() => {
@@ -661,6 +701,19 @@ export function usePaperWorkflow({
 
   const hasInsightReport = computed(() => {
     return Boolean(String(insightReportMarkdown.value || '').trim());
+  });
+
+  const insightReportPlaceholderText = computed(() => {
+    if (insightReportStreaming.value) {
+      return '正在实时生成报告内容...';
+    }
+    const insightStep = steps.value.find((item) => item.key === 'insight');
+    const insightMessage = String(insightStep?.message || '').trim();
+    const insightStatus = String(insightStep?.status || '').trim().toLowerCase();
+    if (insightMessage && (insightStatus === 'running' || insightStatus === 'action_required')) {
+      return insightMessage;
+    }
+    return '图谱完成并确认参数后，将在此处显示探索报告。';
   });
 
   const insightInlineConfig = computed(() => ({
@@ -745,6 +798,70 @@ export function usePaperWorkflow({
       window.clearInterval(researchPollTimer);
       researchPollTimer = null;
     }
+  }
+
+  function markInsightStreamHeartbeat() {
+    lastInsightStreamAt.value = Date.now();
+  }
+
+  function stopInsightStreamWatchdog() {
+    if (insightStreamWatchdogTimer) {
+      window.clearInterval(insightStreamWatchdogTimer);
+      insightStreamWatchdogTimer = null;
+    }
+    insightStreamReconcileInFlight = false;
+  }
+
+  function startInsightStreamWatchdog() {
+    if (insightStreamWatchdogTimer || typeof window === 'undefined') return;
+    insightStreamWatchdogTimer = window.setInterval(() => {
+      if (!unifiedRuntimeActive.value) return;
+      if (!insightReportStreaming.value) return;
+      const lastAt = Number(lastInsightStreamAt.value || 0);
+      if (!Number.isFinite(lastAt) || lastAt <= 0) return;
+      if (Date.now() - lastAt < INSIGHT_STREAM_STALL_MS) return;
+      if (insightStreamReconcileInFlight) return;
+      insightStreamReconcileInFlight = true;
+      void refreshRuntimeSnapshot().finally(() => {
+        insightStreamReconcileInFlight = false;
+      });
+    }, INSIGHT_STREAM_WATCHDOG_INTERVAL_MS);
+  }
+
+  function reconcileInsightProgressFromSnapshot(snapshot = {}) {
+    const status = String(snapshot?.status || '').trim().toLowerCase();
+    const insightPayload = snapshot?.insight && typeof snapshot.insight === 'object' ? snapshot.insight : {};
+    const serverMarkdown = String(insightPayload?.markdown || '').trim();
+
+    if (serverMarkdown) {
+      insightReportMarkdown.value = serverMarkdown;
+      insightStreamAccumulatedChars.value = Math.max(
+        insightStreamAccumulatedChars.value,
+        serverMarkdown.length
+      );
+      insightReportReady.value = true;
+      insightReportStreaming.value = false;
+      markInsightStreamHeartbeat();
+      if (status !== 'completed') {
+        setStepStatusByKey('insight', 'running', '探索报告已生成，正在保存与收敛。');
+      }
+      return true;
+    }
+
+    if (status === 'completed') {
+      insightReportStreaming.value = false;
+      insightReportReady.value = Boolean(String(insightReportMarkdown.value || '').trim());
+      markInsightStreamHeartbeat();
+      return true;
+    }
+
+    if (status === 'failed' || status === 'stopped') {
+      insightReportStreaming.value = false;
+      markInsightStreamHeartbeat();
+      return true;
+    }
+
+    return false;
   }
 
   function resetNegotiationState() {
@@ -1443,12 +1560,15 @@ export function usePaperWorkflow({
 
   function resetUnifiedRuntimeState() {
     stopResearchPolling();
+    stopInsightStreamWatchdog();
     closeResearchSocket();
     researchSessionId.value = '';
     unifiedRuntimeActive.value = false;
     waitingResearchCheckpoint.value = '';
     runtimeAutoResumingCheckpoint.value = '';
     graphSnapshotSignature.value = '';
+    lastInsightStreamAt.value = 0;
+    runtimeLastEventTsMs = 0;
     runtimeNodeLogCursor.clear();
     resetNegotiationState();
   }
@@ -1466,6 +1586,7 @@ export function usePaperWorkflow({
     insightReportReady.value = false;
     insightReportStreaming.value = false;
     insightStreamAccumulatedChars.value = 0;
+    lastInsightStreamAt.value = 0;
     insightMarkdownDownloadLoading.value = false;
     insightPdfDownloadLoading.value = false;
     for (const step of steps.value) {
@@ -1663,9 +1784,11 @@ export function usePaperWorkflow({
       });
     }
     if (node === 'insight') {
-      insightReportStreaming.value = true;
+      insightReportStreaming.value = false;
       insightReportReady.value = false;
       insightStreamAccumulatedChars.value = Math.max(0, String(insightReportMarkdown.value || '').length);
+      setStepStatusByKey('insight', 'running', '正在汇总并生成报告...');
+      markInsightStreamHeartbeat();
     }
 
     setStepAction('checkpoint', null);
@@ -1790,18 +1913,24 @@ export function usePaperWorkflow({
           ? Math.max(insightStreamAccumulatedChars.value, Math.round(accumulatedChars))
           : String(insightReportMarkdown.value || '').length;
       }
-      insightReportStreaming.value = true;
-      insightReportReady.value = false;
-      setStepStatusByKey('insight', 'running', '正在流式生成探索报告...');
-      return;
+      markInsightStreamHeartbeat();
     }
 
     if (done) {
       insightReportStreaming.value = false;
       insightReportReady.value = Boolean(String(insightReportMarkdown.value || '').trim());
+      markInsightStreamHeartbeat();
       if (insightReportReady.value) {
         setStepStatusByKey('insight', 'running', '探索报告已生成，等待流程完成收敛。');
       }
+      return;
+    }
+
+    if (chunk) {
+      insightReportStreaming.value = true;
+      insightReportReady.value = false;
+      setStepStatusByKey('insight', 'running', '正在流式生成探索报告...');
+      return;
     }
   }
 
@@ -2007,10 +2136,141 @@ export function usePaperWorkflow({
     });
   }
 
+  function handleNegotiationParallelShadowScheduled(event = {}) {
+    const taskKind = String(event?.task_kind || '').trim().toLowerCase();
+    const stepKey = resolveStepKeyByTaskKind(taskKind);
+    const agentLabel = resolveAgentRuntimeLabel(event?.agent_id, event?.profile);
+    appendStepLog(stepKey, {
+      title: 'Coordinator Agent',
+      detail: `并行候选已就绪：${agentLabel}。`,
+      status: 'pending'
+    });
+  }
+
+  function handleNegotiationCandidateFailed(event = {}) {
+    const taskKind = String(event?.task_kind || '').trim().toLowerCase();
+    const stepKey = resolveStepKeyByTaskKind(taskKind);
+    const agentLabel = resolveAgentRuntimeLabel(event?.agent_id, event?.profile);
+    const reason = String(event?.reason || '').trim() || '候选执行失败。';
+    appendStepLog(stepKey, {
+      title: 'Quality SubAgent',
+      detail: `候选失败：${agentLabel}（${reason}）。`,
+      status: 'fallback'
+    });
+  }
+
+  function handleNegotiationParallelWinnerPromoted(event = {}) {
+    const taskKind = String(event?.task_kind || '').trim().toLowerCase();
+    const stepKey = resolveStepKeyByTaskKind(taskKind);
+    const agentLabel = resolveAgentRuntimeLabel(event?.agent_id, event?.profile);
+    setStepStatusByKey(stepKey, 'running', `并行评测已确认最优方案：${agentLabel}。`);
+    appendStepLog(stepKey, {
+      title: 'Coordinator Agent',
+      detail: `并行结果切换：已采用 ${agentLabel} 的执行产物。`,
+      status: 'done'
+    });
+  }
+
   function handleInsightOrchestratorEvent(event = {}) {
     const payload = event?.event && typeof event.event === 'object' ? event.event : {};
     const eventType = String(payload?.type || '').trim().toLowerCase();
     if (!eventType) return;
+    const elapsedMs = Number(payload?.elapsed_ms);
+    const elapsedText = Number.isFinite(elapsedMs) && elapsedMs >= 0
+      ? `（耗时 ${Math.max(0, Math.round(elapsedMs))}ms）`
+      : '';
+
+    if (eventType === 'insight_report_compose_started') {
+      insightReportStreaming.value = false;
+      setStepStatusByKey('insight', 'running', '正在汇总并生成报告...');
+      appendStepLog('insight', {
+        title: 'Insight Orchestrator',
+        detail: '后处理阶段开始：正在汇总并生成报告正文。',
+        status: 'doing'
+      });
+      return;
+    }
+
+    if (eventType === 'insight_report_compose_completed') {
+      appendStepLog('insight', {
+        title: 'Insight Orchestrator',
+        detail: `报告汇总完成${elapsedText}。`,
+        status: 'done'
+      });
+      return;
+    }
+
+    if (eventType === 'insight_report_stream_started') {
+      insightReportStreaming.value = true;
+      markInsightStreamHeartbeat();
+      setStepStatusByKey('insight', 'running', '正在实时生成报告内容...');
+      appendStepLog('insight', {
+        title: 'Insight Orchestrator',
+        detail: '开始流式输出报告正文。',
+        status: 'doing'
+      });
+      return;
+    }
+
+    if (eventType === 'insight_report_stream_completed') {
+      insightReportStreaming.value = false;
+      markInsightStreamHeartbeat();
+      insightReportReady.value = Boolean(String(insightReportMarkdown.value || '').trim());
+      setStepStatusByKey('insight', 'running', '正文生成完成，正在保存报告文件...');
+      appendStepLog('insight', {
+        title: 'Insight Orchestrator',
+        detail: `报告流式输出完成${elapsedText}。`,
+        status: 'done'
+      });
+      return;
+    }
+
+    if (eventType === 'insight_artifact_persist_started') {
+      setStepStatusByKey('insight', 'running', '正在保存报告文件...');
+      appendStepLog('insight', {
+        title: 'Insight Orchestrator',
+        detail: '开始保存 Markdown/PDF 报告产物。',
+        status: 'pending'
+      });
+      return;
+    }
+
+    if (eventType === 'insight_artifact_persist_completed') {
+      const warning = String(payload?.warning || '').trim().toLowerCase();
+      const markdownPath = String(payload?.markdown_path || '').trim();
+      const pdfPath = String(payload?.pdf_path || '').trim();
+      if (markdownPath) {
+        insightReportReady.value = Boolean(String(insightReportMarkdown.value || '').trim());
+      }
+      if (warning) {
+        setStepStatusByKey('insight', 'running', '报告已生成，PDF 降级为可选。');
+        appendStepLog('insight', {
+          title: 'Insight Orchestrator',
+          detail: `报告保存完成${elapsedText}，但 PDF 生成降级（${warning}）。`,
+          status: 'fallback'
+        });
+      } else {
+        setStepStatusByKey('insight', 'running', '报告文件已保存，正在完成流程收敛...');
+        appendStepLog('insight', {
+          title: 'Insight Orchestrator',
+          detail: `报告保存完成${elapsedText}（MD: ${markdownPath ? 'ok' : 'missing'}，PDF: ${pdfPath ? 'ok' : 'missing'}）。`,
+          status: 'done'
+        });
+      }
+      return;
+    }
+
+    if (eventType === 'insight_finalize_completed') {
+      insightReportStreaming.value = false;
+      insightReportReady.value = Boolean(String(insightReportMarkdown.value || '').trim());
+      setStepStatusByKey('insight', 'running', '探索报告已生成，等待流程完成收敛。');
+      appendStepLog('insight', {
+        title: 'Insight Orchestrator',
+        detail: `报告后处理收敛完成${elapsedText}。`,
+        status: 'done'
+      });
+      return;
+    }
 
     if (eventType === 'insight_orchestrator_task_started') {
       const roleId = String(payload?.role_id || '').trim() || 'agent';
@@ -2071,6 +2331,7 @@ export function usePaperWorkflow({
     });
 
     hydrateRuntimeArtifacts(snapshot || {});
+    reconcileInsightProgressFromSnapshot(snapshot || {});
     persistActiveRuntimeSessionSnapshot({
       session_id: sessionId,
       status: snapshot?.status,
@@ -2102,6 +2363,7 @@ export function usePaperWorkflow({
       runtimeAutoResumingCheckpoint.value = '';
       graphLoading.value = false;
       unifiedRuntimeActive.value = false;
+      stopInsightStreamWatchdog();
       clearActiveResearchSessionRecord();
       stopResearchPolling();
       closeResearchSocket();
@@ -2127,6 +2389,7 @@ export function usePaperWorkflow({
       setStepAction('insight', null);
       insightConfigSubmitting.value = false;
       insightReportStreaming.value = false;
+      stopInsightStreamWatchdog();
       clearActiveResearchSessionRecord();
       stopResearchPolling();
       closeResearchSocket();
@@ -2148,6 +2411,7 @@ export function usePaperWorkflow({
       setStepAction('insight', null);
       insightConfigSubmitting.value = false;
       insightReportStreaming.value = false;
+      stopInsightStreamWatchdog();
       clearActiveResearchSessionRecord();
       stopResearchPolling();
       closeResearchSocket();
@@ -2210,6 +2474,7 @@ export function usePaperWorkflow({
     setStepAction('insight', null);
     insightConfigSubmitting.value = false;
     insightReportStreaming.value = false;
+    stopInsightStreamWatchdog();
     clearActiveResearchSessionRecord();
     stopResearchPolling();
     closeResearchSocket();
@@ -2230,12 +2495,27 @@ export function usePaperWorkflow({
     setStepAction('insight', null);
     insightConfigSubmitting.value = false;
     insightReportStreaming.value = false;
+    stopInsightStreamWatchdog();
     clearActiveResearchSessionRecord();
     stopResearchPolling();
     closeResearchSocket();
   }
 
   async function handleRuntimeEvent(event = {}) {
+    const tsRaw = String(event?.ts || '').trim();
+    if (tsRaw) {
+      const parsedTs = Date.parse(tsRaw);
+      if (Number.isFinite(parsedTs) && parsedTs > 0) {
+        if (
+          runtimeLastEventTsMs > 0
+          && parsedTs + RUNTIME_EVENT_CLOCK_SKEW_MS < runtimeLastEventTsMs
+        ) {
+          return;
+        }
+        runtimeLastEventTsMs = Math.max(runtimeLastEventTsMs, parsedTs);
+      }
+    }
+
     const type = String(event?.type || '').trim().toLowerCase();
     if (!type) return;
 
@@ -2285,6 +2565,18 @@ export function usePaperWorkflow({
     }
     if (type === 'negotiation_rebid_scheduled') {
       handleNegotiationRebidScheduled(event);
+      return;
+    }
+    if (type === 'negotiation_parallel_shadow_scheduled') {
+      handleNegotiationParallelShadowScheduled(event);
+      return;
+    }
+    if (type === 'negotiation_candidate_failed') {
+      handleNegotiationCandidateFailed(event);
+      return;
+    }
+    if (type === 'negotiation_parallel_winner_promoted') {
+      handleNegotiationParallelWinnerPromoted(event);
       return;
     }
     if (type === 'session_complete') {
@@ -2436,6 +2728,7 @@ export function usePaperWorkflow({
     setStepLogs('retrieve', []);
     bindResearchSocket(sessionId);
     startResearchPolling();
+    startInsightStreamWatchdog();
     void refreshRuntimeSnapshot().catch(() => {
       // initial snapshot is optional; websocket events are primary
     });
@@ -2466,6 +2759,7 @@ export function usePaperWorkflow({
     setStepLogs('retrieve', []);
     bindResearchSocket(sessionId);
     startResearchPolling();
+    startInsightStreamWatchdog();
     void refreshRuntimeSnapshot().catch(() => {
       // keep websocket-driven recoveries resilient when snapshot fetch is transiently unavailable
     });
@@ -2594,11 +2888,77 @@ export function usePaperWorkflow({
     }
   }
 
+  async function resolveServerAuthoritativeRuntimeSeed(seed) {
+    const fallbackSeed = normalizeRuntimeSeed(seed || {});
+    const accessToken = String(accessTokenRef.value || '').trim();
+    if (!accessToken) {
+      return {
+        checked: false,
+        seed: null
+      };
+    }
+
+    try {
+      const active = await getActiveResearchSession({ accessToken });
+      if (!active?.has_active_session || !active?.session) {
+        clearActiveResearchSessionRecord();
+        return {
+          checked: true,
+          seed: null
+        };
+      }
+
+      const resolvedSeed = normalizeRuntimeSeedFromActiveSession(active.session, fallbackSeed);
+      if (!resolvedSeed?.runtime_session_id) {
+        clearActiveResearchSessionRecord();
+        return {
+          checked: true,
+          seed: null
+        };
+      }
+
+      clearCompletedWorkflowSnapshot();
+      persistActiveResearchSessionRecord({
+        session_id: resolvedSeed.runtime_session_id,
+        status: String(active?.session?.status || 'running').trim().toLowerCase(),
+        progress: Number(active?.session?.progress || 0),
+        current_node: String(active?.session?.current_node || '').trim(),
+        waiting_checkpoint: String(active?.session?.waiting_checkpoint || '').trim(),
+        input_type: resolvedSeed.input_type,
+        input_value: resolvedSeed.input_value,
+        paper_range_years: resolvedSeed.paper_range_years,
+        quick_mode: resolvedSeed.quick_mode
+      });
+      return {
+        checked: true,
+        seed: resolvedSeed
+      };
+    } catch {
+      return {
+        checked: false,
+        seed: null
+      };
+    }
+  }
+
   async function runWorkflow() {
     if (graphLoading.value) return;
 
-    const seed = seedRef.value || {};
-    const resumeSessionId = String(seed?.runtime_session_id || '').trim();
+    const requestedSeed = seedRef.value || {};
+    const serverResolution = await resolveServerAuthoritativeRuntimeSeed(requestedSeed);
+    const serverAuthoritativeSeed = serverResolution?.seed || null;
+    let seed = serverAuthoritativeSeed || requestedSeed;
+    if (serverResolution?.checked && !serverAuthoritativeSeed) {
+      seed = {
+        ...(seed || {}),
+        runtime_session_id: ''
+      };
+    }
+    const resumeSessionId = String(
+      serverAuthoritativeSeed?.runtime_session_id
+      || seed?.runtime_session_id
+      || ''
+    ).trim();
     if (unifiedRuntimeActive.value && !resumeSessionId) {
       await stopUnifiedRuntimeSession({ silent: true });
     } else {
@@ -2608,7 +2968,7 @@ export function usePaperWorkflow({
     resetSteps();
     errorMessage.value = '';
 
-    if (restoreCompletedWorkflowSnapshotFromStorage()) {
+    if (!resumeSessionId && restoreCompletedWorkflowSnapshotFromStorage()) {
       return;
     }
 
@@ -2747,6 +3107,7 @@ export function usePaperWorkflow({
 
   onUnmounted(() => {
     stopResearchPolling();
+    stopInsightStreamWatchdog();
     closeResearchSocket();
   });
 
@@ -2771,6 +3132,7 @@ export function usePaperWorkflow({
     currentTaskText,
     nextTaskText,
     activeStepHint,
+    insightReportPlaceholderText,
     runWorkflow,
     terminateWorkflow,
     handleStepAction,

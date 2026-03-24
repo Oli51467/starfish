@@ -3,6 +3,11 @@ import { createRouter, createWebHistory } from 'vue-router';
 import { useAuthStore } from '../stores/authStore';
 import { useGlobalConfirmDialog } from '../composables/useGlobalConfirmDialog';
 import HomeView from '../views/HomeView.vue';
+import WorkflowView from '../views/WorkflowView.vue';
+import LandscapeView from '../views/LandscapeView.vue';
+import MapView from '../views/MapView.vue';
+import ReadingListView from '../views/ReadingListView.vue';
+import GapFinderView from '../views/GapFinderView.vue';
 import CollectionWorkbenchView from '../views/CollectionWorkbenchView.vue';
 import ResearchHistoryView from '../views/ResearchHistoryView.vue';
 
@@ -30,7 +35,43 @@ const routes = [
   },
   {
     path: '/research/pipeline',
-    redirect: { name: 'home' }
+    name: 'research-pipeline',
+    component: WorkflowView,
+    meta: {
+      requiresAuth: true
+    }
+  },
+  {
+    path: '/landscape',
+    name: 'landscape',
+    component: LandscapeView,
+    meta: {
+      requiresAuth: true
+    }
+  },
+  {
+    path: '/map',
+    name: 'map',
+    component: MapView,
+    meta: {
+      requiresAuth: true
+    }
+  },
+  {
+    path: '/reading-list',
+    name: 'reading-list',
+    component: ReadingListView,
+    meta: {
+      requiresAuth: true
+    }
+  },
+  {
+    path: '/gap-finder',
+    name: 'gap-finder',
+    component: GapFinderView,
+    meta: {
+      requiresAuth: true
+    }
   },
   {
     path: '/research-history',
@@ -57,7 +98,8 @@ const router = createRouter({
 
 const WORKFLOW_ROUTE_NAMES = new Set([
   'research-domain-graph',
-  'research-paper-graph'
+  'research-paper-graph',
+  'research-pipeline'
 ]);
 const ACTIVE_RESEARCH_SESSION_STORAGE_KEY = 'starfish:active-research-session';
 const TERMINAL_SESSION_STATUSES = new Set(['completed', 'failed', 'stopped', 'error', 'cancelled', 'canceled']);

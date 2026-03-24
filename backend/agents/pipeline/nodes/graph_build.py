@@ -10,6 +10,10 @@ from services.pipeline_runtime_service import get_pipeline_runtime_service
 _NODE = "graph_build"
 
 
+def _runtime_event_enabled(state: PipelineState) -> bool:
+    return not bool(state.get("runtime_silent_mode"))
+
+
 def _format_search_range(input_type: str, paper_range_years: int | None) -> str:
     if input_type != "domain":
         return "-"
@@ -21,9 +25,11 @@ def _format_search_range(input_type: str, paper_range_years: int | None) -> str:
 async def graph_build_node(state: PipelineState) -> PipelineState:
     runtime = get_pipeline_runtime_service()
     session_id = state["session_id"]
+    emit_events = _runtime_event_enabled(state)
 
     await runtime.ensure_active(session_id)
-    await runtime.emit_node_start(session_id, _NODE, 56)
+    if emit_events:
+        await runtime.emit_node_start(session_id, _NODE, 56)
 
     graphrag_service = get_graphrag_service()
     prefetched_papers = [
@@ -49,8 +55,9 @@ async def graph_build_node(state: PipelineState) -> PipelineState:
     edges = list(graph_payload.get("edges") or [])
 
     summary = f"图谱构建完成，节点 {len(nodes)} 个，关系 {len(edges)} 条。"
-    await runtime.emit_thinking(session_id, _NODE, summary)
-    await runtime.emit_node_complete(session_id, _NODE, 72, summary)
+    if emit_events:
+        await runtime.emit_thinking(session_id, _NODE, summary)
+        await runtime.emit_node_complete(session_id, _NODE, 72, summary)
 
     return {
         **state,

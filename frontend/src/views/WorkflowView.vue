@@ -120,7 +120,7 @@
                   <pre v-if="insightRestContent" class="workflow-report-markdown">{{ insightRestContent }}</pre>
                 </div>
                 <p v-else class="workflow-report-placeholder muted">
-                  {{ insightReportStreaming ? '正在实时生成报告内容...' : '图谱完成并确认参数后，将在此处显示探索报告。' }}
+                  {{ insightReportPlaceholderText }}
                 </p>
               </div>
             </section>
@@ -175,6 +175,7 @@ const {
   errorMessage,
   workflowProgress,
   activeStepHint,
+  insightReportPlaceholderText,
   runWorkflow,
   terminateWorkflow,
   handleStepAction,

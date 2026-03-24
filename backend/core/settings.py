@@ -109,6 +109,10 @@ class Settings:
             5.0,
             min(180.0, float(os.getenv("INSIGHT_WORKER_SUBPROCESS_TIMEOUT_SECONDS", "40"))),
         )
+        self.insight_pdf_render_timeout_seconds = max(
+            8.0,
+            min(90.0, float(os.getenv("INSIGHT_PDF_RENDER_TIMEOUT_SECONDS", "15"))),
+        )
         self.insight_max_subagent_depth = max(0, min(8, int(os.getenv("INSIGHT_MAX_SUBAGENT_DEPTH", "2"))))
         self.insight_max_subtasks_per_round = max(
             1,
@@ -119,6 +123,8 @@ class Settings:
             min(8, int(os.getenv("INSIGHT_MAX_SUBTASKS_PER_PARENT", "2"))),
         )
         self.insight_memory_db_path = (os.getenv("INSIGHT_MEMORY_DB_PATH") or "").strip()
+        self.runtime_eval_db_path = (os.getenv("RUNTIME_EVAL_DB_PATH") or "").strip()
+        self.unified_memory_db_path = (os.getenv("UNIFIED_MEMORY_DB_PATH") or "").strip()
 
         # Auth
         self.google_client_id = (os.getenv("GOOGLE_CLIENT_ID") or "").strip()

@@ -13,6 +13,10 @@ _NODE = "search"
 _MIN_SEARCH_PAPERS = 6
 
 
+def _runtime_event_enabled(state: PipelineState) -> bool:
+    return not bool(state.get("runtime_silent_mode"))
+
+
 def _resolve_seed_paper(input_type: str, papers: list[dict]) -> dict | None:
     if input_type not in {"arxiv_id", "doi"}:
         return None
@@ -91,9 +95,11 @@ def _format_range_text(year_range: int | None) -> str:
 async def search_node(state: PipelineState) -> PipelineState:
     runtime = get_pipeline_runtime_service()
     session_id = state["session_id"]
+    emit_events = _runtime_event_enabled(state)
 
     await runtime.ensure_active(session_id)
-    await runtime.emit_node_start(session_id, _NODE, 18)
+    if emit_events:
+        await runtime.emit_node_start(session_id, _NODE, 18)
 
     graphrag_service = get_graphrag_service()
     requested_range = _normalize_year_range(state.get("paper_range_years"))
@@ -136,8 +142,9 @@ async def search_node(state: PipelineState) -> PipelineState:
             f"{summary} 当前时间范围结果较少，已从{_format_range_text(relaxed_from)}"
             f"自动放宽到{_format_range_text(relaxed_to)}补充候选。"
         )
-    await runtime.emit_thinking(session_id, _NODE, summary)
-    await runtime.emit_node_complete(session_id, _NODE, 25, summary)
+    if emit_events:
+        await runtime.emit_thinking(session_id, _NODE, summary)
+        await runtime.emit_node_complete(session_id, _NODE, 25, summary)
 
     return {
         **state,
