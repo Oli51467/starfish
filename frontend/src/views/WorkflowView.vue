@@ -116,12 +116,45 @@
                     </div>
                   </div>
                 </div>
+                <div
+                  v-if="showInsightStreamingBanner"
+                  class="workflow-report-streaming-banner"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <span class="workflow-report-streaming-dot" aria-hidden="true"></span>
+                  <span class="workflow-report-streaming-text">报告正在深度扩写，请稍候…</span>
+                  <span class="workflow-report-streaming-track" aria-hidden="true"></span>
+                </div>
                 <div v-if="hasInsightReport" class="workflow-report-markdown-block">
                   <pre v-if="insightRestContent" class="workflow-report-markdown">{{ insightRestContent }}</pre>
                 </div>
-                <p v-else class="workflow-report-placeholder muted">
-                  {{ insightReportPlaceholderText }}
-                </p>
+                <div
+                  v-else
+                  class="workflow-report-waiting"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <div class="workflow-report-waiting-orb" aria-hidden="true">
+                    <span class="workflow-report-waiting-ring ring-a"></span>
+                    <span class="workflow-report-waiting-ring ring-b"></span>
+                    <span class="workflow-report-waiting-core"></span>
+                  </div>
+                  <p class="workflow-report-waiting-title mono">{{ insightWaitingHeadline }}</p>
+                  <p class="workflow-report-placeholder muted">
+                    {{ insightReportPlaceholderText }}
+                  </p>
+                  <div class="workflow-report-waiting-stages">
+                    <span
+                      v-for="item in insightWaitingStages"
+                      :key="item.label"
+                      class="workflow-report-waiting-stage mono"
+                      :class="`is-${item.status}`"
+                    >
+                      {{ item.label }}
+                    </span>
+                  </div>
+                </div>
               </div>
             </section>
           </template>
@@ -202,6 +235,31 @@ const insightRestContent = computed(() => {
   const firstBreak = text.indexOf('\n');
   if (firstBreak < 0) return '';
   return text.slice(firstBreak + 1);
+});
+
+const insightStep = computed(() => steps.value.find((item) => String(item?.key || '').trim() === 'insight') || null);
+const insightStepStatus = computed(() => String(insightStep.value?.status || '').trim().toLowerCase());
+const showInsightStreamingBanner = computed(() => Boolean(insightReportStreaming.value && hasInsightReport.value));
+
+const insightWaitingHeadline = computed(() => {
+  if (insightReportStreaming.value) return '正在生成探索报告正文';
+  if (insightStepStatus.value === 'action_required') return '等待参数确认后继续生成';
+  if (insightStepStatus.value === 'running') return '正在聚合证据并撰写报告';
+  return '探索报告准备中';
+});
+
+const insightWaitingStages = computed(() => {
+  const labels = ['规划分析维度', '聚合关键证据', '撰写深度报告', '校对引用与导出'];
+  let currentIndex = 0;
+  if (insightReportStreaming.value) {
+    currentIndex = 2;
+  } else if (insightStepStatus.value === 'running' || insightStepStatus.value === 'action_required') {
+    currentIndex = 1;
+  }
+  return labels.map((label, index) => ({
+    label,
+    status: index < currentIndex ? 'done' : index === currentIndex ? 'active' : 'pending'
+  }));
 });
 
 async function handleWorkflowTerminate() {
@@ -471,10 +529,176 @@ watch(
   color: var(--text);
 }
 
+.workflow-report-streaming-banner {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--panel) 85%, var(--bg) 15%), var(--bg));
+  margin: 0 0 10px;
+  overflow: hidden;
+}
+
+.workflow-report-streaming-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text);
+  animation: workflow-report-pulse 1.2s ease-in-out infinite;
+}
+
+.workflow-report-streaming-text {
+  font-size: 12px;
+  color: var(--text-soft);
+}
+
+.workflow-report-streaming-track {
+  position: relative;
+  height: 2px;
+  width: 100%;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.workflow-report-streaming-track::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -25%;
+  width: 25%;
+  height: 100%;
+  background: var(--text);
+  animation: workflow-report-scan 1.8s linear infinite;
+}
+
+.workflow-report-waiting {
+  min-height: 220px;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 10px;
+  padding: 14px 10px 4px;
+}
+
+.workflow-report-waiting-orb {
+  position: relative;
+  width: 68px;
+  height: 68px;
+}
+
+.workflow-report-waiting-ring {
+  position: absolute;
+  border-radius: 50%;
+  inset: 0;
+  border: 1px solid var(--line);
+}
+
+.workflow-report-waiting-ring.ring-a {
+  animation: workflow-report-rotate 6s linear infinite;
+}
+
+.workflow-report-waiting-ring.ring-b {
+  inset: 8px;
+  border-style: dashed;
+  animation: workflow-report-rotate-reverse 5s linear infinite;
+}
+
+.workflow-report-waiting-core {
+  position: absolute;
+  inset: 22px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--panel) 70%, var(--text) 30%);
+  animation: workflow-report-pulse 1.4s ease-in-out infinite;
+}
+
+.workflow-report-waiting-title {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.workflow-report-waiting-stages {
+  width: min(560px, 100%);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.workflow-report-waiting-stage {
+  font-size: 11px;
+  line-height: 1.2;
+  padding: 7px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  color: var(--text-soft);
+  background: var(--panel);
+}
+
+.workflow-report-waiting-stage.is-active {
+  color: var(--text);
+  border-color: var(--text);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--text) 25%, transparent);
+}
+
+.workflow-report-waiting-stage.is-done {
+  color: var(--text);
+  border-color: var(--line-2);
+  background: color-mix(in srgb, var(--bg) 85%, var(--panel) 15%);
+}
+
 .workflow-report-placeholder {
   margin: 0;
   font-size: 13px;
   line-height: 1.5;
+  text-align: center;
+  max-width: 72ch;
+}
+
+@keyframes workflow-report-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.9;
+  }
+
+  50% {
+    transform: scale(1.14);
+    opacity: 0.45;
+  }
+}
+
+@keyframes workflow-report-scan {
+  0% {
+    left: -28%;
+  }
+
+  100% {
+    left: 104%;
+  }
+}
+
+@keyframes workflow-report-rotate {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes workflow-report-rotate-reverse {
+  from {
+    transform: rotate(360deg);
+  }
+
+  to {
+    transform: rotate(0deg);
+  }
 }
 
 @media (max-width: 768px) {
@@ -525,6 +749,10 @@ watch(
 
   .workflow-report-body {
     padding: 10px;
+  }
+
+  .workflow-report-waiting-stages {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 </style>

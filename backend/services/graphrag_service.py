@@ -257,11 +257,12 @@ class GraphRAGService:
             )
         normalized_query_payload = self._normalize_domain_query(query)
         normalized_query = str(normalized_query_payload.get("canonical_query") or query).strip() or str(query or "").strip()
+        preferred_provider = self._resolve_preferred_provider(quick_mode=quick_mode)
         payload = self._retrieve_papers_from_query_with_trace(
             query=normalized_query,
             max_papers=max_papers,
             paper_range_years=paper_range_years,
-            preferred_provider="openalex" if quick_mode else "semantic_scholar",
+            preferred_provider=preferred_provider,
             domain_authority_mode=normalized_input_type == "domain",
         )
         payload["query"] = normalized_query
@@ -338,6 +339,15 @@ class GraphRAGService:
             "steps": steps,
         }
 
+    def _resolve_preferred_provider(self, *, quick_mode: bool) -> str:
+        if quick_mode:
+            return "openalex"
+        if not bool(self.settings.retrieval_enable_semantic_scholar):
+            return "openalex"
+        if not str(self.settings.semantic_scholar_api_key or "").strip():
+            return "openalex"
+        return "semantic_scholar"
+
     def _retrieve_papers_from_seed_input_with_trace(
         self,
         *,
@@ -354,7 +364,7 @@ class GraphRAGService:
         candidate_limit = min(220, max(safe_max + 36, safe_max * 16))
         normalized_range = self._normalize_paper_range_years(paper_range_years)
         steps: list[dict[str, Any]] = []
-        preferred_seed_provider = "openalex" if quick_mode else "semantic_scholar"
+        preferred_seed_provider = self._resolve_preferred_provider(quick_mode=quick_mode)
 
         search_detail, search_links = self._seed_search_trace(
             input_type=input_type,
@@ -829,11 +839,11 @@ class GraphRAGService:
         retrieve_status = "done" if provider_used != "mock" else "fallback"
         retrieve_elapsed = float(search_result.get("elapsed_seconds") or 0.0)
         used_fallback = bool(search_result.get("used_fallback", False))
+        query_variants = list(search_result.get("query_variants") or [])
 
         if provider_used == "mock":
             retrieve_detail = f"外部检索失败，已降级为 mock 数据（{len(candidate_papers)} 条候选）。{range_hint}"
         else:
-            query_variants = list(search_result.get("query_variants") or [])
             variant_hint = (
                 f" 基于 {len(query_variants)} 个主题扩展查询聚合结果。"
                 if domain_authority_mode and len(query_variants) > 1
@@ -872,6 +882,7 @@ class GraphRAGService:
             safe_query,
             ranking_profile="domain_authority" if domain_authority_mode else "balanced",
             paper_range_years=normalized_range,
+            query_variants=query_variants if domain_authority_mode else None,
         )
         steps.append(
             self._build_retrieval_step(
@@ -985,6 +996,7 @@ class GraphRAGService:
         safe_limit = max(1, min(limit, 180))
         query_variants = self._build_domain_authority_queries(safe_query)
         per_query_limit = max(18, min(60, max(24, safe_limit // max(1, len(query_variants)))))
+        merge_limit = min(240, safe_limit + max(24, per_query_limit))
 
         merged_candidates: list[dict[str, Any]] = []
         merged_stats: list[dict[str, Any]] = []
@@ -1008,9 +1020,9 @@ class GraphRAGService:
             merged_candidates = self._merge_candidate_lists(
                 primary=merged_candidates,
                 secondary=list(payload.get("papers") or []),
-                limit=safe_limit,
+                limit=merge_limit,
             )
-            if len(merged_candidates) >= safe_limit:
+            if len(merged_candidates) >= merge_limit:
                 break
 
         if not merged_candidates:
@@ -1092,15 +1104,34 @@ class GraphRAGService:
         if not safe_query:
             return []
 
+        lower_query = safe_query.lower()
         llm_candidates = self._build_domain_authority_queries_with_llm(safe_query)
         heuristic_candidates = [
             safe_query,
             f"{safe_query} seminal paper",
-            f"{safe_query} survey review",
-            f"{safe_query} benchmark",
-            f"{safe_query} highly cited",
+            f"{safe_query} landmark paper",
         ]
-        candidates = [*llm_candidates, *heuristic_candidates]
+        if (
+            "large language model" in lower_query
+            or re.search(r"\bllm\b", lower_query)
+            or bool(re.search(r"(大语言模型|大型语言模型|语言大模型|llm)", safe_query, flags=re.IGNORECASE))
+        ):
+            heuristic_candidates = [
+                safe_query,
+                f"{safe_query} seminal paper",
+                "attention is all you need transformer",
+                "bert pre-training deep bidirectional transformers language understanding",
+                "few-shot learners language models",
+                "scaling laws neural language models",
+                "follow instructions with human feedback language models",
+                "training compute-optimal large language models",
+                "flashattention fast memory-efficient exact attention",
+                "constitutional ai harmlessness ai feedback",
+                "open and efficient foundation language models",
+                "chain of thought prompting language models",
+            ]
+        # Prefer deterministic authority queries first; append LLM variants only as optional extras.
+        candidates = [*heuristic_candidates, *llm_candidates]
         deduped: list[str] = []
         seen: set[str] = set()
         for item in candidates:
@@ -1112,7 +1143,7 @@ class GraphRAGService:
                 continue
             seen.add(key)
             deduped.append(normalized)
-        return deduped[:5]
+        return deduped[:12]
 
     def _search_candidates_for_query(
         self,
@@ -1843,6 +1874,7 @@ class GraphRAGService:
         query: str,
         ranking_profile: str = "balanced",
         paper_range_years: int | None = None,
+        query_variants: list[str] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, int | float]]:
         start = perf_counter()
         ranked: list[tuple[float, float, dict[str, Any]]] = []
@@ -1850,6 +1882,14 @@ class GraphRAGService:
         seen_titles: set[str] = set()
         input_count = len(papers)
         current_year = datetime.now(timezone.utc).year
+        ranking_queries: list[str] = []
+        for candidate in [query, *(query_variants or [])]:
+            safe_candidate = str(candidate or "").strip()
+            if not safe_candidate or safe_candidate in ranking_queries:
+                continue
+            ranking_queries.append(safe_candidate)
+            if len(ranking_queries) >= 12:
+                break
 
         profile = str(ranking_profile or "balanced").strip().lower()
         if profile == "seed_lineage":
@@ -1859,11 +1899,11 @@ class GraphRAGService:
             relation_weight = 0.26
             representative_weight = 0.0
         elif profile == "domain_authority":
-            relevance_weight = 0.18
-            citation_weight = 0.52
-            recency_weight = 0.08
+            relevance_weight = 0.46
+            citation_weight = 0.34
+            recency_weight = 0.06
             relation_weight = 0.0
-            representative_weight = 0.22
+            representative_weight = 0.14
         else:
             relevance_weight = 0.62
             citation_weight = 0.26
@@ -1884,10 +1924,16 @@ class GraphRAGService:
             seen_ids.add(paper_id)
             seen_titles.add(title_key)
 
-            relevance = self._compute_relevance(
-                query=query,
-                title=normalized["title"],
-                abstract=normalized["abstract"],
+            relevance = max(
+                (
+                    self._compute_relevance(
+                        query=ranking_query,
+                        title=normalized["title"],
+                        abstract=normalized["abstract"],
+                    )
+                    for ranking_query in ranking_queries
+                ),
+                default=0.0,
             )
             citation_count = self._safe_int(normalized["citation_count"])
             citation_signal = min(1.0, math.log1p(citation_count) / 8.0)
@@ -1903,6 +1949,12 @@ class GraphRAGService:
                 + relation_signal * relation_weight
                 + representative_signal * representative_weight
             )
+            if profile == "domain_authority":
+                # Reduce the chance that globally high-citation but off-topic papers dominate.
+                if relevance < 0.08:
+                    score -= 0.55
+                elif relevance < 0.16:
+                    score -= 0.25
 
             ranked.append((score, representative_signal, normalized))
 
@@ -1915,12 +1967,22 @@ class GraphRAGService:
             ),
             reverse=True,
         )
+        normalized_range = self._normalize_paper_range_years(paper_range_years)
         if profile == "domain_authority":
-            selected = self._select_ranked_with_year_coverage(
-                ranked=ranked,
-                max_papers=max_papers,
-                paper_range_years=paper_range_years,
-            )
+            if len(ranking_queries) > 1:
+                selected = self._select_ranked_with_query_coverage(
+                    ranked=ranked,
+                    max_papers=max_papers,
+                    ranking_queries=ranking_queries,
+                )
+            elif normalized_range is not None and normalized_range <= 3:
+                selected = self._select_ranked_with_year_coverage(
+                    ranked=ranked,
+                    max_papers=max_papers,
+                    paper_range_years=normalized_range,
+                )
+            else:
+                selected = [item for _score, _representative, item in ranked[:max_papers]]
         else:
             selected = [item for _score, _representative, item in ranked[:max_papers]]
         stats = {
@@ -1961,6 +2023,69 @@ class GraphRAGService:
 
         if len(selected) >= max_papers:
             return selected[:max_papers]
+
+        for _score, _representative, paper in ranked:
+            paper_id = self._paper_key(str(paper.get("paper_id") or ""))
+            if not paper_id or paper_id in selected_ids:
+                continue
+            selected.append(paper)
+            selected_ids.add(paper_id)
+            if len(selected) >= max_papers:
+                break
+        return selected
+
+    def _select_ranked_with_query_coverage(
+        self,
+        *,
+        ranked: list[tuple[float, float, dict[str, Any]]],
+        max_papers: int,
+        ranking_queries: list[str],
+    ) -> list[dict[str, Any]]:
+        if max_papers <= 0:
+            return []
+
+        selected: list[dict[str, Any]] = []
+        selected_ids: set[str] = set()
+        coverage_queries = [str(item or "").strip() for item in ranking_queries if str(item or "").strip()]
+        coverage_queries = coverage_queries[: min(12, len(coverage_queries))]
+
+        for query in coverage_queries:
+            best_paper: dict[str, Any] | None = None
+            best_key: tuple[float, float, int, int] | None = None
+            for score, _representative, paper in ranked:
+                paper_id = self._paper_key(str(paper.get("paper_id") or ""))
+                if not paper_id or paper_id in selected_ids:
+                    continue
+                relevance = self._compute_relevance(
+                    query=query,
+                    title=str(paper.get("title") or ""),
+                    abstract=str(paper.get("abstract") or ""),
+                )
+                if relevance < 0.24:
+                    continue
+                citation_count = self._safe_int(paper.get("citation_count"))
+                year = self._safe_int(paper.get("year"))
+                if citation_count < 50:
+                    continue
+                relevance_bucket = min(5, max(0, int(relevance * 5.0)))
+                candidate_key = (
+                    relevance_bucket,
+                    citation_count,
+                    float(score),
+                    year,
+                )
+                if best_key is None or candidate_key > best_key:
+                    best_key = candidate_key
+                    best_paper = paper
+            if best_paper is None:
+                continue
+            paper_id = self._paper_key(str(best_paper.get("paper_id") or ""))
+            if not paper_id or paper_id in selected_ids:
+                continue
+            selected.append(best_paper)
+            selected_ids.add(paper_id)
+            if len(selected) >= max_papers:
+                return selected[:max_papers]
 
         for _score, _representative, paper in ranked:
             paper_id = self._paper_key(str(paper.get("paper_id") or ""))

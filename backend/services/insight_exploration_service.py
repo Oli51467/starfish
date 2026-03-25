@@ -65,6 +65,13 @@ _MAX_EXPANSION_PAPERS = 24
 _MAX_EXPANSION_QUERIES_PER_ROUND = 2
 _ALLOWED_AGENT_MODES = {"legacy", "orchestrated"}
 _DEFAULT_ARTIFACT_PDF_TIMEOUT_SECONDS = 15.0
+_REPORT_MIN_CHARS_ZH = 10000
+_REPORT_TARGET_CHARS_ZH = 12000
+_REPORT_MIN_CHARS_EN = 7000
+_REPORT_TARGET_CHARS_EN = 9000
+_REPORT_EXPANSION_MAX_ROUNDS = 3
+_REPORT_BASE_MAX_TOKENS = 3200
+_REPORT_EXPANSION_MAX_TOKENS = 2400
 
 
 @dataclass(frozen=True)
@@ -1655,6 +1662,15 @@ class InsightExplorationService:
             critic_notes=critic_notes[:6],
             reference_catalog=reference_catalog,
         )
+        fallback_markdown = self._expand_markdown_with_evidence_appendix(
+            markdown=fallback_markdown,
+            language=safe_language,
+            query=query,
+            reference_catalog=reference_catalog,
+            application_clusters=application_clusters[:8],
+            role_signals=role_signals[:16],
+            innovation_points=innovation_points[:10],
+        )
         return _ComposeMarkdownResult(markdown=fallback_markdown, streamed=False, streamed_chars=0)
 
     async def _compose_markdown_with_llm(
@@ -1706,17 +1722,25 @@ class InsightExplorationService:
                 "2) 严禁出现 workflow/agent/子代理/协同轮次/工具调用等过程描述；\n"
                 "3) 全文只用中文叙述（论文标题可保留原文）；\n"
                 "4) 每个关键判断后必须给文内引用编号，如 [R3] 或 [R3][R8]；\n"
-                "5) 避免模板化重复句，不要输出空洞口号。\n"
+                "5) 避免模板化重复句，不要输出空洞口号；\n"
+                "6) 正文（不含参考文献）不少于 10000 字，目标 12000 字左右；\n"
+                "7) 每个一级章节不少于 800 字，摘要不少于 600 字。\n"
                 "请使用以下固定结构标题：\n"
                 f"# 研究洞察报告：{query}\n"
                 "## 摘要\n"
-                "## 1. 研究起源与关键演进\n"
-                "## 2. 关键证据与机制分析\n"
-                "## 3. 应用落地与产业化进展\n"
-                "## 4. 创新机会与研究议程\n"
-                "## 5. 局限性与风险\n"
-                "## 6. 结论\n"
+                "## 1. 研究问题界定与评价框架\n"
+                "## 2. 研究起源与关键演进\n"
+                "## 3. 方法谱系与机制拆解\n"
+                "## 4. 关键论文深读与证据矩阵\n"
+                "## 5. 证据对照、分歧与可证伪性\n"
+                "## 6. 应用落地、产业化与商业模式\n"
+                "## 7. 工程实现、算力成本与系统约束\n"
+                "## 8. 创新机会、研究议程与实验设计\n"
+                "## 9. 风险、伦理与治理建议\n"
+                "## 10. 结论与执行路线图\n"
                 "## 参考文献\n"
+                "“关键论文深读与证据矩阵”至少逐篇分析 8 篇核心论文，并比较其方法差异与适用边界。\n"
+                "“证据对照、分歧与可证伪性”必须包含至少 1 个可执行对照实验设计。\n"
                 "其中“参考文献”仅列正文实际引用过的条目，格式为：\n"
                 "- [R1] Title（Year，Venue，引用 N）\n"
                 "如果证据不足，请明确写“当前证据不足以支持该结论”。\n"
@@ -1731,15 +1755,21 @@ class InsightExplorationService:
                 "3) Keep language consistent in English.\n"
                 "4) Every key claim must carry in-text citations, e.g., [R3] or [R3][R8].\n"
                 "5) Avoid repetitive template filler and generic slogans.\n"
+                "6) Main body (excluding references) must be >= 7000 characters, target around 9000.\n"
+                "7) Each top-level section should be substantial (typically >= 500 characters).\n"
                 "Use this exact heading structure:\n"
                 f"# Research Insight Report: {query}\n"
                 "## Abstract\n"
-                "## 1. Research Origin and Evolution\n"
-                "## 2. Evidence-Based Findings and Mechanisms\n"
-                "## 3. Applications and Industrial Adoption\n"
-                "## 4. Innovation Opportunities and Research Agenda\n"
-                "## 5. Limitations and Risks\n"
-                "## 6. Conclusion\n"
+                "## 1. Problem Framing and Evaluation Criteria\n"
+                "## 2. Research Origin and Evolution\n"
+                "## 3. Method Taxonomy and Mechanistic Decomposition\n"
+                "## 4. Deep Reading of Core Papers and Evidence Matrix\n"
+                "## 5. Evidence Contradictions and Falsifiability\n"
+                "## 6. Applications, Adoption, and Business Implications\n"
+                "## 7. Engineering Constraints, Compute, and Cost\n"
+                "## 8. Innovation Opportunities and Research Agenda\n"
+                "## 9. Risks, Ethics, and Governance\n"
+                "## 10. Conclusion and Execution Roadmap\n"
                 "## References\n"
                 "In the References section, include only cited entries with format:\n"
                 "- [R1] Title (Year, Venue, citations N)\n"
@@ -1769,12 +1799,13 @@ class InsightExplorationService:
                     self._stream_chat_completion_content(
                         messages=messages,
                         temperature=0.15,
-                        timeout_seconds=45,
+                        timeout_seconds=120,
+                        max_tokens=_REPORT_BASE_MAX_TOKENS,
                         stream_callback=stream_callback,
                         section="insight_markdown",
                         start_accumulated=stream_start_accumulated,
                     ),
-                    timeout=90,
+                    timeout=180,
                 )
                 streamed = bool(raw_content)
             else:
@@ -1783,9 +1814,10 @@ class InsightExplorationService:
                         chat,
                         messages,
                         temperature=0.15,
-                        timeout=45,
+                        timeout=120,
+                        max_tokens=_REPORT_BASE_MAX_TOKENS,
                     ),
-                    timeout=52,
+                    timeout=140,
                 )
                 raw_content = str(response.choices[0].message.content or "").strip()
                 streamed_chars = 0
@@ -1799,28 +1831,422 @@ class InsightExplorationService:
             )
             if not cleaned:
                 return _ComposeMarkdownResult(markdown="", streamed=False, streamed_chars=0)
+            refined_markdown, refined_streamed_chars = await self._expand_markdown_if_needed(
+                language=language,
+                query=query,
+                context=context,
+                markdown=cleaned,
+                stream_callback=stream_callback,
+                accumulated_chars=int(streamed_chars if streamed else 0),
+            )
+            final_markdown = self._ensure_reference_section(
+                markdown=refined_markdown or cleaned,
+                reference_catalog=reference_catalog,
+                language=language,
+            )
             if streamed:
                 return _ComposeMarkdownResult(
-                    markdown=cleaned if cleaned.endswith("\n") else f"{cleaned}\n",
+                    markdown=final_markdown if final_markdown.endswith("\n") else f"{final_markdown}\n",
                     streamed=True,
-                    streamed_chars=max(0, int(streamed_chars)),
+                    streamed_chars=max(0, int(refined_streamed_chars or streamed_chars)),
                 )
-            has_reference_section = bool(
-                re.search(
-                    r"^##\s*(参考文献|references)\b",
-                    cleaned,
-                    flags=re.IGNORECASE | re.MULTILINE,
-                )
+            return _ComposeMarkdownResult(
+                markdown=final_markdown if final_markdown.endswith("\n") else f"{final_markdown}\n",
+                streamed=False,
+                streamed_chars=0,
             )
-            if has_reference_section:
-                return _ComposeMarkdownResult(
-                    markdown=cleaned if cleaned.endswith("\n") else f"{cleaned}\n",
-                    streamed=False,
-                    streamed_chars=0,
-                )
         except Exception:  # noqa: BLE001
             return _ComposeMarkdownResult(markdown="", streamed=False, streamed_chars=0)
         return _ComposeMarkdownResult(markdown="", streamed=False, streamed_chars=0)
+
+    @staticmethod
+    def _resolve_report_length_targets(language: str) -> tuple[int, int]:
+        safe_language = str(language or "").strip().lower()
+        if safe_language == "zh":
+            return _REPORT_MIN_CHARS_ZH, _REPORT_TARGET_CHARS_ZH
+        return _REPORT_MIN_CHARS_EN, _REPORT_TARGET_CHARS_EN
+
+    @staticmethod
+    def _report_body_char_count(markdown: str) -> int:
+        safe = str(markdown or "").replace("\r\n", "\n").replace("\r", "\n")
+        if not safe:
+            return 0
+        body = re.split(r"\n##\s*(参考文献|references)\b", safe, maxsplit=1, flags=re.IGNORECASE)[0]
+        body = re.sub(r"```[\s\S]*?```", " ", body)
+        body = re.sub(r"`[^`]*`", " ", body)
+        body = re.sub(r"\[[Rr]\d+\]", " ", body)
+        body = re.sub(r"\s+", "", body)
+        return len(body)
+
+    def _build_report_expansion_prompt(
+        self,
+        *,
+        language: str,
+        query: str,
+        markdown: str,
+        context: dict[str, Any],
+        current_chars: int,
+        target_chars: int,
+        round_index: int,
+    ) -> str:
+        safe_markdown = str(markdown or "").strip()
+        heading_lines = re.findall(r"^##\s+.+$", safe_markdown, flags=re.MULTILINE)
+        heading_snapshot = heading_lines[:18]
+        reference_snapshot = [
+            {
+                "id": str(item.get("id") or "").strip(),
+                "title": str(item.get("title") or "").strip(),
+                "year": int(item.get("year") or 0),
+                "venue": str(item.get("venue") or "").strip(),
+                "citations": int(item.get("citations") or 0),
+            }
+            for item in (context.get("references") or [])[:24]
+            if isinstance(item, dict)
+        ]
+        excerpt = safe_markdown[-3200:]
+        if language == "zh":
+            return (
+                "你正在续写同一份科研报告，请输出“仅追加的新内容”，用于插入到参考文献之前。\n"
+                "要求：\n"
+                "1) 不要重写已有段落，不要重复已有二级标题；\n"
+                "2) 不要输出新的总标题（# ...）与“参考文献”章节；\n"
+                "3) 每个关键判断必须带 [R*] 引用；\n"
+                "4) 只能使用给定 references，禁止虚构；\n"
+                "5) 新增内容应覆盖：机制细节、证据分歧、失败边界、工程约束、实验设计；\n"
+                "6) 本次新增至少 2500 字，且新增至少 2 个二级标题。\n"
+                f"当前正文约 {current_chars} 字，目标正文约 {target_chars} 字；本轮为第 {round_index} 次扩写。\n"
+                f"主题：{query}\n"
+                f"已有二级标题：{json.dumps(heading_snapshot, ensure_ascii=False)}\n"
+                f"可用参考文献：{json.dumps(reference_snapshot, ensure_ascii=False)}\n"
+                f"现有报告尾部片段：{excerpt}"
+            )
+        return (
+            "You are extending the same research report. Output only NEW markdown content to append before References.\n"
+            "Rules:\n"
+            "1) Do not rewrite existing paragraphs and do not duplicate existing H2 headings.\n"
+            "2) Do not output a new top title (# ...) and do not output a References section.\n"
+            "3) Every key claim must include [R*] citations.\n"
+            "4) Use only provided references; do not invent facts.\n"
+            "5) Add depth on mechanisms, contradictory evidence, failure boundaries, engineering constraints, and experiments.\n"
+            "6) Add at least 1800 characters this round and include at least two new H2 headings.\n"
+            f"Current body length is about {current_chars} chars, target is {target_chars} chars. Expansion round: {round_index}.\n"
+            f"Topic: {query}\n"
+            f"Existing H2 headings: {json.dumps(heading_snapshot, ensure_ascii=False)}\n"
+            f"Available references: {json.dumps(reference_snapshot, ensure_ascii=False)}\n"
+            f"Tail excerpt of current report: {excerpt}"
+        )
+
+    @staticmethod
+    def _normalize_report_expansion_chunk(chunk: str) -> str:
+        safe = str(chunk or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not safe:
+            return ""
+        # Drop accidental duplicated title/reference headers from continuation outputs.
+        safe = re.sub(r"^#\s+.+?$", "", safe, flags=re.MULTILINE)
+        safe = re.sub(r"^##\s*(参考文献|references)\b.*$", "", safe, flags=re.IGNORECASE | re.MULTILINE)
+        safe = re.sub(r"\n{3,}", "\n\n", safe).strip()
+        return safe
+
+    @staticmethod
+    def _append_report_expansion(markdown: str, expansion_chunk: str) -> str:
+        base = str(markdown or "").rstrip()
+        chunk = str(expansion_chunk or "").strip()
+        if not chunk:
+            return base
+        reference_match = re.search(r"^##\s*(参考文献|references)\b", base, flags=re.IGNORECASE | re.MULTILINE)
+        if reference_match is None:
+            return f"{base}\n\n{chunk}\n".strip()
+        body = base[: reference_match.start()].rstrip()
+        refs = base[reference_match.start() :].lstrip()
+        return f"{body}\n\n{chunk}\n\n{refs}".strip()
+
+    def _ensure_reference_section(
+        self,
+        *,
+        markdown: str,
+        reference_catalog: list[dict[str, Any]],
+        language: str,
+    ) -> str:
+        safe = str(markdown or "").strip()
+        if not safe:
+            return ""
+        has_reference_section = bool(
+            re.search(
+                r"^##\s*(参考文献|references)\b",
+                safe,
+                flags=re.IGNORECASE | re.MULTILINE,
+            )
+        )
+        if has_reference_section:
+            return safe
+        references = self._format_reference_lines(reference_catalog=reference_catalog, language=language)
+        if not references:
+            return safe
+        heading = "## 参考文献" if language == "zh" else "## References"
+        return f"{safe}\n\n{heading}\n{references}".strip()
+
+    @staticmethod
+    def _format_reference_lines(reference_catalog: list[dict[str, Any]], *, language: str) -> str:
+        lines: list[str] = []
+        for item in reference_catalog:
+            if not isinstance(item, dict):
+                continue
+            ref_id = str(item.get("id") or "").strip()
+            title = str(item.get("title") or "").strip()
+            if not ref_id or not title:
+                continue
+            year = int(item.get("year") or 0)
+            venue = str(item.get("venue") or "Unknown").strip() or "Unknown"
+            citations = int(item.get("citations") or 0)
+            if language == "zh":
+                lines.append(f"- [{ref_id}] {title}（{year or '年份未知'}，{venue}，引用 {citations}）")
+            else:
+                lines.append(f"- [{ref_id}] {title} ({year or 'year unknown'}, {venue}, citations {citations})")
+        return "\n".join(lines).strip()
+
+    async def _expand_markdown_if_needed(
+        self,
+        *,
+        language: str,
+        query: str,
+        context: dict[str, Any],
+        markdown: str,
+        stream_callback: StreamCallback | None,
+        accumulated_chars: int,
+    ) -> tuple[str, int]:
+        safe_markdown = str(markdown or "").strip()
+        if not safe_markdown or not is_configured():
+            return safe_markdown, max(0, int(accumulated_chars))
+        min_chars, target_chars = self._resolve_report_length_targets(language)
+        body_chars = self._report_body_char_count(safe_markdown)
+        if body_chars >= min_chars:
+            return safe_markdown, max(0, int(accumulated_chars))
+
+        current_markdown = safe_markdown
+        current_accumulated = max(0, int(accumulated_chars))
+        for round_index in range(1, _REPORT_EXPANSION_MAX_ROUNDS + 1):
+            body_chars = self._report_body_char_count(current_markdown)
+            if body_chars >= min_chars:
+                break
+            prompt = self._build_report_expansion_prompt(
+                language=language,
+                query=query,
+                markdown=current_markdown,
+                context=context,
+                current_chars=body_chars,
+                target_chars=target_chars,
+                round_index=round_index,
+            )
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a strict evidence-grounded research writer. "
+                        "Expand analytical depth without changing existing conclusions."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ]
+            try:
+                if stream_callback is not None:
+                    raw_chunk, streamed_chars = await asyncio.wait_for(
+                        self._stream_chat_completion_content(
+                            messages=messages,
+                            temperature=0.15,
+                            timeout_seconds=110,
+                            max_tokens=_REPORT_EXPANSION_MAX_TOKENS,
+                            stream_callback=stream_callback,
+                            section="insight_markdown",
+                            start_accumulated=current_accumulated,
+                        ),
+                        timeout=160,
+                    )
+                    current_accumulated = max(current_accumulated, int(streamed_chars or 0))
+                else:
+                    response = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            chat,
+                            messages,
+                            temperature=0.15,
+                            timeout=110,
+                            max_tokens=_REPORT_EXPANSION_MAX_TOKENS,
+                        ),
+                        timeout=135,
+                    )
+                    raw_chunk = str(response.choices[0].message.content or "").strip()
+                chunk = self._normalize_report_expansion_chunk(raw_chunk)
+                if not chunk:
+                    break
+                current_markdown = self._append_report_expansion(current_markdown, chunk)
+            except Exception:  # noqa: BLE001
+                break
+        return current_markdown, current_accumulated
+
+    def _expand_markdown_with_evidence_appendix(
+        self,
+        *,
+        markdown: str,
+        language: str,
+        query: str,
+        reference_catalog: list[dict[str, Any]],
+        application_clusters: list[dict[str, Any]],
+        role_signals: list[str],
+        innovation_points: list[str],
+    ) -> str:
+        safe_language = "zh" if str(language or "").strip().lower() == "zh" else "en"
+        enriched = self._ensure_reference_section(
+            markdown=markdown,
+            reference_catalog=reference_catalog,
+            language=safe_language,
+        )
+        min_chars, _target_chars = self._resolve_report_length_targets(safe_language)
+        current_chars = self._report_body_char_count(enriched)
+        if current_chars >= min_chars:
+            return enriched
+
+        appendix_lines: list[str] = []
+        if safe_language == "zh":
+            appendix_lines.extend(
+                [
+                    "## 附录A. 逐篇证据卡片与方法边界",
+                    f"本附录面向“{query}”提供逐篇证据拆解，强调可复现实验与适用边界判断。",
+                ]
+            )
+        else:
+            appendix_lines.extend(
+                [
+                    "## Appendix A. Paper-by-Paper Evidence Cards and Method Boundaries",
+                    f"This appendix expands paper-level evidence for \"{query}\", emphasizing reproducibility and scope boundaries.",
+                ]
+            )
+
+        for item in reference_catalog[:24]:
+            if not isinstance(item, dict):
+                continue
+            ref_id = str(item.get("id") or "").strip()
+            title = str(item.get("title") or "").strip()
+            if not ref_id or not title:
+                continue
+            year = int(item.get("year") or 0)
+            venue = str(item.get("venue") or "Unknown").strip() or "Unknown"
+            citations = int(item.get("citations") or 0)
+            abstract_hint = str(item.get("abstract_hint") or "").strip()
+            if safe_language == "zh":
+                appendix_lines.extend(
+                    [
+                        f"### [{ref_id}] {title}",
+                        (
+                            f"该研究发表于 {year or '年份未知'} 年，来源为 {venue}，当前引用约 {citations}。"
+                            f"其核心贡献可概括为：{abstract_hint or '提出了可迁移的机制与训练范式。'}"
+                        ),
+                        (
+                            f"机制定位：[{ref_id}] 在模型结构、训练目标或推理链路中给出关键改进，"
+                            "可作为后续方案设计的基线组件。"
+                        ),
+                        (
+                            f"适用边界：[{ref_id}] 的结论需要在任务类型、数据分布与算力预算三方面复核，"
+                            "并通过对照实验验证其稳健性。"
+                        ),
+                        (
+                            f"验证建议：以 [{ref_id}] 为对照组，增设至少一组消融实验与一组跨域迁移实验，"
+                            "同时报告质量、时延、成本三类指标。"
+                        ),
+                    ]
+                )
+            else:
+                appendix_lines.extend(
+                    [
+                        f"### [{ref_id}] {title}",
+                        (
+                            f"This study was published in {year or 'an unknown year'} at {venue}, with about {citations} citations. "
+                            f"Its core contribution can be summarized as: {abstract_hint or 'a transferable mechanism and training paradigm.'}"
+                        ),
+                        (
+                            f"Mechanistic role: [{ref_id}] introduces key upgrades in architecture, training objective, or reasoning pathway, "
+                            "and can serve as a baseline component for downstream system design."
+                        ),
+                        (
+                            f"Boundary conditions: findings from [{ref_id}] should be re-validated under task type, data distribution, and compute budget constraints."
+                        ),
+                        (
+                            f"Validation plan: use [{ref_id}] as a control baseline with one ablation group and one cross-domain transfer group, "
+                            "reporting quality, latency, and cost metrics."
+                        ),
+                    ]
+                )
+
+        if safe_language == "zh":
+            appendix_lines.append("## 附录B. 分层评估清单与执行建议")
+            for cluster in application_clusters[:8]:
+                name = str(cluster.get("name") or "应用方向").strip() or "应用方向"
+                signals = cluster.get("signals") or []
+                signal_text = "、".join([str(item).strip() for item in signals if str(item).strip()][:4]) or "暂无显式信号"
+                appendix_lines.append(
+                    f"- {name}：优先围绕“{signal_text}”构建分层评测集，分别验证离线准确性、在线稳定性与单位成本。"
+                )
+            if role_signals:
+                appendix_lines.append("### 关键分析信号补充")
+                for line in role_signals[:16]:
+                    appendix_lines.append(f"- {line}")
+            if innovation_points:
+                appendix_lines.append("### 创新议题补充")
+                for line in innovation_points[:10]:
+                    appendix_lines.append(f"- {line}")
+        else:
+            appendix_lines.append("## Appendix B. Layered Evaluation Checklist and Execution Notes")
+            for cluster in application_clusters[:8]:
+                name = str(cluster.get("name") or "application direction").strip() or "application direction"
+                signals = cluster.get("signals") or []
+                signal_text = ", ".join([str(item).strip() for item in signals if str(item).strip()][:4]) or "no explicit signal"
+                appendix_lines.append(
+                    f"- {name}: build layered benchmarks around \"{signal_text}\", and evaluate offline quality, online stability, and unit economics."
+                )
+            if role_signals:
+                appendix_lines.append("### Additional Analytical Signals")
+                for line in role_signals[:16]:
+                    appendix_lines.append(f"- {line}")
+            if innovation_points:
+                appendix_lines.append("### Additional Innovation Threads")
+                for line in innovation_points[:10]:
+                    appendix_lines.append(f"- {line}")
+
+        expanded = self._append_report_expansion(enriched, "\n".join(appendix_lines))
+        if self._report_body_char_count(expanded) >= min_chars:
+            return expanded
+
+        # If still short, add a deterministic evidence matrix stub for the top references.
+        matrix_lines: list[str] = []
+        if safe_language == "zh":
+            matrix_lines.append("## 附录C. 证据矩阵（扩展版）")
+            for item in reference_catalog[:24]:
+                ref_id = str(item.get("id") or "").strip()
+                title = str(item.get("title") or "").strip()
+                if not ref_id or not title:
+                    continue
+                matrix_lines.extend(
+                    [
+                        f"### [{ref_id}] 证据矩阵条目",
+                        f"[{ref_id}] 对“{query}”的直接支持维度包括：理论机制解释、工程可实现性、跨场景迁移潜力。",
+                        f"[{ref_id}] 的潜在争议点包括：实验设置是否充分、评测口径是否一致、成本收益是否平衡。",
+                        f"[{ref_id}] 建议纳入统一评测协议：同数据切分、同预算约束、同误差容忍阈值下进行横向比较。",
+                    ]
+                )
+        else:
+            matrix_lines.append("## Appendix C. Extended Evidence Matrix")
+            for item in reference_catalog[:24]:
+                ref_id = str(item.get("id") or "").strip()
+                title = str(item.get("title") or "").strip()
+                if not ref_id or not title:
+                    continue
+                matrix_lines.extend(
+                    [
+                        f"### [{ref_id}] Evidence Matrix Entry",
+                        f"[{ref_id}] contributes direct evidence for \"{query}\" in mechanistic interpretation, engineering feasibility, and transfer potential.",
+                        f"[{ref_id}] requires scrutiny on experimental sufficiency, metric comparability, and cost-benefit realism.",
+                        f"[{ref_id}] should be evaluated under a unified protocol with matched data splits, budgets, and tolerance thresholds.",
+                    ]
+                )
+        return self._append_report_expansion(expanded, "\n".join(matrix_lines))
 
     def _compose_markdown_fallback(
         self,
@@ -2454,6 +2880,7 @@ class InsightExplorationService:
         messages: list[dict[str, str]],
         temperature: float,
         timeout_seconds: float,
+        max_tokens: int | None,
         stream_callback: StreamCallback,
         section: str,
         start_accumulated: int = 0,
@@ -2462,18 +2889,24 @@ class InsightExplorationService:
         safe_section = str(section or "insight_markdown").strip().lower() or "insight_markdown"
         safe_timeout = max(10.0, float(timeout_seconds or 10.0))
         initial_accumulated = max(0, int(start_accumulated or 0))
+        safe_max_tokens = int(max_tokens or 0)
 
         def _producer() -> tuple[str, int]:
             pieces: list[str] = []
             accumulated = initial_accumulated
             try:
                 client = get_client()
+                request_payload: dict[str, Any] = {
+                    "model": str(self.settings.openai_model),
+                    "messages": messages,
+                    "temperature": float(temperature),
+                    "timeout": safe_timeout,
+                    "stream": True,
+                }
+                if safe_max_tokens > 0:
+                    request_payload["max_tokens"] = safe_max_tokens
                 stream = client.chat.completions.create(
-                    model=str(self.settings.openai_model),
-                    messages=messages,
-                    temperature=float(temperature),
-                    timeout=safe_timeout,
-                    stream=True,
+                    **request_payload,
                 )
                 for event in stream:
                     delta = self._extract_stream_delta_content(event)

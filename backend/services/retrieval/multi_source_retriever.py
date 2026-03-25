@@ -88,7 +88,11 @@ class MultiSourceRetriever:
             limit=safe_limit,
             offset=max(0, int(offset)),
         )
-        ranked_results = self._rank_and_merge(executions=executions, limit=safe_limit)
+        ranked_results = self._rank_and_merge(
+            executions=executions,
+            limit=safe_limit,
+            query=safe_query,
+        )
         provider = self._resolve_primary_provider(
             preferred_provider=preferred_provider,
             providers_used=ranked_results["providers_used"],
@@ -370,10 +374,17 @@ class MultiSourceRetriever:
         )
         return paper, perf_counter() - start
 
-    def _rank_and_merge(self, *, executions: list[_ProviderExecution], limit: int) -> dict[str, Any]:
+    def _rank_and_merge(
+        self,
+        *,
+        executions: list[_ProviderExecution],
+        limit: int,
+        query: str = "",
+    ) -> dict[str, Any]:
         score_by_key: defaultdict[str, float] = defaultdict(float)
         paper_by_key: dict[str, dict[str, Any]] = {}
         source_by_key: defaultdict[str, set[str]] = defaultdict(set)
+        query_tokens = self._query_tokens(query)
 
         for execution in executions:
             papers = execution.papers
@@ -383,6 +394,11 @@ class MultiSourceRetriever:
                 if not merge_key:
                     continue
                 score_by_key[merge_key] += self._rank_score(rank, normalized)
+                if query_tokens:
+                    score_by_key[merge_key] += self._query_match_bonus(
+                        query_tokens=query_tokens,
+                        paper=normalized,
+                    )
                 source_by_key[merge_key].add(execution.provider)
                 if merge_key in paper_by_key:
                     paper_by_key[merge_key] = self._merge_two_papers(paper_by_key[merge_key], normalized)
@@ -519,6 +535,44 @@ class MultiSourceRetriever:
             delta = max(0, current_year - year)
             recency_bonus = max(0.0, 0.25 - 0.03 * float(delta))
         return base_rank + citation_bonus + recency_bonus
+
+    @staticmethod
+    def _text_tokens(text: str) -> set[str]:
+        return {
+            token
+            for token in re.findall(r"[a-z0-9\u4e00-\u9fff]{2,}", str(text or "").lower())
+            if token
+        }
+
+    @classmethod
+    def _query_tokens(cls, query: str) -> set[str]:
+        stopwords = {
+            "the",
+            "and",
+            "for",
+            "with",
+            "from",
+            "into",
+            "paper",
+            "study",
+            "approach",
+            "method",
+            "results",
+        }
+        return {token for token in cls._text_tokens(query) if token not in stopwords}
+
+    def _query_match_bonus(self, *, query_tokens: set[str], paper: dict[str, Any]) -> float:
+        if not query_tokens:
+            return 0.0
+        title_tokens = self._text_tokens(str(paper.get("title") or ""))
+        abstract_tokens = self._text_tokens(str(paper.get("abstract") or ""))
+        document_tokens = title_tokens.union(abstract_tokens)
+        if not document_tokens:
+            return 0.0
+        title_overlap = len(query_tokens.intersection(title_tokens)) / float(len(query_tokens))
+        document_overlap = len(query_tokens.intersection(document_tokens)) / float(len(query_tokens))
+        # Keep lexical relevance as a strong but bounded signal.
+        return max(0.0, min(1.2, title_overlap * 0.9 + document_overlap * 0.7))
 
     def _merge_two_papers(self, left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
         merged = dict(left)
