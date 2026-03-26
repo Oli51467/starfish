@@ -36,6 +36,7 @@ from services.insight_orchestrator_service import (
 from services.insight_worker_pool import InsightWorkerPool, WorkerPoolConfig
 from services.insight_memory_service import InsightMemoryService
 from services.insight_tool_gateway import InsightToolGateway
+from services.insight_skill_registry import InsightSkillRegistry
 from services.graphrag_service import GraphRAGService, get_graphrag_service
 
 try:  # pragma: no cover - optional runtime dependency in some envs
@@ -120,6 +121,7 @@ class InsightExplorationService:
         self.graph_service = graph_service or get_graphrag_service()
         self.history_repository = history_repository or get_research_history_repository()
         self.tool_gateway = InsightToolGateway()
+        self.skill_registry = InsightSkillRegistry()
         self.subprocess_worker_script = Path(__file__).resolve().with_name("insight_subprocess_worker.py")
         if orchestrator is not None:
             self.orchestrator = orchestrator
@@ -812,6 +814,7 @@ class InsightExplorationService:
                 extra={"error": "unknown_profile"},
             )
 
+        task_context = dict(task.context or {})
         tool_context = {
             "graph_stats": graph_stats,
             "papers": papers + extension_papers,
@@ -822,24 +825,90 @@ class InsightExplorationService:
             "input_type": task.input_type,
             "worker_id": worker_id,
             "depth": task.depth,
-            "context": dict(task.context or {}),
+            "objective": str(task.objective or "").strip(),
+            "context": task_context,
         }
         tool_calls: list[AgentToolCallRecord] = []
+        observed_tools: set[str] = set()
+        skill_memory_writes: list[AgentMemoryWriteRecord] = []
+
+        selected_skills = self.skill_registry.select_skills(
+            profile=profile,
+            objective=task.objective,
+            context=task_context,
+            limit=4,
+        )
+        cached_skill_outputs = self._load_shared_skill_outputs(
+            run_id=task.run_id,
+            skill_ids=selected_skills,
+            memory_service=memory_service,
+        )
+        inherited_skill_outputs = self._normalize_skill_outputs_from_context(task_context.get("skill_outputs"))
+        skill_outputs: dict[str, str] = {
+            **cached_skill_outputs,
+            **inherited_skill_outputs,
+        }
+
+        for skill_id in selected_skills:
+            cached_output = self._normalize_skill_output_text(skill_outputs.get(skill_id))
+            if cached_output:
+                skill_outputs[skill_id] = cached_output
+                tool_context[f"skill::{skill_id}"] = cached_output
+                continue
+            skill_result = self.skill_registry.execute(
+                task_id=task.task_id,
+                profile=profile,
+                skill_id=skill_id,
+                context=tool_context,
+                tool_gateway=self.tool_gateway,
+            )
+            tool_calls.extend(skill_result.tool_calls)
+            for tool_name, payload in dict(skill_result.tool_payloads or {}).items():
+                if not str(tool_name or "").strip():
+                    continue
+                observed_tools.add(str(tool_name).strip())
+                tool_context[f"tool::{tool_name}"] = payload
+            serialized_skill_output = self.skill_registry.serialize_output(
+                skill_result.output,
+                max_chars=2200,
+            )
+            if not serialized_skill_output:
+                continue
+            skill_outputs[skill_id] = serialized_skill_output
+            tool_context[f"skill::{skill_id}"] = serialized_skill_output
+            memory_record = self._build_skill_memory_write(
+                task=task,
+                skill_id=skill_id,
+                serialized_output=serialized_skill_output,
+            )
+            if memory_record is not None:
+                skill_memory_writes.append(memory_record)
+
         for tool_name in profile.allowed_tools:
+            safe_tool = str(tool_name or "").strip()
+            if not safe_tool:
+                continue
+            if safe_tool in observed_tools and f"tool::{safe_tool}" in tool_context:
+                continue
             payload, record = self.tool_gateway.invoke(
                 task_id=task.task_id,
                 profile=profile,
-                tool_name=tool_name,
+                tool_name=safe_tool,
                 context=tool_context,
             )
             tool_calls.append(record)
+            observed_tools.add(safe_tool)
             if payload is None:
                 continue
-            tool_context[f"tool::{tool_name}"] = payload
+            tool_context[f"tool::{safe_tool}"] = payload
 
         llm_enabled = any(
             record.tool_name == "llm" and record.status == "ok"
             for record in tool_calls
+        )
+        compact_skill_outputs = self._compact_skill_outputs_for_context(
+            selected_skills=selected_skills,
+            skill_outputs=skill_outputs,
         )
         session_memory = memory_service.clone_session_view(run_id=task.run_id)
         agent_private = memory_service.read_agent(
@@ -871,6 +940,8 @@ class InsightExplorationService:
                     session_memory=session_memory,
                     objective=effective_objective,
                     allow_llm=llm_enabled,
+                    selected_skills=selected_skills,
+                    skill_outputs=compact_skill_outputs,
                 )
                 execution_backend = "subprocess"
             else:
@@ -886,6 +957,8 @@ class InsightExplorationService:
                     session_memory=session_memory,
                     objective=effective_objective,
                     allow_llm=llm_enabled,
+                    selected_skills=selected_skills,
+                    skill_outputs=compact_skill_outputs,
                 )
         except Exception as exc:  # noqa: BLE001
             if self.worker_execution_backend == "subprocess":
@@ -902,6 +975,8 @@ class InsightExplorationService:
                         session_memory=session_memory,
                         objective=effective_objective,
                         allow_llm=llm_enabled,
+                        selected_skills=selected_skills,
+                        skill_outputs=compact_skill_outputs,
                     )
                     execution_backend = "inprocess_fallback"
                 except Exception:  # noqa: BLE001
@@ -930,11 +1005,15 @@ class InsightExplorationService:
             role=role,
             output=output,
         )
+        if skill_memory_writes:
+            memory_writes.extend(skill_memory_writes)
         subagent_requests = self._build_subagent_requests(
             task=task,
             role=role,
             output=output,
             role_by_profile_id=role_by_profile_id,
+            selected_skills=selected_skills,
+            skill_outputs=compact_skill_outputs,
         )
         return AgentTaskResult(
             task_id=task.task_id,
@@ -951,8 +1030,103 @@ class InsightExplorationService:
                 "parent_task_id": task.parent_task_id,
                 "worker_id": worker_id,
                 "execution_backend": execution_backend,
+                "selected_skills": list(selected_skills),
+                "skill_output_count": len(compact_skill_outputs),
             },
         )
+
+    @staticmethod
+    def _normalize_skill_output_text(value: Any) -> str:
+        if value is None:
+            return ""
+        safe_text = str(value).strip()
+        if not safe_text:
+            return ""
+        return re.sub(r"\s+", " ", safe_text).strip()
+
+    def _normalize_skill_outputs_from_context(self, value: Any) -> dict[str, str]:
+        if not isinstance(value, dict):
+            return {}
+        output: dict[str, str] = {}
+        for raw_key, raw_value in value.items():
+            skill_id = str(raw_key or "").strip()
+            if not skill_id:
+                continue
+            serialized = self.skill_registry.serialize_output(raw_value, max_chars=1200)
+            if not serialized:
+                continue
+            output[skill_id] = serialized
+        return output
+
+    def _load_shared_skill_outputs(
+        self,
+        *,
+        run_id: str,
+        skill_ids: tuple[str, ...],
+        memory_service: InsightMemoryService,
+    ) -> dict[str, str]:
+        output: dict[str, str] = {}
+        for skill_id in skill_ids:
+            spec = self.skill_registry.get(skill_id)
+            if spec is None:
+                continue
+            if spec.memory_scope != "session_shared":
+                continue
+            key = spec.resolved_memory_key()
+            lines = memory_service.read_session(
+                run_id=run_id,
+                key=key,
+                limit=1,
+            )
+            if not lines:
+                continue
+            normalized = self._normalize_skill_output_text(lines[-1])
+            if not normalized:
+                continue
+            output[skill_id] = normalized
+        return output
+
+    def _build_skill_memory_write(
+        self,
+        *,
+        task: AgentTask,
+        skill_id: str,
+        serialized_output: str,
+    ) -> AgentMemoryWriteRecord | None:
+        spec = self.skill_registry.get(skill_id)
+        if spec is None:
+            return None
+        safe_value = self._normalize_skill_output_text(serialized_output)
+        if not safe_value:
+            return None
+        scope = str(spec.memory_scope or "session_shared").strip() or "session_shared"
+        if scope not in {"session_shared", "agent_private", "history_shared"}:
+            scope = "session_shared"
+        return AgentMemoryWriteRecord(
+            task_id=task.task_id,
+            profile_id=task.profile_id,
+            scope=scope,
+            key=spec.resolved_memory_key(),
+            value=safe_value,
+        )
+
+    def _compact_skill_outputs_for_context(
+        self,
+        *,
+        selected_skills: tuple[str, ...],
+        skill_outputs: dict[str, str],
+    ) -> dict[str, str]:
+        output: dict[str, str] = {}
+        for skill_id in selected_skills:
+            normalized = self._normalize_skill_output_text(skill_outputs.get(skill_id))
+            if not normalized:
+                continue
+            if len(normalized) > 360:
+                normalized = normalized[:357].rstrip() + "..."
+            output[skill_id] = normalized
+            if len(output) >= 4:
+                break
+        return output
 
     def _build_memory_writes_for_output(
         self,
@@ -1016,6 +1190,8 @@ class InsightExplorationService:
         role: _RoleSpec,
         output: str,
         role_by_profile_id: dict[str, _RoleSpec],
+        selected_skills: tuple[str, ...],
+        skill_outputs: dict[str, str],
     ) -> list[SubAgentRequest]:
         if task.depth >= int(self.orchestrator.limits.max_subagent_depth):
             return []
@@ -1050,6 +1226,12 @@ class InsightExplorationService:
                 context_patch={
                     "parent_role_id": role.role_id,
                     "parent_task_id": task.task_id,
+                    "selected_skills": [item for item in selected_skills[:4]],
+                    "skill_outputs": {
+                        skill_id: value
+                        for skill_id, value in dict(skill_outputs or {}).items()
+                        if str(skill_id).strip() and str(value).strip()
+                    },
                 },
             )
         ]
@@ -1296,10 +1478,21 @@ class InsightExplorationService:
         session_memory: dict[str, list[str]],
         objective: str | None = None,
         allow_llm: bool = True,
+        selected_skills: tuple[str, ...] = (),
+        skill_outputs: dict[str, str] | None = None,
     ) -> str:
         if not self.subprocess_worker_script.exists():
             raise RuntimeError("insight_subprocess_worker_not_found")
 
+        safe_skill_outputs: dict[str, str] = {}
+        for raw_key, raw_value in dict(skill_outputs or {}).items():
+            skill_id = str(raw_key or "").strip()
+            value = str(raw_value or "").strip()
+            if not skill_id or not value:
+                continue
+            safe_skill_outputs[skill_id] = value
+            if len(safe_skill_outputs) >= 6:
+                break
         payload = {
             "round_index": int(round_index),
             "language": str(language or "en"),
@@ -1315,6 +1508,8 @@ class InsightExplorationService:
             },
             "objective": str(objective or ""),
             "allow_llm": bool(allow_llm),
+            "selected_skills": [str(item).strip() for item in selected_skills if str(item).strip()][:6],
+            "skill_outputs": safe_skill_outputs,
             "role": {
                 "role_id": role.role_id,
                 "title_zh": role.title_zh,
@@ -1362,6 +1557,8 @@ class InsightExplorationService:
         session_memory: dict[str, list[str]],
         objective: str | None = None,
         allow_llm: bool = True,
+        selected_skills: tuple[str, ...] = (),
+        skill_outputs: dict[str, str] | None = None,
     ) -> str:
         if (not allow_llm) or (not is_configured()):
             return self._fallback_role_output(
@@ -1385,6 +1582,8 @@ class InsightExplorationService:
             history_memory=history_memory,
             session_memory=session_memory,
             objective=objective,
+            selected_skills=selected_skills,
+            skill_outputs=skill_outputs,
         )
         try:
             response = await asyncio.wait_for(
@@ -1437,10 +1636,23 @@ class InsightExplorationService:
         history_memory: list[str],
         session_memory: dict[str, list[str]],
         objective: str | None = None,
+        selected_skills: tuple[str, ...] = (),
+        skill_outputs: dict[str, str] | None = None,
     ) -> str:
         top_papers = self._top_papers_for_prompt(papers + extension_papers, limit=6)
         role_name = role.title_zh if language == "zh" else role.title_en
         role_focus = self._resolve_role_report_focus(role_id=role.role_id, language=language)
+        safe_skill_outputs: dict[str, str] = {}
+        for raw_key, raw_value in dict(skill_outputs or {}).items():
+            skill_id = str(raw_key or "").strip()
+            value = str(raw_value or "").strip()
+            if not skill_id or not value:
+                continue
+            if len(value) > 280:
+                value = value[:277].rstrip() + "..."
+            safe_skill_outputs[skill_id] = value
+            if len(safe_skill_outputs) >= 4:
+                break
         evidence_cards = [
             {
                 "id": f"E{index}",
@@ -1464,6 +1676,8 @@ class InsightExplorationService:
             "history_memory": history_memory[:2],
             "session_hypotheses": (session_memory.get("hypotheses") or [])[-2:],
             "session_critic_notes": (session_memory.get("critic_notes") or [])[-2:],
+            "selected_skills": [str(item).strip() for item in selected_skills if str(item).strip()][:4],
+            "skill_outputs": safe_skill_outputs,
         }
         if language == "zh":
             return (

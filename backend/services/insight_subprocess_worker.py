@@ -123,6 +123,23 @@ def _build_role_prompt(payload: dict[str, Any]) -> str:
     extension_papers = list(payload.get("extension_papers") or [])
     history_memory = [str(item) for item in (payload.get("history_memory") or []) if str(item).strip()]
     session_memory = payload.get("session_memory") if isinstance(payload.get("session_memory"), dict) else {}
+    selected_skills = [
+        str(item).strip()
+        for item in (payload.get("selected_skills") or [])
+        if str(item).strip()
+    ][:4]
+    raw_skill_outputs = payload.get("skill_outputs") if isinstance(payload.get("skill_outputs"), dict) else {}
+    safe_skill_outputs: dict[str, str] = {}
+    for raw_key, raw_value in raw_skill_outputs.items():
+        skill_id = str(raw_key or "").strip()
+        value = str(raw_value or "").strip()
+        if not skill_id or not value:
+            continue
+        if len(value) > 280:
+            value = value[:277].rstrip() + "..."
+        safe_skill_outputs[skill_id] = value
+        if len(safe_skill_outputs) >= 4:
+            break
 
     ranked = _rank_papers_by_query_relevance(
         papers + extension_papers,
@@ -151,6 +168,8 @@ def _build_role_prompt(payload: dict[str, Any]) -> str:
         "history_memory": history_memory[:2],
         "session_hypotheses": (session_memory.get("hypotheses") or [])[-2:],
         "session_critic_notes": (session_memory.get("critic_notes") or [])[-2:],
+        "selected_skills": selected_skills,
+        "skill_outputs": safe_skill_outputs,
     }
     if language == "zh":
         return (
