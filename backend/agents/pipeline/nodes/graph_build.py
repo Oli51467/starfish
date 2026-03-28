@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 from agents.pipeline.state import PipelineState, append_message
 from models.schemas import KnowledgeGraphBuildRequest, RetrievedPaper
@@ -20,6 +21,78 @@ def _format_search_range(input_type: str, paper_range_years: int | None) -> str:
     if isinstance(paper_range_years, int) and paper_range_years > 0:
         return f"近 {paper_range_years} 年"
     return "所有时间"
+
+
+def _safe_int(value: Any, fallback: int = 0) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return parsed
+
+
+def _resolve_node_kind(node: dict[str, Any]) -> str:
+    return str(node.get("kind") or node.get("type") or "").strip().lower()
+
+
+def _resolve_node_tier(node: dict[str, Any]) -> int:
+    meta = node.get("meta") if isinstance(node.get("meta"), dict) else {}
+    return max(1, min(3, _safe_int(meta.get("tier", node.get("tier", 3)), 3)))
+
+
+def _build_graph_stream_stage_payload(
+    graph_payload: dict[str, Any],
+    *,
+    max_paper_tier: int,
+) -> dict[str, Any]:
+    nodes = list(graph_payload.get("nodes") or [])
+    edges = list(graph_payload.get("edges") or [])
+    if not nodes:
+        return {
+            **dict(graph_payload),
+            "nodes": [],
+            "edges": [],
+        }
+
+    included_paper_ids: set[str] = set()
+    for node in nodes:
+        node_id = str(node.get("id") or "").strip()
+        if not node_id:
+            continue
+        if _resolve_node_kind(node) != "paper":
+            continue
+        if _resolve_node_tier(node) <= max_paper_tier:
+            included_paper_ids.add(node_id)
+
+    if not included_paper_ids:
+        return {
+            **dict(graph_payload),
+            "nodes": [],
+            "edges": [],
+        }
+
+    allowed_node_ids = set(included_paper_ids)
+    for edge in edges:
+        source = str(edge.get("source") or "").strip()
+        target = str(edge.get("target") or "").strip()
+        if not source or not target:
+            continue
+        if source in included_paper_ids or target in included_paper_ids:
+            allowed_node_ids.add(source)
+            allowed_node_ids.add(target)
+
+    stage_nodes = [node for node in nodes if str(node.get("id") or "").strip() in allowed_node_ids]
+    stage_edges = [
+        edge
+        for edge in edges
+        if str(edge.get("source") or "").strip() in allowed_node_ids
+        and str(edge.get("target") or "").strip() in allowed_node_ids
+    ]
+    return {
+        **dict(graph_payload),
+        "nodes": stage_nodes,
+        "edges": stage_edges,
+    }
 
 
 async def graph_build_node(state: PipelineState) -> PipelineState:
@@ -56,6 +129,29 @@ async def graph_build_node(state: PipelineState) -> PipelineState:
 
     summary = f"图谱构建完成，节点 {len(nodes)} 个，关系 {len(edges)} 条。"
     if emit_events:
+        tier2_graph = _build_graph_stream_stage_payload(graph_payload, max_paper_tier=2)
+        await runtime.emit_graph_stream(
+            session_id,
+            stage="tier2",
+            query=str(request.query or "").strip(),
+            summary=str(graph_payload.get("summary") or ""),
+            graph=tier2_graph,
+            stats={
+                "node_count": len(list(tier2_graph.get("nodes") or [])),
+                "edge_count": len(list(tier2_graph.get("edges") or [])),
+            },
+        )
+        await runtime.emit_graph_stream(
+            session_id,
+            stage="tier3",
+            query=str(request.query or "").strip(),
+            summary=str(graph_payload.get("summary") or ""),
+            graph=graph_payload,
+            stats={
+                "node_count": len(nodes),
+                "edge_count": len(edges),
+            },
+        )
         await runtime.emit_thinking(session_id, _NODE, summary)
         await runtime.emit_node_complete(session_id, _NODE, 72, summary)
 

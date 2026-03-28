@@ -2161,6 +2161,32 @@ class PipelineRuntimeService:
             },
         )
 
+    async def emit_graph_stream(
+        self,
+        session_id: str,
+        *,
+        stage: str,
+        query: str = "",
+        summary: str = "",
+        papers: list[dict[str, Any]] | None = None,
+        graph: dict[str, Any] | None = None,
+        stats: dict[str, Any] | None = None,
+    ) -> None:
+        runtime = await self._require_runtime(session_id)
+        await self._publish_event(
+            runtime,
+            {
+                "type": "graph_stream",
+                "node": "search" if str(stage or "").strip().lower() == "tier1" else "graph_build",
+                "stage": str(stage or "").strip().lower(),
+                "query": str(query or "").strip(),
+                "summary": str(summary or "").strip(),
+                "papers": list(papers or []),
+                "graph": dict(graph or {}),
+                "stats": dict(stats or {}),
+            },
+        )
+
     async def emit_node_complete(
         self,
         session_id: str,

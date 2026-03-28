@@ -7,10 +7,12 @@ from typing import Any
 from agents.pipeline.state import PipelineState, append_message
 from models.schemas import KnowledgeGraphRetrieveRequest
 from services.graphrag_service import get_graphrag_service
+from services.node_scorer import build_aha_summary, score_paper_nodes
 from services.pipeline_runtime_service import get_pipeline_runtime_service
 
 _NODE = "search"
 _MIN_SEARCH_PAPERS = 6
+_TIER1_PREVIEW_PAPER_LIMIT = 5
 
 
 def _runtime_event_enabled(state: PipelineState) -> bool:
@@ -92,6 +94,102 @@ def _format_range_text(year_range: int | None) -> str:
     return f"近 {year_range} 年"
 
 
+def _safe_int(value: Any, fallback: int = 0) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return max(0, parsed)
+
+
+def _resolve_preview_year(value: Any) -> int:
+    year = _safe_int(value, 0)
+    if year <= 0:
+        return 0
+    return year
+
+
+def _build_tier1_preview_payload(query: str, papers: list[dict[str, Any]]) -> dict[str, Any]:
+    safe_query = str(query or "").strip()
+    source_papers = [item for item in papers if isinstance(item, dict)]
+    if not source_papers:
+        return {
+            "summary": build_aha_summary(safe_query, []),
+            "papers": [],
+            "tier_counts": {"tier1": 0, "tier2": 0, "tier3": 0},
+        }
+
+    total = max(1, len(source_papers))
+    scored_payload: list[dict[str, Any]] = []
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(source_papers):
+        paper_id = str(item.get("paper_id") or "").strip()
+        title = str(item.get("title") or "").strip()
+        if not paper_id or not title:
+            continue
+        query_relevance = max(0.18, min(1.0, 1.0 - (index / total) * 0.82))
+        citation_count = _safe_int(item.get("citation_count"))
+        year = _resolve_preview_year(item.get("year"))
+        scored_payload.append(
+            {
+                "id": paper_id,
+                "title": title,
+                "citation_count": citation_count,
+                "year": year,
+                "internal_citations": 0,
+                "query_relevance": query_relevance,
+                "semantic_score": query_relevance,
+            }
+        )
+        normalized.append(
+            {
+                "paper_id": paper_id,
+                "title": title,
+                "abstract": str(item.get("abstract") or ""),
+                "year": year if year > 0 else None,
+                "month": _safe_int(item.get("month")),
+                "citation_count": citation_count,
+                "venue": str(item.get("venue") or "Unknown Venue"),
+                "authors": list(item.get("authors") or []),
+                "query_relevance": query_relevance,
+            }
+        )
+
+    scored = score_paper_nodes(scored_payload, max_tier1=3)
+    scored_by_id = {str(item.get("id") or ""): item for item in scored}
+    ranked = sorted(
+        normalized,
+        key=lambda item: (
+            int((scored_by_id.get(str(item.get("paper_id") or "")) or {}).get("tier", 3)),
+            -float((scored_by_id.get(str(item.get("paper_id") or "")) or {}).get("importance_score", 0.0)),
+            -int(item.get("citation_count") or 0),
+        ),
+    )
+
+    preview_papers: list[dict[str, Any]] = []
+    for item in ranked[:_TIER1_PREVIEW_PAPER_LIMIT]:
+        paper_id = str(item.get("paper_id") or "")
+        scored_item = scored_by_id.get(paper_id) or {}
+        preview_papers.append(
+            {
+                **item,
+                "importance_score": float(scored_item.get("importance_score", 0.0)),
+                "tier": int(scored_item.get("tier", 3) or 3),
+                "node_size": float(scored_item.get("node_size", 20.0)),
+            }
+        )
+
+    return {
+        "summary": build_aha_summary(safe_query, scored),
+        "papers": preview_papers,
+        "tier_counts": {
+            "tier1": sum(1 for item in scored if int(item.get("tier", 3)) == 1),
+            "tier2": sum(1 for item in scored if int(item.get("tier", 3)) == 2),
+            "tier3": sum(1 for item in scored if int(item.get("tier", 3)) == 3),
+        },
+    }
+
+
 async def search_node(state: PipelineState) -> PipelineState:
     runtime = get_pipeline_runtime_service()
     session_id = state["session_id"]
@@ -143,6 +241,18 @@ async def search_node(state: PipelineState) -> PipelineState:
             f"自动放宽到{_format_range_text(relaxed_to)}补充候选。"
         )
     if emit_events:
+        tier1_preview = _build_tier1_preview_payload(resolved_query or request.query, papers)
+        await runtime.emit_graph_stream(
+            session_id,
+            stage="tier1",
+            query=resolved_query or request.query,
+            summary=str(tier1_preview.get("summary") or summary),
+            papers=list(tier1_preview.get("papers") or []),
+            stats={
+                "selected_paper_count": len(papers),
+                **dict(tier1_preview.get("tier_counts") or {}),
+            },
+        )
         await runtime.emit_thinking(session_id, _NODE, summary)
         await runtime.emit_node_complete(session_id, _NODE, 25, summary)
 

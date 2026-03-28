@@ -41,6 +41,24 @@ function buildAuthHeaders(accessToken, baseHeaders = {}) {
   };
 }
 
+function sanitizeReportFileTitle(rawTitle, fallback = '研究主题') {
+  const normalized = String(rawTitle || '')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/[\\/:*?"<>|]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  const safeTitle = normalized || String(fallback || '').trim() || '研究主题';
+  return safeTitle.slice(0, 60);
+}
+
+function buildReportDownloadFileName(title, type = 'markdown') {
+  const extension = String(type || '').trim().toLowerCase() === 'pdf' ? 'pdf' : 'md';
+  const randomSuffix = String(Math.floor(100000 + Math.random() * 900000));
+  return `${sanitizeReportFileTitle(title)}_探索报告_${randomSuffix}.${extension}`;
+}
+
 export function authWithGoogle(credential) {
   return request('/api/auth/google', {
     method: 'POST',
@@ -298,7 +316,11 @@ export function getResearchSession(sessionId, { accessToken = '' } = {}) {
   });
 }
 
-export async function downloadResearchReport(sessionId, type = 'markdown', { accessToken = '' } = {}) {
+export async function downloadResearchReport(
+  sessionId,
+  type = 'markdown',
+  { accessToken = '', reportTitle = '' } = {}
+) {
   const safeType = String(type || '').trim().toLowerCase() === 'pdf' ? 'pdf' : 'markdown';
   const safeSessionId = String(sessionId || '').trim();
   if (!safeSessionId) {
@@ -328,16 +350,18 @@ export async function downloadResearchReport(sessionId, type = 'markdown', { acc
   const downloadUrl = window.URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = downloadUrl;
-  anchor.download = safeType === 'pdf'
-    ? `${safeSessionId}-insight.pdf`
-    : `${safeSessionId}-insight.md`;
+  anchor.download = buildReportDownloadFileName(reportTitle || safeSessionId, safeType);
   document.body.append(anchor);
   anchor.click();
   anchor.remove();
   window.URL.revokeObjectURL(downloadUrl);
 }
 
-export async function downloadResearchHistoryReport(historyId, type = 'markdown', { accessToken = '' } = {}) {
+export async function downloadResearchHistoryReport(
+  historyId,
+  type = 'markdown',
+  { accessToken = '', reportTitle = '' } = {}
+) {
   const safeType = String(type || '').trim().toLowerCase() === 'pdf' ? 'pdf' : 'markdown';
   const safeHistoryId = String(historyId || '').trim();
   if (!safeHistoryId) {
@@ -367,9 +391,7 @@ export async function downloadResearchHistoryReport(historyId, type = 'markdown'
   const downloadUrl = window.URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = downloadUrl;
-  anchor.download = safeType === 'pdf'
-    ? `${safeHistoryId}-insight.pdf`
-    : `${safeHistoryId}-insight.md`;
+  anchor.download = buildReportDownloadFileName(reportTitle || safeHistoryId, safeType);
   document.body.append(anchor);
   anchor.click();
   anchor.remove();

@@ -267,12 +267,19 @@ function buildRetrievalPreviewGraph(query, papers) {
       const citationRate = Math.min(citationCount / maxCitation, 1);
       const rankRate = 1 - index / Math.max(1, topPapers.length);
       const relevance = Math.max(0.12, Math.min(0.22 + citationRate * 0.56 + rankRate * 0.22, 1));
+      const tier = index < 3 ? 1 : (index < 8 ? 2 : 3);
+      const importanceScore = Math.max(0, Math.min(100, (citationRate * 0.62 + rankRate * 0.38) * 100));
+      const tierBaseSize = tier === 1 ? 48 : (tier === 2 ? 34 : 22);
+      const nodeSize = Math.max(18, Math.min(62, tierBaseSize + importanceScore * 0.06));
       const paperId = toNodeId(paper?.paper_id, `preview-${index}`);
       return {
         id: `paper:${paperId}`,
         label: title,
         type: 'paper',
-        score: Number(relevance.toFixed(3)),
+        score: Number((importanceScore / 100).toFixed(3)),
+        size: Number(nodeSize.toFixed(2)),
+        tier,
+        importance_score: Number(importanceScore.toFixed(1)),
         meta: {
           title,
           abstract: String(paper?.abstract || ''),
@@ -282,7 +289,12 @@ function buildRetrievalPreviewGraph(query, papers) {
           venue: String(paper?.venue || ''),
           authors: Array.isArray(paper?.authors) ? paper.authors.join(', ') : '',
           url: String(paper?.url || ''),
-          relevance: relevance.toFixed(3)
+          relevance: relevance.toFixed(3),
+          importance_score: importanceScore.toFixed(1),
+          tier: String(tier),
+          node_size: nodeSize.toFixed(1),
+          node_color_weight: Math.max(0.2, Math.min(1, importanceScore / 100)).toFixed(3),
+          internal_citations: '0'
         }
       };
     })
@@ -298,11 +310,21 @@ function buildRetrievalPreviewGraph(query, papers) {
     });
   }
 
+  const leadPaper = nodes[0];
+  const leadTitle = String(leadPaper?.label || '').trim();
+  const summary = leadTitle
+    ? `先导结果：核心论文候选《${leadTitle}》，已快速召回 ${nodes.length} 篇相关论文。`
+    : `先导结果：已快速召回 ${nodes.length} 篇相关论文。`;
+
   return {
     query: safeQuery,
     title: `${safeQuery} 实时图谱预览`,
+    summary,
     nodes,
-    edges
+    edges,
+    aha: {
+      summary
+    }
   };
 }
 
@@ -689,6 +711,7 @@ export function usePaperWorkflow({
   let insightStreamReconcileInFlight = false;
   let runtimeLastEventTsMs = 0;
   const runtimeNodeLogCursor = new Map();
+  const graphStreamCursor = new Set();
 
   const graphStats = computed(() => {
     const stats = extractPanoramaStats(graphData.value || {});
@@ -1570,11 +1593,13 @@ export function usePaperWorkflow({
     lastInsightStreamAt.value = 0;
     runtimeLastEventTsMs = 0;
     runtimeNodeLogCursor.clear();
+    graphStreamCursor.clear();
     resetNegotiationState();
   }
 
   function resetSteps() {
     runtimeNodeLogCursor.clear();
+    graphStreamCursor.clear();
     resetNegotiationState();
     syncInsightInlineConfig({
       agent_count: INSIGHT_AGENT_COUNT_DEFAULT,
@@ -1931,6 +1956,68 @@ export function usePaperWorkflow({
       insightReportReady.value = false;
       setStepStatusByKey('insight', 'running', '正在流式生成探索报告...');
       return;
+    }
+  }
+
+  function handleGraphStream(event = {}) {
+    const stage = String(event?.stage || '').trim().toLowerCase();
+    if (!stage) return;
+
+    const stats = event?.stats && typeof event.stats === 'object' ? event.stats : {};
+    const cursor = [
+      stage,
+      Number(stats?.selected_paper_count || 0),
+      Number(stats?.node_count || 0),
+      Number(stats?.edge_count || 0)
+    ].join(':');
+    if (graphStreamCursor.has(cursor)) return;
+    graphStreamCursor.add(cursor);
+
+    const streamSummary = String(event?.summary || '').trim();
+    const streamQuery = String(
+      event?.query
+      || runtimeSeed.value?.input_value
+      || seedRef.value?.input_value
+      || ''
+    ).trim();
+
+    const streamPapers = Array.isArray(event?.papers) ? event.papers : [];
+    if (streamPapers.length) {
+      const previewGraph = buildRetrievalPreviewGraph(streamQuery, streamPapers);
+      const previewSignature = `${buildPreviewGraphSignature(streamQuery, streamPapers)}#stream:${stage}`;
+      commitGraphData(previewGraph, previewSignature);
+      const detail = streamSummary || '首批关键论文已就绪，正在扩展图谱。';
+      setStepStatusByKey('retrieve', 'running', detail);
+      appendStepLog('retrieve', {
+        title: 'Retriever Agent',
+        detail,
+        status: 'doing'
+      });
+      return;
+    }
+
+    const streamGraph = event?.graph && typeof event.graph === 'object' ? event.graph : null;
+    if (!streamGraph || !Array.isArray(streamGraph?.nodes) || !Array.isArray(streamGraph?.edges)) return;
+    const streamSignature = `${buildGraphSignature(streamGraph)}#stream:${stage}`;
+    commitGraphData(streamGraph, streamSignature);
+    if (stage === 'tier2') {
+      const detail = streamSummary || '关键分支已加载，正在补全全量图谱。';
+      setStepStatusByKey('graph', 'running', detail);
+      appendStepLog('graph', {
+        title: 'Graph Builder Agent',
+        detail,
+        status: 'doing'
+      });
+      return;
+    }
+    if (stage === 'tier3') {
+      const detail = streamSummary || '全量图谱已加载，正在完成流程收敛。';
+      setStepStatusByKey('graph', 'running', detail);
+      appendStepLog('graph', {
+        title: 'Graph Builder Agent',
+        detail,
+        status: 'doing'
+      });
     }
   }
 
@@ -2535,6 +2622,10 @@ export function usePaperWorkflow({
       handleInsightStream(event);
       return;
     }
+    if (type === 'graph_stream') {
+      handleGraphStream(event);
+      return;
+    }
     if (type === 'insight_orchestrator_event') {
       handleInsightOrchestratorEvent(event);
       return;
@@ -3071,16 +3162,26 @@ export function usePaperWorkflow({
     return String(runtimeSeed.value?.runtime_session_id || '').trim();
   }
 
+  function resolveReportDownloadTitle() {
+    const runtimeInputValue = String(runtimeSeed.value?.input_value || '').trim();
+    if (runtimeInputValue) return runtimeInputValue;
+    return String(seedRef.value?.input_value || '').trim();
+  }
+
   async function downloadInsightMarkdown() {
     if (insightMarkdownDownloadLoading.value) return;
     const sessionId = resolveReportSessionId();
+    const reportTitle = resolveReportDownloadTitle();
     if (!sessionId) {
       errorMessage.value = '报告会话不存在，无法下载。';
       return;
     }
     insightMarkdownDownloadLoading.value = true;
     try {
-      await downloadResearchReport(sessionId, 'markdown', { accessToken: accessTokenRef.value || '' });
+      await downloadResearchReport(sessionId, 'markdown', {
+        accessToken: accessTokenRef.value || '',
+        reportTitle
+      });
     } catch (error) {
       errorMessage.value = String(error?.message || '').trim() || 'Markdown 下载失败。';
     } finally {
@@ -3091,13 +3192,17 @@ export function usePaperWorkflow({
   async function downloadInsightPdf() {
     if (insightPdfDownloadLoading.value) return;
     const sessionId = resolveReportSessionId();
+    const reportTitle = resolveReportDownloadTitle();
     if (!sessionId) {
       errorMessage.value = '报告会话不存在，无法下载。';
       return;
     }
     insightPdfDownloadLoading.value = true;
     try {
-      await downloadResearchReport(sessionId, 'pdf', { accessToken: accessTokenRef.value || '' });
+      await downloadResearchReport(sessionId, 'pdf', {
+        accessToken: accessTokenRef.value || '',
+        reportTitle
+      });
     } catch (error) {
       errorMessage.value = String(error?.message || '').trim() || 'PDF 下载失败。';
     } finally {

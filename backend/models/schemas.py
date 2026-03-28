@@ -114,6 +114,7 @@ PipelineEventType = Literal[
     "thinking",
     "node_complete",
     "pause",
+    "graph_stream",
     "insight_stream",
     "insight_orchestrator_event",
     "negotiation_round_started",

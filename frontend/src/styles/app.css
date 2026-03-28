@@ -944,13 +944,152 @@
 }
 
 .history-report-markdown {
-  margin: 0;
-  white-space: pre-wrap;
+  min-width: 0;
+}
+
+.report-markdown {
+  display: grid;
+  gap: 10px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.68;
   word-break: break-word;
+}
+
+.report-markdown > * {
+  margin: 0;
+}
+
+.report-markdown h1,
+.report-markdown h2,
+.report-markdown h3,
+.report-markdown h4,
+.report-markdown h5,
+.report-markdown h6 {
+  line-height: 1.35;
+  color: var(--text);
+}
+
+.report-markdown h1 {
+  font-size: 20px;
+}
+
+.report-markdown h2 {
+  font-size: 18px;
+}
+
+.report-markdown h3 {
+  font-size: 16px;
+}
+
+.report-markdown h4,
+.report-markdown h5,
+.report-markdown h6 {
+  font-size: 14px;
+}
+
+.report-markdown p {
+  color: var(--text);
+}
+
+.report-markdown strong {
+  font-weight: 700;
+}
+
+.report-markdown em {
+  font-style: italic;
+}
+
+.report-markdown del {
+  opacity: 0.78;
+}
+
+.report-markdown a {
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.report-markdown ul,
+.report-markdown ol {
+  margin: 0;
+  padding-left: 1.2em;
+  display: grid;
+  gap: 4px;
+}
+
+.report-markdown li {
+  margin: 0;
+}
+
+.report-markdown blockquote {
+  margin: 0;
+  padding: 6px 10px;
+  border-left: 2px solid var(--line-2);
+  background: color-mix(in srgb, var(--panel) 70%, var(--bg) 30%);
+  border-radius: var(--radius-sm);
+  display: grid;
+  gap: 6px;
+  color: var(--text-soft);
+}
+
+.report-markdown hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 2px 0;
+}
+
+.report-markdown code {
   font-family: 'JetBrains Mono', monospace;
   font-size: 12px;
-  line-height: 1.55;
-  color: var(--text);
+  background: color-mix(in srgb, var(--line) 55%, var(--bg) 45%);
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+
+.report-markdown pre {
+  margin: 0;
+  max-width: 100%;
+  overflow: auto;
+  padding: 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel) 70%, var(--bg) 30%);
+}
+
+.report-markdown pre code {
+  display: block;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  white-space: pre;
+}
+
+.report-md-table-wrap {
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+
+.report-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 420px;
+}
+
+.report-markdown thead th {
+  background: var(--panel);
+  font-weight: 600;
+}
+
+.report-markdown th,
+.report-markdown td {
+  border: 1px solid var(--line);
+  padding: 6px 8px;
+  vertical-align: top;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .history-signal-panel {

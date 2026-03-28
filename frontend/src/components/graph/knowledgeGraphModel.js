@@ -20,6 +20,12 @@ export function normalizeRate(value) {
   return clamp(safeNumber(value, 0), 0, 1);
 }
 
+function toSafeTier(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 3;
+  return Math.max(1, Math.min(3, Math.round(parsed)));
+}
+
 function compactTokens(text) {
   return String(text || '')
     .toLowerCase()
@@ -88,6 +94,15 @@ function normalizePaperNode(node, query) {
   const relevance = normalizeRate(node?.meta?.relevance ?? fallbackRelevance(name, query));
   const citationCount = safeNumber(node?.meta?.citation_count, 0);
   const score = normalizeRate(node?.score);
+  const tier = toSafeTier(node?.meta?.tier ?? node?.tier);
+  const importanceScore = clamp(
+    safeNumber(node?.meta?.importance_score ?? node?.importance_score ?? (score * 100), 0),
+    0,
+    100
+  );
+  const nodeSizeRaw = safeNumber(node?.meta?.node_size ?? node?.node_size ?? node?.size, 0);
+  const nodeSize = nodeSizeRaw > 0 ? nodeSizeRaw : (tier === 1 ? 48 : (tier === 2 ? 34 : 22));
+  const internalCitations = safeNumber(node?.meta?.internal_citations, 0);
   return {
     ...node,
     kind: 'paper',
@@ -95,7 +110,11 @@ function normalizePaperNode(node, query) {
     relevance,
     citationCount,
     score,
-    size: safeNumber(node?.size, 1)
+    size: safeNumber(node?.size, 1),
+    tier,
+    importanceScore,
+    nodeSize,
+    internalCitations
   };
 }
 
@@ -141,6 +160,12 @@ function buildQueryNode(query) {
 }
 
 function sortByRelevance(left, right) {
+  const leftTier = toSafeTier(left?.tier ?? 3);
+  const rightTier = toSafeTier(right?.tier ?? 3);
+  if (leftTier !== rightTier) return leftTier - rightTier;
+  if ((right.importanceScore || 0) !== (left.importanceScore || 0)) {
+    return (right.importanceScore || 0) - (left.importanceScore || 0);
+  }
   if (right.relevance !== left.relevance) return right.relevance - left.relevance;
   if ((right.citationCount || 0) !== (left.citationCount || 0)) {
     return (right.citationCount || 0) - (left.citationCount || 0);
@@ -166,7 +191,7 @@ function pickPaperPeerEdges(rawEdges, selectedPaperIds) {
     .slice(0, MAX_PAPER_RELATED_EDGES);
 }
 
-function buildPaperGraph(nodesRaw, edgesRaw, query) {
+function buildPaperGraph(nodesRaw, edgesRaw, query, summary = '') {
   const papers = nodesRaw
     .filter((node) => node?.type === 'paper')
     .map((node) => normalizePaperNode(node, query))
@@ -198,6 +223,7 @@ function buildPaperGraph(nodesRaw, edgesRaw, query) {
     key: 'paper',
     title: '论文知识图谱',
     description: '以检索输入为中心，边越深表示论文关联度越高，节点距离越近。',
+    summary: String(summary || '').trim(),
     centerNodeId: QUERY_NODE_ID,
     nodes,
     edges,
@@ -276,7 +302,7 @@ function buildDomainPeerEdges(domains) {
     .slice(0, MAX_DOMAIN_RELATED_EDGES);
 }
 
-function buildDomainGraph(nodesRaw, edgesRaw, query) {
+function buildDomainGraph(nodesRaw, edgesRaw, query, summary = '') {
   const papers = nodesRaw
     .filter((node) => node?.type === 'paper')
     .map((node) => normalizePaperNode(node, query));
@@ -350,6 +376,7 @@ function buildDomainGraph(nodesRaw, edgesRaw, query) {
     key: 'domain',
     title: '领域知识图谱',
     description: '以检索输入为中心，边越深表示领域关联度越高，节点距离越近。',
+    summary: String(summary || '').trim(),
     centerNodeId: QUERY_NODE_ID,
     nodes,
     edges,
@@ -362,7 +389,7 @@ function buildDomainGraph(nodesRaw, edgesRaw, query) {
   };
 }
 
-function buildPanoramaGraph(nodesRaw, edgesRaw, query) {
+function buildPanoramaGraph(nodesRaw, edgesRaw, query, summary = '') {
   const papers = nodesRaw
     .filter((node) => node?.type === 'paper')
     .map((node) => normalizePaperNode(node, query))
@@ -407,6 +434,7 @@ function buildPanoramaGraph(nodesRaw, edgesRaw, query) {
     key: 'panorama',
     title: '全景论文知识图谱',
     description: '展示与种子论文强相关、并由其延伸出的论文网络。',
+    summary: String(summary || '').trim(),
     centerNodeId: QUERY_NODE_ID,
     nodes,
     edges,
@@ -444,7 +472,7 @@ function normalizeFullEdge(edge, index, nodeIds) {
   };
 }
 
-function buildFullGraph(nodesRaw, edgesRaw, query) {
+function buildFullGraph(nodesRaw, edgesRaw, query, summary = '') {
   const nodes = nodesRaw.map((node) => normalizeFullNode(node, query));
   const nodeIds = new Set(nodes.map((node) => String(node?.id || '')).filter(Boolean));
   const edges = (edgesRaw || [])
@@ -459,6 +487,7 @@ function buildFullGraph(nodesRaw, edgesRaw, query) {
     key: 'full',
     title: '全量知识图谱',
     description: '展示后端构建的完整节点与关系网络。',
+    summary: String(summary || '').trim(),
     centerNodeId: QUERY_NODE_ID,
     nodes,
     edges,
@@ -476,11 +505,12 @@ export function buildKnowledgeGraphSets(rawGraph) {
   const nodesRaw = Array.isArray(rawGraph?.nodes) ? rawGraph.nodes : [];
   const edgesRaw = Array.isArray(rawGraph?.edges) ? rawGraph.edges : [];
   const query = String(rawGraph?.query || '').trim();
+  const summary = String(rawGraph?.summary || rawGraph?.aha?.summary || '').trim();
 
   return {
-    panorama: buildPanoramaGraph(nodesRaw, edgesRaw, query),
-    full: buildFullGraph(nodesRaw, edgesRaw, query),
-    paper: buildPaperGraph(nodesRaw, edgesRaw, query),
-    domain: buildDomainGraph(nodesRaw, edgesRaw, query)
+    panorama: buildPanoramaGraph(nodesRaw, edgesRaw, query, summary),
+    full: buildFullGraph(nodesRaw, edgesRaw, query, summary),
+    paper: buildPaperGraph(nodesRaw, edgesRaw, query, summary),
+    domain: buildDomainGraph(nodesRaw, edgesRaw, query, summary)
   };
 }

@@ -127,7 +127,11 @@
                   <span class="workflow-report-streaming-track" aria-hidden="true"></span>
                 </div>
                 <div v-if="hasInsightReport" class="workflow-report-markdown-block">
-                  <pre v-if="insightRestContent" class="workflow-report-markdown">{{ insightRestContent }}</pre>
+                  <div
+                    v-if="insightRestHtml"
+                    class="workflow-report-markdown report-markdown"
+                    v-html="insightRestHtml"
+                  ></div>
                 </div>
                 <div
                   v-else
@@ -177,6 +181,7 @@ import KnowledgeGraphView from '../components/graph/KnowledgeGraphView.vue';
 import PaperWorkflowPanel from '../components/workflow/PaperWorkflowPanel.vue';
 import { usePaperWorkflow } from '../composables/usePaperWorkflow';
 import { useAuthStore } from '../stores/authStore';
+import { renderReportMarkdown, toReportHeadline } from '../utils/reportMarkdown';
 
 const props = defineProps({
   seed: {
@@ -222,11 +227,7 @@ const {
 });
 
 const insightFirstLine = computed(() => {
-  const text = String(insightReportMarkdown.value || '');
-  if (!text) return '';
-  const firstBreak = text.indexOf('\n');
-  if (firstBreak < 0) return text;
-  return text.slice(0, firstBreak);
+  return toReportHeadline(insightReportMarkdown.value);
 });
 
 const insightRestContent = computed(() => {
@@ -236,6 +237,7 @@ const insightRestContent = computed(() => {
   if (firstBreak < 0) return '';
   return text.slice(firstBreak + 1);
 });
+const insightRestHtml = computed(() => renderReportMarkdown(insightRestContent.value));
 
 const insightStep = computed(() => steps.value.find((item) => String(item?.key || '').trim() === 'insight') || null);
 const insightStepStatus = computed(() => String(insightStep.value?.status || '').trim().toLowerCase());
@@ -520,13 +522,7 @@ watch(
 }
 
 .workflow-report-markdown {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 12px;
-  line-height: 1.55;
-  color: var(--text);
+  min-width: 0;
 }
 
 .workflow-report-streaming-banner {

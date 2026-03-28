@@ -34,6 +34,11 @@ from models.schemas import (
     RetrievalTraceStep,
 )
 from repositories.neo4j_repository import Neo4jRepository, get_neo4j_repository
+from services.node_scorer import (
+    build_aha_summary,
+    compute_internal_citations_from_papers,
+    score_paper_nodes,
+)
 from services.retrieval.multi_source_retriever import MultiSourceRetriever
 
 logger = logging.getLogger(__name__)
@@ -100,7 +105,7 @@ class GraphRAGService:
             papers = retrieval_payload["selected_papers"]
 
         build_start = perf_counter()
-        paper_nodes, entity_nodes, domain_nodes, edges = self._build_graph_components(
+        paper_nodes, entity_nodes, domain_nodes, edges, graph_insight = self._build_graph_components(
             papers=papers,
             max_entities_per_paper=request.max_entities_per_paper,
             query=request.query,
@@ -151,6 +156,7 @@ class GraphRAGService:
             domain_count=len(domain_nodes),
             edge_count=len(edges),
             stored=stored,
+            aha_summary=str((graph_insight or {}).get("summary") or ""),
         )
 
         return KnowledgeGraphResponse(
@@ -2260,7 +2266,13 @@ class GraphRAGService:
         papers: list[dict[str, Any]],
         max_entities_per_paper: int,
         query: str,
-    ) -> tuple[list[KnowledgeGraphNode], list[KnowledgeGraphNode], list[KnowledgeGraphNode], list[KnowledgeGraphEdge]]:
+    ) -> tuple[
+        list[KnowledgeGraphNode],
+        list[KnowledgeGraphNode],
+        list[KnowledgeGraphNode],
+        list[KnowledgeGraphEdge],
+        dict[str, Any],
+    ]:
         normalized_papers: list[dict[str, Any]] = []
         for paper in papers:
             normalized = self._normalize_retrieved_paper(paper)
@@ -2271,10 +2283,11 @@ class GraphRAGService:
             normalized_papers.append(normalized)
 
         if not normalized_papers:
-            return [], [], [], []
+            return [], [], [], [], {"summary": build_aha_summary(query, [])}
 
         # Try enriching citation relations so "引用关系得分" can be computed from real graph links.
         self._attach_relation_ids(normalized_papers)
+        internal_citations_by_id = compute_internal_citations_from_papers(normalized_papers)
 
         seed_paper = normalized_papers[0]
         seed_paper_id = str(seed_paper.get("paper_id") or "")
@@ -2302,13 +2315,14 @@ class GraphRAGService:
                 continue
 
             citation_count = self._safe_int(paper.get("citation_count"))
+            year_value = self._safe_int(paper.get("year"))
             influence = min(1.0, citation_count / max_citation_count)
             publication_month = self._extract_publication_month(paper)
             authors_text = self._format_authors(paper.get("authors") or [])
             abstract_text = self._normalize_abstract_text(paper.get("abstract"))
             keywords = self._extract_keywords(paper=paper)
             impact_factor, quartile = self._estimate_impact_metrics(citation_count, influence)
-            size = 5.0 + min(16.0, math.log1p(citation_count + 1) * 2.2)
+            base_size = 5.0 + min(16.0, math.log1p(citation_count + 1) * 2.2)
 
             extracted_entities = self._extract_entities(
                 title=title,
@@ -2340,15 +2354,18 @@ class GraphRAGService:
                     "keywords": keywords,
                     "impact_factor": impact_factor,
                     "quartile": quartile,
-                    "size": size,
+                    "base_size": base_size,
                     "venue": str(paper.get("venue") or "Unknown Venue"),
-                    "year": str(paper.get("year") or ""),
+                    "year": year_value,
                     "url": str(paper.get("url") or ""),
                     "concepts": concept_names,
+                    "internal_citations": self._safe_int(internal_citations_by_id.get(paper_id)),
                 }
             )
 
         seed_concepts = paper_entities.get(seed_paper_id, set())
+        scored_papers_payload: list[dict[str, Any]] = []
+        score_payload_by_id: dict[str, dict[str, float]] = {}
         paper_nodes: list[KnowledgeGraphNode] = []
         for record in paper_records:
             paper_id = record["paper_id"]
@@ -2368,17 +2385,53 @@ class GraphRAGService:
                 concept_score = self._concept_overlap_score(seed_concepts, record["concepts"])
                 relevance = max(0.0, min(1.0, citation_score * 0.5 + semantic_score * 0.3 + concept_score * 0.2))
 
+            score_payload_by_id[paper_id] = {
+                "citation_relation_score": citation_score,
+                "semantic_similarity_score": semantic_score,
+                "concept_overlap_score": concept_score,
+                "relevance": relevance,
+            }
+            scored_papers_payload.append(
+                {
+                    "id": paper_id,
+                    "title": record["title"],
+                    "citation_count": record["citation_count"],
+                    "year": record["year"],
+                    "internal_citations": record["internal_citations"],
+                    "query_relevance": relevance,
+                    "semantic_score": semantic_score,
+                }
+            )
+
+        scored_papers = score_paper_nodes(scored_papers_payload, max_tier1=3)
+        scored_by_id = {
+            str(item.get("id") or ""): item
+            for item in scored_papers
+        }
+        graph_summary = self._build_aha_summary_with_llm(query, scored_papers)
+
+        for record in paper_records:
+            paper_id = record["paper_id"]
+            score_payload = score_payload_by_id.get(paper_id) or {}
+            scored = scored_by_id.get(paper_id) or {}
+
+            importance_score = max(0.0, min(100.0, float(scored.get("importance_score", 0.0))))
+            tier = int(scored.get("tier", 3) or 3)
+            node_size = max(12.0, float(scored.get("node_size", record["base_size"])))
+            node_color_weight = max(0.0, min(1.0, float(scored.get("node_color_weight", importance_score / 100.0))))
+            relevance = max(0.0, min(1.0, float(score_payload.get("relevance", 0.0))))
+
             paper_nodes.append(
                 KnowledgeGraphNode(
                     id=f"paper:{paper_id}",
                     paper_id=paper_id,
                     label=record["title"],
                     type="paper",
-                    size=round(record["size"], 2),
-                    score=round(min(1.0, record["citation_count"] / 500.0), 3),
+                    size=round(node_size, 2),
+                    score=round(max(0.0, min(1.0, importance_score / 100.0)), 3),
                     meta={
                         "title": record["title"],
-                        "year": record["year"],
+                        "year": str(record["year"]),
                         "venue": record["venue"],
                         "url": record["url"],
                         "authors": record["authors_text"],
@@ -2390,9 +2443,14 @@ class GraphRAGService:
                         "citation_count": str(record["citation_count"]),
                         "relevance": f"{relevance:.3f}",
                         "influence": f"{record['influence']:.3f}",
-                        "citation_relation_score": f"{citation_score:.3f}",
-                        "semantic_similarity_score": f"{semantic_score:.3f}",
-                        "concept_overlap_score": f"{concept_score:.3f}",
+                        "citation_relation_score": f"{float(score_payload.get('citation_relation_score', 0.0)):.3f}",
+                        "semantic_similarity_score": f"{float(score_payload.get('semantic_similarity_score', 0.0)):.3f}",
+                        "concept_overlap_score": f"{float(score_payload.get('concept_overlap_score', 0.0)):.3f}",
+                        "internal_citations": str(record["internal_citations"]),
+                        "importance_score": f"{importance_score:.1f}",
+                        "tier": str(max(1, min(3, tier))),
+                        "node_size": f"{node_size:.1f}",
+                        "node_color_weight": f"{node_color_weight:.3f}",
                     },
                 )
             )
@@ -2406,7 +2464,126 @@ class GraphRAGService:
             paper_domains=paper_domains,
             domain_entities=domain_entities,
         )
-        return paper_nodes, entity_nodes, domain_nodes, edges
+        insight_payload = {
+            "summary": graph_summary,
+            "tier_counts": {
+                "tier1": sum(1 for item in scored_papers if int(item.get("tier", 3)) == 1),
+                "tier2": sum(1 for item in scored_papers if int(item.get("tier", 3)) == 2),
+                "tier3": sum(1 for item in scored_papers if int(item.get("tier", 3)) == 3),
+            },
+        }
+        return paper_nodes, entity_nodes, domain_nodes, edges, insight_payload
+
+    def _build_aha_summary_with_llm(self, query: str, papers: list[dict[str, Any]]) -> str:
+        fallback_summary = build_aha_summary(query, papers)
+        safe_query = re.sub(r"\s+", " ", str(query or "").strip())
+        if not safe_query or not papers or not is_configured():
+            return fallback_summary
+
+        def _to_float(value: Any, fallback: float = 0.0) -> float:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return fallback
+
+        ranked: list[dict[str, Any]] = []
+        for paper in papers:
+            title = re.sub(r"\s+", " ", str(paper.get("title") or "").strip())
+            if not title:
+                continue
+            raw_tier = self._safe_int(paper.get("tier"))
+            tier = raw_tier if raw_tier in (1, 2, 3) else 3
+            ranked.append(
+                {
+                    "title": title,
+                    "tier": tier,
+                    "importance_score": _to_float(paper.get("importance_score")),
+                    "query_relevance": _to_float(
+                        paper.get("query_relevance", paper.get("relevance", 0.0))
+                    ),
+                    "citation_count": self._safe_int(paper.get("citation_count")),
+                    "year": self._safe_int(paper.get("year")),
+                }
+            )
+        if not ranked:
+            return fallback_summary
+
+        ranked.sort(
+            key=lambda item: (
+                int(item["tier"]),
+                -float(item["importance_score"]),
+                -float(item["query_relevance"]),
+                -int(item["citation_count"]),
+                -int(item["year"]),
+            )
+        )
+
+        core_candidates = [item for item in ranked if int(item["tier"]) == 1] or ranked
+        core_titles = [str(item["title"]) for item in core_candidates[:3]]
+        core_keys = {title.lower() for title in core_titles}
+
+        branch_candidates = [
+            item
+            for item in ranked
+            if int(item["tier"]) == 2 and str(item["title"]).lower() not in core_keys
+        ]
+        if not branch_candidates:
+            branch_candidates = [item for item in ranked if str(item["title"]).lower() not in core_keys]
+        branch_titles = [str(item["title"]) for item in branch_candidates[:5]]
+
+        core_text = "\n".join(f"- {title}" for title in core_titles) or "- 无"
+        branch_text = "\n".join(f"- {title}" for title in branch_titles) or "- 无"
+        prompt = (
+            "你是科研分析助手。\n"
+            "请根据以下信息生成一句中文领域摘要。\n\n"
+            f"用户研究主题：{safe_query}\n\n"
+            "核心论文（按重要性排序）：\n"
+            f"{core_text}\n\n"
+            "关键分支论文：\n"
+            f"{branch_text}\n\n"
+            "要求：\n"
+            "1) 只输出一句中文，不超过 60 字。\n"
+            "2) 不要逐字重复论文标题，要提炼核心脉络与趋势。\n"
+            "3) 不要输出前缀、编号、引号或解释。"
+        )
+        try:
+            response = chat(
+                [{"role": "user", "content": prompt}],
+                max_tokens=120,
+                temperature=0.15,
+                timeout=25,
+            )
+            raw_summary = str(response.choices[0].message.content or "").strip()
+            normalized_summary = self._sanitize_aha_summary(raw_summary)
+            return normalized_summary or fallback_summary
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("aha summary with llm failed, fallback to deterministic summary: %s", exc)
+            return fallback_summary
+
+    @staticmethod
+    def _sanitize_aha_summary(raw_summary: str) -> str:
+        text = str(raw_summary or "").strip()
+        if not text:
+            return ""
+        if text.startswith("```"):
+            text = re.sub(
+                r"^```(?:text|markdown|md)?\s*|\s*```$",
+                "",
+                text,
+                flags=re.IGNORECASE | re.DOTALL,
+            ).strip()
+        text = re.split(r"[\r\n]+", text, maxsplit=1)[0].strip()
+        text = re.sub(r"^[\-\*\d\.\)\s]+", "", text)
+        text = re.sub(r"^(一句话摘要|摘要|总结)[:：]\s*", "", text)
+        text = re.sub(r"^[\"'“”‘’`]+|[\"'“”‘’`]+$", "", text).strip()
+        text = re.sub(r"\s+", " ", text)
+        if len(text) > 60:
+            text = text[:60].rstrip("，,；;、:：")
+        if len(text) < 6:
+            return ""
+        if text and text[-1] not in "。！？!?":
+            text = f"{text}。"
+        return text
 
     def _extract_entities(self, title: str, abstract: str, max_entities: int) -> list[tuple[str, str, float]]:
         text = f"{title}. {abstract}".strip()
@@ -2950,8 +3127,16 @@ class GraphRAGService:
         domain_count: int,
         edge_count: int,
         stored: bool,
+        aha_summary: str = "",
     ) -> str:
         store_text = "已写入 Neo4j" if stored else "Neo4j 当前不可用，结果仅返回前端"
+        primary = str(aha_summary or "").strip()
+        if primary:
+            return (
+                f"{primary} "
+                f"（图谱含 {paper_count} 篇论文、{entity_count} 个实体、{domain_count} 个领域、"
+                f"{edge_count} 条关系；{store_text}。）"
+            )
         return (
             f"围绕检索词“{query}”抓取 {paper_count} 篇论文，抽取 {entity_count} 个实体、"
             f"{domain_count} 个领域节点，构建 {edge_count} 条关系；{store_text}。"

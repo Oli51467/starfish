@@ -1,6 +1,11 @@
 <template>
   <section class="seed-workspace home-two-layer" :class="{ 'is-started': isInputVisible }">
-    <WorkflowShowcase :steps="workflowSteps" :started="isInputVisible" @start="handleStartClick" />
+    <WorkflowShowcase
+      :steps="workflowSteps"
+      :started="isInputVisible"
+      :auto-start="canUseFeatures"
+      @start="handleStartClick"
+    />
 
     <form v-if="isInputVisible && canUseFeatures" class="seed-input-shell panel" @submit.prevent="startAnalysis()">
       <div class="seed-input-row">

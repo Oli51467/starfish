@@ -631,6 +631,25 @@
   background: #EEF2F6;
 }
 
+.paper-node-icon-btn {
+  width: 30px;
+  min-width: 30px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.paper-node-action-icon {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .knowledge-legend-title {
   margin: 0;
   font-size: 10px;
@@ -1054,6 +1073,22 @@
 
 .paper-node-action-btn:hover {
   background: #f5f5f5;
+}
+
+.paper-node-icon-btn {
+  width: 30px;
+  min-width: 30px;
+  padding: 0;
+}
+
+.paper-node-action-icon {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .paper-node-star-btn {
@@ -1648,11 +1683,19 @@ html[data-ui-locale='zh'] .workflow-tagline-typing {
 .workflow-actions {
   display: flex;
   justify-content: center;
+  position: relative;
   overflow: hidden;
   max-height: 56px;
   opacity: 1;
   transform: translateY(0);
   transition: max-height 0.42s ease, opacity 0.3s ease, transform 0.35s ease;
+}
+
+.workflow-start-wrap {
+  position: relative;
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
 }
 
 .workflow-shell.is-collapsed .workflow-head {
@@ -1661,6 +1704,77 @@ html[data-ui-locale='zh'] .workflow-tagline-typing {
 
 .workflow-start-btn {
   min-width: 94px;
+  position: relative;
+}
+
+.workflow-start-btn.is-auto-clicking {
+  transform: scale(0.96);
+}
+
+.workflow-start-btn.is-auto-clicking::after {
+  content: '';
+  position: absolute;
+  inset: -7px;
+  border: 1px solid color-mix(in oklab, var(--accent) 44%, transparent);
+  border-radius: inherit;
+  animation: workflowAutoClickPulse 0.5s ease-out both;
+}
+
+.workflow-guide-hand {
+  position: fixed;
+  left: var(--guide-hand-start-x, calc(100vw - 60px));
+  top: var(--guide-hand-start-y, calc(100vh - 60px));
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  background: var(--bg);
+  color: color-mix(in srgb, var(--text) 78%, var(--accent) 22%);
+  box-shadow: var(--shadow-soft);
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  opacity: 0;
+  transform: translate3d(0, 0, 0) scale(0.93);
+  transition: opacity 0.2s ease, transform 0.64s cubic-bezier(0.22, 0.82, 0.3, 1);
+  z-index: 9999;
+  will-change: transform, opacity;
+}
+
+.workflow-guide-hand::after {
+  content: '';
+  position: absolute;
+  inset: -6px;
+  border-radius: inherit;
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--line-2));
+  opacity: 0;
+  transform: scale(0.9);
+}
+
+.workflow-guide-hand.is-moving {
+  opacity: 1;
+  transform: translate3d(
+    var(--guide-hand-delta-x, -120px),
+    var(--guide-hand-delta-y, -120px),
+    0
+  ) scale(1);
+}
+
+.workflow-guide-hand.is-tapping::after {
+  animation: workflowGuideTapRipple 0.44s ease-out;
+}
+
+.workflow-guide-hand.is-tapping .workflow-guide-hand-icon {
+  animation: workflowHandTap 0.36s ease-in-out;
+}
+
+.workflow-guide-hand-icon {
+  width: 19px;
+  height: 19px;
+  stroke: currentColor;
+  stroke-width: 1.55;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .workflow-shell.is-collapsed .workflow-sequence,
@@ -1707,6 +1821,41 @@ html[data-ui-locale='zh'] .workflow-tagline-typing {
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes workflowHandTap {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+
+  50% {
+    transform: translateY(2px) scale(0.97);
+  }
+}
+
+@keyframes workflowGuideTapRipple {
+  0% {
+    opacity: 0.75;
+    transform: scale(0.9);
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(1.2);
+  }
+}
+
+@keyframes workflowAutoClickPulse {
+  0% {
+    opacity: 0.9;
+    transform: scale(0.92);
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(1.08);
   }
 }
 
@@ -1807,8 +1956,24 @@ html[data-ui-locale='zh'] .workflow-tagline-typing {
     justify-content: stretch;
   }
 
+  .workflow-start-wrap {
+    width: 100%;
+  }
+
   .workflow-start-btn {
     width: 100%;
+  }
+
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workflow-guide-hand {
+    transition: none;
+  }
+
+  .workflow-start-btn.is-auto-clicking::after {
+    animation: none;
+    opacity: 0;
   }
 }
 

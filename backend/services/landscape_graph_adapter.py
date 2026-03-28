@@ -3,6 +3,12 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from services.node_scorer import (
+    build_aha_summary,
+    compute_internal_citations_from_edges,
+    score_paper_nodes,
+)
+
 
 def _slug(text: str) -> str:
     value = re.sub(r"[^a-z0-9]+", "-", str(text or "").strip().lower()).strip("-")
@@ -174,11 +180,66 @@ def build_landscape_graph(
                 }
             )
 
+    all_node_ids = [str(node.get("id") or "").strip() for node in nodes.values() if str(node.get("id") or "").strip()]
+    internal_citations = compute_internal_citations_from_edges(all_node_ids, edges)
+    scored_payload: list[dict[str, Any]] = []
+    for node in nodes.values():
+        if str(node.get("kind") or "").strip().lower() != "paper":
+            continue
+        meta = node.get("meta") if isinstance(node.get("meta"), dict) else {}
+        scored_payload.append(
+            {
+                "id": str(node.get("id") or "").strip(),
+                "title": str(node.get("label") or node.get("name") or "").strip(),
+                "citation_count": _safe_int(meta.get("citation_count")),
+                "year": _safe_int(meta.get("year")),
+                "internal_citations": _safe_int(internal_citations.get(str(node.get("id") or "").strip())),
+                "query_relevance": max(0.0, min(_safe_float(node.get("relevance")), 1.0)),
+            }
+        )
+
+    scored_papers = score_paper_nodes(scored_payload, max_tier1=3)
+    scored_by_id = {
+        str(item.get("id") or ""): item
+        for item in scored_papers
+    }
+    for node_id, scored in scored_by_id.items():
+        node = nodes.get(node_id)
+        if not isinstance(node, dict):
+            continue
+        meta = node.get("meta") if isinstance(node.get("meta"), dict) else {}
+        importance = max(0.0, min(_safe_float(scored.get("importance_score")), 100.0))
+        tier = max(1, min(3, _safe_int(scored.get("tier"), 3) or 3))
+        node_size = max(16.0, _safe_float(scored.get("node_size"), _safe_float(node.get("size"), 20.0)))
+        color_weight = max(0.0, min(_safe_float(scored.get("node_color_weight"), importance / 100.0), 1.0))
+
+        node["tier"] = tier
+        node["size"] = round(node_size, 2)
+        node["score"] = round(max(0.0, min(1.0, importance / 100.0)), 3)
+        node["meta"] = {
+            **meta,
+            "importance_score": f"{importance:.1f}",
+            "tier": str(tier),
+            "node_size": f"{node_size:.1f}",
+            "node_color_weight": f"{color_weight:.3f}",
+            "internal_citations": str(_safe_int(scored.get("internal_citations"))),
+        }
+
+    summary = build_aha_summary(raw_query or domain_name, scored_papers)
     domain_count = sum(1 for node in nodes.values() if node.get("kind") == "domain")
     return {
         "title": f"{domain_name} 领域图谱",
+        "summary": summary,
         "nodes": list(nodes.values()),
         "edges": edges,
+        "aha": {
+            "summary": summary,
+            "tier_counts": {
+                "tier1": sum(1 for item in scored_papers if _safe_int(item.get("tier"), 3) == 1),
+                "tier2": sum(1 for item in scored_papers if _safe_int(item.get("tier"), 3) == 2),
+                "tier3": sum(1 for item in scored_papers if _safe_int(item.get("tier"), 3) == 3),
+            },
+        },
         "counts": {
             "seed": 1,
             "domain": domain_count,

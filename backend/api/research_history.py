@@ -52,6 +52,129 @@ def _resolve_history_artifact_raw_path(insight: dict, *, key: str) -> Path | Non
     return Path(raw_path)
 
 
+def _resolve_history_markdown(
+    payload: ResearchHistoryDetailResponse,
+    insight: dict,
+) -> tuple[str, dict]:
+    pipeline = payload.pipeline if isinstance(payload.pipeline, dict) else {}
+    markdown_path = _resolve_history_artifact_path(insight, key="markdown_path")
+    markdown = ""
+    if markdown_path is not None:
+        try:
+            markdown = markdown_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            markdown = ""
+    if not markdown:
+        markdown = str(insight.get("markdown") or "").strip()
+    if not markdown:
+        markdown = str(pipeline.get("final_report") or "").strip()
+    return markdown, pipeline
+
+
+def _resolve_history_language(insight: dict) -> str:
+    language = str(insight.get("language") or "").strip().lower()
+    if language not in {"zh", "en"}:
+        return "zh"
+    return language
+
+
+def _resolve_history_target_pdf_path(
+    *,
+    history_id: str,
+    insight: dict,
+    insight_service: InsightExplorationService,
+) -> Path:
+    raw_pdf_path = _resolve_history_artifact_raw_path(insight, key="pdf_path")
+    if raw_pdf_path is not None:
+        return raw_pdf_path
+    raw_markdown_path = _resolve_history_artifact_raw_path(insight, key="markdown_path")
+    if raw_markdown_path is not None:
+        return raw_markdown_path.with_suffix(".pdf")
+    return insight_service.report_root / f"history-{history_id}" / "insight.pdf"
+
+
+def _persist_history_pdf_path(
+    *,
+    history_id: str,
+    user: UserProfile,
+    history_service: ResearchHistoryService,
+    pipeline: dict,
+    insight: dict,
+    markdown: str,
+    language: str,
+    pdf_path: Path,
+    strict: bool,
+) -> None:
+    existing_artifact = insight.get("artifact") if isinstance(insight.get("artifact"), dict) else {}
+    updated_artifact = dict(existing_artifact)
+    updated_artifact["pdf_path"] = str(pdf_path)
+
+    updated_insight = dict(insight)
+    updated_insight["artifact"] = updated_artifact
+    if not str(updated_insight.get("language") or "").strip():
+        updated_insight["language"] = language
+    if not str(updated_insight.get("markdown") or "").strip():
+        updated_insight["markdown"] = markdown
+    updated_insight["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    updated_pipeline = dict(pipeline)
+    updated_pipeline["insight"] = updated_insight
+    persisted = history_service.update_pipeline_payload(
+        user=user,
+        history_id=history_id,
+        pipeline_payload=updated_pipeline,
+    )
+    if strict and not persisted:
+        raise HTTPException(status_code=500, detail="insight_pdf_path_persist_failed")
+
+
+def _regenerate_history_pdf(
+    *,
+    history_id: str,
+    user: UserProfile,
+    payload: ResearchHistoryDetailResponse,
+    insight: dict,
+    history_service: ResearchHistoryService,
+    insight_service: InsightExplorationService,
+    strict_persist: bool,
+) -> Path:
+    markdown, pipeline = _resolve_history_markdown(payload, insight)
+    if not markdown:
+        raise HTTPException(status_code=404, detail="insight_markdown_not_ready")
+
+    language = _resolve_history_language(insight)
+    target_pdf_path = _resolve_history_target_pdf_path(
+        history_id=history_id,
+        insight=insight,
+        insight_service=insight_service,
+    )
+    try:
+        regenerated_pdf_path = insight_service.render_markdown_pdf(
+            markdown=markdown,
+            pdf_path=target_pdf_path,
+            language=language,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail="insight_pdf_regenerate_failed") from exc
+
+    _persist_history_pdf_path(
+        history_id=history_id,
+        user=user,
+        history_service=history_service,
+        pipeline=pipeline,
+        insight=insight,
+        markdown=markdown,
+        language=language,
+        pdf_path=regenerated_pdf_path,
+        strict=strict_persist,
+    )
+    return regenerated_pdf_path
+
+
 @router.get("", response_model=ResearchHistoryListResponse)
 def list_research_history(
     page: int = Query(default=1, ge=1),
@@ -127,6 +250,7 @@ def download_research_history_pdf(
     history_id: str,
     user: UserProfile = Depends(get_current_user_profile),
     history_service: ResearchHistoryService = Depends(get_research_history_service),
+    insight_service: InsightExplorationService = Depends(get_insight_exploration_service),
 ) -> FileResponse:
     payload = history_service.get_history_detail(user=user, history_id=history_id)
     if payload is None:
@@ -135,7 +259,15 @@ def download_research_history_pdf(
     insight = _resolve_history_insight_payload(payload)
     pdf_path = _resolve_history_artifact_path(insight, key="pdf_path")
     if pdf_path is None:
-        raise HTTPException(status_code=404, detail="insight_pdf_not_ready")
+        pdf_path = _regenerate_history_pdf(
+            history_id=history_id,
+            user=user,
+            payload=payload,
+            insight=insight,
+            history_service=history_service,
+            insight_service=insight_service,
+            strict_persist=False,
+        )
 
     return FileResponse(
         path=str(pdf_path),
@@ -156,69 +288,15 @@ def regenerate_research_history_pdf(
         raise HTTPException(status_code=404, detail="research_history_not_found")
 
     insight = _resolve_history_insight_payload(payload)
-    pipeline = payload.pipeline if isinstance(payload.pipeline, dict) else {}
-    markdown_path = _resolve_history_artifact_path(insight, key="markdown_path")
-    markdown = ""
-    if markdown_path is not None:
-        try:
-            markdown = markdown_path.read_text(encoding="utf-8").strip()
-        except OSError:
-            markdown = ""
-    if not markdown:
-        markdown = str(insight.get("markdown") or "").strip()
-    if not markdown:
-        markdown = str(pipeline.get("final_report") or "").strip()
-    if not markdown:
-        raise HTTPException(status_code=404, detail="insight_markdown_not_ready")
-
-    language = str(insight.get("language") or "").strip().lower()
-    if language not in {"zh", "en"}:
-        language = "zh"
-
-    raw_pdf_path = _resolve_history_artifact_raw_path(insight, key="pdf_path")
-    if raw_pdf_path is not None:
-        target_pdf_path = raw_pdf_path
-    else:
-        raw_markdown_path = _resolve_history_artifact_raw_path(insight, key="markdown_path")
-        if raw_markdown_path is not None:
-            target_pdf_path = raw_markdown_path.with_suffix(".pdf")
-        else:
-            target_pdf_path = insight_service.report_root / f"history-{history_id}" / "insight.pdf"
-
-    try:
-        regenerated_pdf_path = insight_service.render_markdown_pdf(
-            markdown=markdown,
-            pdf_path=target_pdf_path,
-            language=language,
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail="insight_pdf_regenerate_failed") from exc
-
-    existing_artifact = insight.get("artifact") if isinstance(insight.get("artifact"), dict) else {}
-    updated_artifact = dict(existing_artifact)
-    updated_artifact["pdf_path"] = str(regenerated_pdf_path)
-
-    updated_insight = dict(insight)
-    updated_insight["artifact"] = updated_artifact
-    if not str(updated_insight.get("language") or "").strip():
-        updated_insight["language"] = language
-    if not str(updated_insight.get("markdown") or "").strip():
-        updated_insight["markdown"] = markdown
-    updated_insight["updated_at"] = datetime.now(timezone.utc).isoformat()
-
-    updated_pipeline = dict(pipeline)
-    updated_pipeline["insight"] = updated_insight
-    persisted = history_service.update_pipeline_payload(
-        user=user,
+    regenerated_pdf_path = _regenerate_history_pdf(
         history_id=history_id,
-        pipeline_payload=updated_pipeline,
+        user=user,
+        payload=payload,
+        insight=insight,
+        history_service=history_service,
+        insight_service=insight_service,
+        strict_persist=True,
     )
-    if not persisted:
-        raise HTTPException(status_code=500, detail="insight_pdf_path_persist_failed")
 
     return ResearchHistoryReportRegenerateResponse(
         history_id=history_id,

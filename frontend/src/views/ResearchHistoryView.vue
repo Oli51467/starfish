@@ -280,7 +280,11 @@
                       </div>
                     </div>
                     <div class="history-report-markdown-block">
-                      <pre v-if="historyInsightRestContent" class="history-report-markdown">{{ historyInsightRestContent }}</pre>
+                      <div
+                        v-if="historyInsightRestHtml"
+                        class="history-report-markdown report-markdown"
+                        v-html="historyInsightRestHtml"
+                      ></div>
                     </div>
                   </div>
                 </section>
@@ -309,6 +313,7 @@ import { useGlobalConfirmDialog } from '../composables/useGlobalConfirmDialog';
 import { downloadResearchHistoryReport, getPaperSignalEvents, regenerateResearchHistoryReportPdf } from '../api';
 import { useAuthStore } from '../stores/authStore';
 import { useResearchHistoryStore } from '../stores/researchHistoryStore';
+import { renderReportMarkdown, toReportHeadline } from '../utils/reportMarkdown';
 
 const router = useRouter();
 const { accessToken, isAuthenticated, loadSession } = useAuthStore();
@@ -345,6 +350,7 @@ const historySignalLoading = ref(false);
 const historySignalErrorMessage = ref('');
 const historySignalPaperId = ref('');
 const activeHistoryId = computed(() => String(selectedDetail.value?.history_id || '').trim());
+const historyReportDownloadTitle = computed(() => String(selectedDetail.value?.search_record || '').trim());
 const selectedHistoryIdSet = computed(() => new Set(selectedHistoryIds.value));
 const selectedCount = computed(() => selectedHistoryIds.value.length);
 const currentPageHistoryIds = computed(() => {
@@ -392,11 +398,7 @@ const historyInsightMarkdown = computed(() => {
 });
 const historyHasInsightReport = computed(() => Boolean(historyInsightMarkdown.value));
 const historyInsightFirstLine = computed(() => {
-  const text = historyInsightMarkdown.value;
-  if (!text) return '';
-  const firstBreak = text.indexOf('\n');
-  if (firstBreak < 0) return text;
-  return text.slice(0, firstBreak);
+  return toReportHeadline(historyInsightMarkdown.value);
 });
 const historyInsightRestContent = computed(() => {
   const text = historyInsightMarkdown.value;
@@ -405,6 +407,7 @@ const historyInsightRestContent = computed(() => {
   if (firstBreak < 0) return '';
   return text.slice(firstBreak + 1);
 });
+const historyInsightRestHtml = computed(() => renderReportMarkdown(historyInsightRestContent.value));
 const showSignalPanel = computed(() => {
   const researchType = String(selectedDetail.value?.research_type || '').trim().toLowerCase();
   if (!selectedDetail.value) return false;
@@ -566,7 +569,10 @@ async function downloadHistoryInsightMarkdown() {
     await downloadResearchHistoryReport(
       safeHistoryId,
       'markdown',
-      { accessToken: accessToken.value }
+      {
+        accessToken: accessToken.value,
+        reportTitle: historyReportDownloadTitle.value
+      }
     );
   } catch (error) {
     errorMessage.value = error?.message || 'Markdown 下载失败。';
@@ -585,7 +591,10 @@ async function downloadHistoryInsightPdf() {
     await downloadResearchHistoryReport(
       safeHistoryId,
       'pdf',
-      { accessToken: accessToken.value }
+      {
+        accessToken: accessToken.value,
+        reportTitle: historyReportDownloadTitle.value
+      }
     );
   } catch (error) {
     errorMessage.value = error?.message || 'PDF 下载失败。';

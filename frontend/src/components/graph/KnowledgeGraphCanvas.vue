@@ -48,7 +48,11 @@
       </button>
     </div>
 
-    <div v-if="hasDirectionLegend" class="knowledge-legend-overlay" :class="{ 'is-collapsed': !isLegendVisible }">
+    <div
+      v-if="hasDirectionLegend"
+      class="knowledge-legend-overlay"
+      :class="{ 'is-collapsed': !isLegendVisible }"
+    >
       <div class="knowledge-legend-inline">
         <div v-show="isLegendVisible" class="knowledge-legend-content">
           <div
@@ -310,15 +314,49 @@
       <footer v-if="pinnedNodeDetail.isPaper" class="paper-node-actions">
         <a
           v-if="pinnedNodeDetail.url"
-          class="paper-node-action-btn"
+          class="paper-node-action-btn paper-node-icon-btn"
           :href="pinnedNodeDetail.url"
           target="_blank"
           rel="noreferrer noopener"
+          aria-label="查看详情"
+          title="查看详情"
         >
-          查看详情
+          <svg class="paper-node-action-icon" viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M6 3.2h6.8V10" />
+            <path d="M9.8 3.2h3v3" />
+            <path d="M8.8 7.2 12.8 3.2" />
+            <path d="M3.2 5.8v7h7" />
+          </svg>
         </a>
-        <button class="paper-node-action-btn" type="button" @click="exportCitation">
-          导出引用
+        <a
+          v-if="pinnedNodeDetail.pdfUrl"
+          class="paper-node-action-btn paper-node-icon-btn"
+          :href="pinnedNodeDetail.pdfUrl"
+          target="_blank"
+          rel="noreferrer noopener"
+          aria-label="下载 PDF"
+          title="下载 PDF"
+          download
+        >
+          <svg class="paper-node-action-icon" viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M8 2.6v6.2" />
+            <path d="M5.9 6.7 8 8.8l2.1-2.1" />
+            <path d="M3.2 11.5h9.6" />
+          </svg>
+        </a>
+        <button
+          class="paper-node-action-btn paper-node-icon-btn"
+          type="button"
+          aria-label="导出引用"
+          title="导出引用"
+          @click="exportCitation"
+        >
+          <svg class="paper-node-action-icon" viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M5.2 2.7h5.6v2.1H5.2z" />
+            <path d="M4.2 4.8h7.6v8.5H4.2z" />
+            <path d="M6.2 7.2h3.6" />
+            <path d="M6.2 9.1h3.6" />
+          </svg>
         </button>
         <button
           class="paper-node-action-btn paper-node-star-btn"
@@ -508,6 +546,30 @@ function buildColorContext(nodesRaw, edgesRaw) {
   return { domainPaletteById, paperDomainById };
 }
 
+function parsePaperTier(node) {
+  const parsed = Number(node?.tier ?? node?.meta?.tier);
+  if (!Number.isFinite(parsed)) return null;
+  const safeTier = Math.round(parsed);
+  if (safeTier < 1 || safeTier > 3) return null;
+  return safeTier;
+}
+
+function resolvePaperTier(node) {
+  return parsePaperTier(node) || 3;
+}
+
+function parseNodeImportance(node) {
+  const raw = Number(node?.importanceScore ?? node?.importance_score ?? node?.meta?.importance_score);
+  if (Number.isFinite(raw)) return clamp(raw, 0, 100);
+  return clamp(normalizeRate(node?.relevance ?? node?.score) * 100, 0, 100);
+}
+
+function parseNodeSizeHint(node) {
+  const raw = Number(node?.nodeSize ?? node?.node_size ?? node?.meta?.node_size ?? node?.size);
+  if (!Number.isFinite(raw)) return 0;
+  return raw;
+}
+
 function selectedPaperNodeIdsByDirection(colorContext, directionId) {
   const targetDirectionId = String(directionId || '').trim();
   if (!targetDirectionId) return new Set();
@@ -585,29 +647,41 @@ function isSingleSeedGraph(graphPayload) {
 }
 
 function nodeSize(node, totalNodes) {
-  const normalized = normalizeRate(node?.relevance ?? node?.score);
   if (node?.kind === 'seed') {
     return clamp(46 + totalNodes * 0.015, 46, 54);
   }
+  if (node?.kind === 'paper') {
+    const hinted = parseNodeSizeHint(node);
+    if (hinted > 0) return clamp(hinted, 16, 64);
+    const tier = resolvePaperTier(node);
+    const importance = parseNodeImportance(node) / 100;
+    const relevance = normalizeRate(node?.relevance ?? node?.score);
+    const base = tier === 1 ? 48 : (tier === 2 ? 34 : 22);
+    return clamp(base + importance * 6 + relevance * 3.5, 16, 64);
+  }
+  const normalized = normalizeRate(node?.relevance ?? node?.score);
   if (node?.kind === 'domain') {
     return clamp(15 + normalized * 8.2, 15, 23);
   }
   return clamp(13 + normalized * 8.2, 13, 21.5);
 }
 
-function shouldRenderNodeLabel(nodeKind, totalNodes, isSelectedNode) {
+function shouldRenderNodeLabel(node, totalNodes, isSelectedNode, isPinnedNode) {
+  const nodeKind = node?.kind || node?.type || '';
   if (nodeKind === 'seed' || nodeKind === 'domain') return true;
-  if (nodeKind !== 'paper') return false;
-  return true;
+  if (nodeKind === 'paper') return true;
+  return Boolean(isSelectedNode || isPinnedNode);
 }
 
-function nodeLabelLimit(nodeKind, totalNodes) {
+function nodeLabelLimit(nodeKind, totalNodes, tier = 3) {
   if (nodeKind === 'seed') return 26;
   if (nodeKind === 'domain') return 18;
   if (nodeKind === 'paper') {
+    if (tier === 1) return 34;
+    if (tier === 2) return 28;
     if (totalNodes > 170) return 24;
     if (totalNodes > 120) return 28;
-    return 34;
+    return 24;
   }
   return 0;
 }
@@ -642,45 +716,59 @@ function toG6Data(graphPayload) {
   const selectedPaperNodeIds = hasSelection
     ? selectedPaperNodeIdsByDirection(colorContext, selectedDomainId)
     : new Set();
+  const pinnedNodeId = String(pinnedNode.value?.id || '').trim();
 
   const nodes = nodesRaw.map((node) => {
     const kind = node.kind || node.type || 'paper';
     const palette = resolveNodePalette(node, colorContext);
     const size = nodeSize(node, totalNodes);
     const nodeId = String(node.id || '');
+    const tier = kind === 'paper' ? resolvePaperTier(node) : 3;
     const isSelectedNode = (
       (kind === 'domain' && nodeId === selectedDomainId)
       || (kind === 'paper' && selectedPaperNodeIds.has(nodeId))
     );
+    const isPinnedNode = pinnedNodeId && pinnedNodeId === nodeId;
     const isDimmedNode = hasSelection && kind !== 'seed' && !isSelectedNode;
-    const nodeOpacity = kind === 'seed' ? (hasSelection ? 0.6 : 1) : (isDimmedNode ? 0.16 : 1);
-    const showLabel = shouldRenderNodeLabel(kind, totalNodes, isSelectedNode);
+    const nodeOpacity = (
+      kind === 'seed'
+        ? (hasSelection ? 0.6 : 1)
+        : (isDimmedNode ? 0.16 : (kind === 'paper' && tier === 3 ? 0.68 : 1))
+    );
+    const showLabel = shouldRenderNodeLabel(node, totalNodes, isSelectedNode, isPinnedNode);
     const labelText = showLabel
-      ? shortLabel(node.name || node.label, nodeLabelLimit(kind, totalNodes))
+      ? shortLabel(node.name || node.label, nodeLabelLimit(kind, totalNodes, tier))
       : '';
+    const lineWidth = (
+      isSelectedNode
+        ? (kind === 'domain' ? 2.6 : 2.2)
+        : (kind === 'seed' ? 3.1 : (kind === 'domain' ? 1.45 : (tier === 1 ? 2.1 : (tier === 2 ? 1.45 : 1.1))))
+    );
+    const shadowBlur = isSelectedNode
+      ? 9
+      : (kind === 'seed' ? 10 : (tier === 1 ? 7 : 4));
     return {
       id: node.id,
       data: {
         ...node,
         nodeKind: kind,
         resolvedSize: size,
-        isSelectedNode
+        isSelectedNode,
+        tier
       },
       style: {
         size,
         fill: palette.fill,
         stroke: palette.stroke,
-        lineWidth: isSelectedNode
-          ? (kind === 'domain' ? 2.6 : 2.1)
-          : (kind === 'seed' ? 3.1 : (kind === 'domain' ? 1.45 : 1.2)),
-        shadowBlur: isSelectedNode ? 9 : (kind === 'seed' ? 10 : 4),
+        lineWidth,
+        shadowBlur,
         shadowColor: kind === 'seed' ? 'rgba(31, 119, 180, 0.36)' : 'rgba(0, 0, 0, 0.04)',
         label: showLabel,
         labelText,
         labelPlacement: 'bottom',
         labelOffsetY: kind === 'paper' ? 4 : 6,
-        labelFontSize: kind === 'seed' ? 12 : (kind === 'domain' ? 10 : 9),
-        labelFontWeight: kind === 'seed' ? 700 : 500,
+        labelFontSize: kind === 'seed' ? 12 : (kind === 'domain' ? 10 : (tier === 1 ? 11 : 9)),
+        labelFontWeight: kind === 'seed' ? 700 : (tier === 1 ? 600 : 500),
         labelFill: '#2f2f2f',
         labelBackground: false,
         cursor: 'pointer',
@@ -1249,16 +1337,25 @@ function computeFocusZoomTarget(nodeIds) {
 }
 
 async function focusDirectionNode(directionId) {
-  if (!graphInstance) return;
   const targetId = String(directionId || '').trim();
   if (!targetId) return;
   const focusIds = resolveDirectionFocusNodeIds(targetId);
   const focusTarget = focusIds.length ? focusIds : [targetId];
+  await focusNodeById(targetId, focusTarget);
+}
+
+async function focusNodeById(targetId, focusTarget = null) {
+  if (!graphInstance) return;
+  const safeTargetId = String(targetId || '').trim();
+  if (!safeTargetId) return;
+  const targetNodes = Array.isArray(focusTarget) && focusTarget.length
+    ? focusTarget
+    : [safeTargetId];
   try {
     if (graphInstance.focusElement) {
-      await graphInstance.focusElement(focusTarget, { duration: 260 });
+      await graphInstance.focusElement(targetNodes, { duration: 260 });
     } else {
-      const point = normalizePoint(graphInstance.getElementPosition?.(targetId));
+      const point = normalizePoint(graphInstance.getElementPosition?.(safeTargetId));
       if (point && graphInstance.translateTo) {
         await graphInstance.translateTo(point, { duration: 260 });
       }
@@ -1266,7 +1363,7 @@ async function focusDirectionNode(directionId) {
   } catch {
     // fallback to translateTo if focusElement fails
     try {
-      const point = normalizePoint(graphInstance.getElementPosition?.(targetId));
+      const point = normalizePoint(graphInstance.getElementPosition?.(safeTargetId));
       if (point && graphInstance.translateTo) {
         await graphInstance.translateTo(point, { duration: 260 });
       }
@@ -1275,7 +1372,7 @@ async function focusDirectionNode(directionId) {
     }
   }
 
-  const targetZoom = computeFocusZoomTarget(focusTarget);
+  const targetZoom = computeFocusZoomTarget(targetNodes);
   if (targetZoom == null || !graphInstance.zoomTo) return;
   try {
     await graphInstance.zoomTo(targetZoom, { duration: 260 });
@@ -1313,7 +1410,7 @@ async function toggleDirectionFocus(directionId) {
   resetDirectionSelection();
 }
 
-function focusPaperFromList(paperId) {
+async function focusPaperFromList(paperId) {
   const targetPaperId = String(paperId || '').trim();
   if (!targetPaperId) return;
   const targetNode = (props.graph?.nodes || []).find((node) => (
@@ -1322,6 +1419,7 @@ function focusPaperFromList(paperId) {
   if (!targetNode) return;
   pinnedNode.value = targetNode;
   pinnedCardPoint.value = null;
+  await focusNodeById(targetPaperId, [targetPaperId]);
 }
 
 const graphAriaLabel = computed(() => `${props.graph?.title || '知识图谱'}可视化`);

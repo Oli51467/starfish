@@ -152,6 +152,138 @@ function splitPipeText(value) {
     .filter(Boolean);
 }
 
+function normalizeExternalUrl(rawValue) {
+  const text = String(rawValue || '').trim();
+  if (!text) return '';
+  if (/^https?:\/\//i.test(text)) return text;
+  if (/^\/\//.test(text)) return `https:${text}`;
+  if (/^(?:dx\.)?doi\.org\/\S+/i.test(text)) return `https://${text}`;
+  if (/^arxiv\.org\/(?:abs|pdf)\/\S+/i.test(text)) return `https://${text}`;
+  if (/^10\.\d{4,9}\/\S+/i.test(text)) return `https://doi.org/${text}`;
+  if (/^www\./i.test(text)) return `https://${text}`;
+  return '';
+}
+
+function extractArxivId(rawValue) {
+  const text = String(rawValue || '').trim();
+  if (!text) return '';
+
+  const doiMatched = text.match(/10\.48550\/arxiv\.([^?#\s]+)/i);
+  if (doiMatched?.[1]) {
+    return doiMatched[1].replace(/\.pdf$/i, '').trim();
+  }
+
+  const urlMatched = text.match(/arxiv\.org\/(?:abs|pdf)\/([^?#\s]+)/i);
+  if (urlMatched?.[1]) {
+    return urlMatched[1].replace(/\.pdf$/i, '').trim();
+  }
+
+  const normalized = text
+    .replace(/^arxiv:\s*/i, '')
+    .replace(/^https?:\/\/(?:www\.)?arxiv\.org\/(?:abs|pdf)\//i, '')
+    .replace(/\.pdf$/i, '')
+    .replace(/\/$/, '')
+    .trim();
+  if (/^\d{4}\.\d{4,5}(v\d+)?$/i.test(normalized)) return normalized;
+  if (/^[a-z\-]+(?:\.[a-z\-]+)?\/\d{7}(v\d+)?$/i.test(normalized)) return normalized;
+  return '';
+}
+
+function toArxivPdfUrl(arxivId) {
+  const safeId = String(arxivId || '').trim();
+  if (!safeId) return '';
+  return `https://arxiv.org/pdf/${safeId}.pdf`;
+}
+
+function pickUrlFromObject(value) {
+  if (!value || typeof value !== 'object') return '';
+  return String(
+    value.url
+    || value.href
+    || value.link
+    || value.pdf_url
+    || value.pdfUrl
+    || ''
+  ).trim();
+}
+
+function stripPaperPrefix(value) {
+  return String(value || '')
+    .replace(/^paper\s*[:：_-]\s*/i, '')
+    .trim();
+}
+
+function resolvePaperId(node) {
+  const direct = stripPaperPrefix(node?.paper_id);
+  if (direct) return direct;
+  const metaId = stripPaperPrefix(node?.meta?.paper_id);
+  if (metaId) return metaId;
+  const nodeId = String(node?.id || '').trim();
+  const strippedNodeId = stripPaperPrefix(nodeId);
+  return strippedNodeId || nodeId;
+}
+
+function isLikelyPdfUrl(url) {
+  const text = String(url || '').toLowerCase();
+  if (!text) return false;
+  return /\.pdf(?:$|[?#])/.test(text) || /\/pdf\//.test(text) || text.includes('download=pdf');
+}
+
+function resolvePaperPdfUrl(node) {
+  const meta = node?.meta && typeof node.meta === 'object' ? node.meta : {};
+  const explicitCandidates = [
+    meta?.pdf_url,
+    meta?.pdfUrl,
+    meta?.pdf_link,
+    meta?.pdfLink,
+    meta?.open_access_pdf_url,
+    meta?.openAccessPdfUrl,
+    meta?.full_text_pdf_url,
+    meta?.fullTextPdfUrl,
+    pickUrlFromObject(meta?.open_access_pdf),
+    pickUrlFromObject(meta?.openAccessPdf),
+    pickUrlFromObject(meta?.best_oa_location),
+    pickUrlFromObject(meta?.bestOaLocation),
+    pickUrlFromObject(meta?.primary_location),
+    pickUrlFromObject(meta?.primaryLocation),
+    meta?.source_pdf_url,
+    meta?.sourcePdfUrl,
+    node?.pdf_url,
+    node?.pdfUrl
+  ];
+
+  for (const candidate of explicitCandidates) {
+    const normalized = normalizeExternalUrl(candidate);
+    if (!normalized) continue;
+    const arxivId = extractArxivId(normalized);
+    if (arxivId) return toArxivPdfUrl(arxivId);
+    if (isLikelyPdfUrl(normalized)) return normalized;
+  }
+
+  const canonicalUrl = normalizeExternalUrl(meta?.url || node?.url);
+  if (canonicalUrl) {
+    if (isLikelyPdfUrl(canonicalUrl)) {
+      return canonicalUrl;
+    }
+    const arxivIdFromUrl = extractArxivId(canonicalUrl);
+    if (arxivIdFromUrl) {
+      return toArxivPdfUrl(arxivIdFromUrl);
+    }
+  }
+
+  const arxivIdFromPaperId = extractArxivId(resolvePaperId(node));
+  if (arxivIdFromPaperId) {
+    return toArxivPdfUrl(arxivIdFromPaperId);
+  }
+
+  const arxivIdFromDoi = extractArxivId(meta?.doi || node?.doi || meta?.arxiv_id || meta?.arxivId || node?.arxiv_id || node?.arxivId);
+  if (arxivIdFromDoi) {
+    return toArxivPdfUrl(arxivIdFromDoi);
+  }
+
+  return '';
+}
+
 function statusText(value) {
   const key = String(value || '').toLowerCase();
   if (key === 'emerging') return '新兴';
@@ -195,7 +327,8 @@ function buildPaperDetail(node) {
     quartileText: impactFactorInfo.quartile,
     citationCountText: citationCount.toLocaleString(),
     citationHotClass: isCitationHot ? 'is-hot' : '',
-    url: String(node?.meta?.url || '').trim()
+    url: String(node?.meta?.url || '').trim(),
+    pdfUrl: resolvePaperPdfUrl(node)
   };
 }
 

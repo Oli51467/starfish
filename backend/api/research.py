@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -19,6 +20,10 @@ from models.schemas import (
     UserProfile,
 )
 from services.auth_service import AuthService, get_auth_service
+from services.insight_exploration_service import (
+    InsightExplorationService,
+    get_insight_exploration_service,
+)
 from services.pipeline_runtime_service import (
     PipelineRuntimeError,
     get_pipeline_runtime_service,
@@ -90,6 +95,69 @@ def _resolve_insight_artifact_path(snapshot: dict, *, artifact_key: str) -> Path
     if not path.exists() or not path.is_file():
         return None
     return path
+
+
+def _resolve_insight_artifact_raw_path(snapshot: dict, *, artifact_key: str) -> Path | None:
+    state = snapshot.get("state") or {}
+    insight = state.get("insight")
+    if not isinstance(insight, dict):
+        return None
+    artifact = insight.get("artifact")
+    if not isinstance(artifact, dict):
+        return None
+    raw_path = str(artifact.get(artifact_key) or "").strip()
+    if not raw_path:
+        return None
+    return Path(raw_path)
+
+
+def _resolve_runtime_insight_markdown(snapshot: dict) -> str:
+    state = snapshot.get("state") or {}
+    insight = state.get("insight")
+    if not isinstance(insight, dict):
+        return ""
+    artifact = insight.get("artifact") if isinstance(insight.get("artifact"), dict) else {}
+    markdown_path = Path(str(artifact.get("markdown_path") or "").strip()) if artifact else None
+    if markdown_path is not None and markdown_path.exists() and markdown_path.is_file():
+        try:
+            markdown = markdown_path.read_text(encoding="utf-8").strip()
+            if markdown:
+                return markdown
+        except OSError:
+            pass
+    markdown = str(insight.get("markdown") or "").strip()
+    if markdown:
+        return markdown
+    markdown = str(state.get("final_report") or "").strip()
+    if markdown:
+        return markdown
+    return str(state.get("report_draft") or "").strip()
+
+
+def _resolve_runtime_insight_language(snapshot: dict) -> str:
+    state = snapshot.get("state") or {}
+    insight = state.get("insight")
+    if not isinstance(insight, dict):
+        return "zh"
+    language = str(insight.get("language") or "").strip().lower()
+    if language not in {"zh", "en"}:
+        return "zh"
+    return language
+
+
+def _persist_runtime_pdf_artifact_path(snapshot: dict, *, pdf_path: Path) -> None:
+    state = snapshot.get("state")
+    if not isinstance(state, dict):
+        return
+    insight = state.get("insight")
+    if not isinstance(insight, dict):
+        return
+    artifact = insight.get("artifact") if isinstance(insight.get("artifact"), dict) else {}
+    artifact = dict(artifact)
+    artifact["pdf_path"] = str(pdf_path)
+    insight = dict(insight)
+    insight["artifact"] = artifact
+    state["insight"] = insight
 
 
 def _to_active_session_summary(snapshot: dict) -> ResearchActiveSessionSummary:
@@ -240,6 +308,7 @@ async def download_research_report_markdown(
 async def download_research_report_pdf(
     session_id: str,
     user: UserProfile = Depends(get_current_user_profile),
+    insight_service: InsightExplorationService = Depends(get_insight_exploration_service),
 ) -> FileResponse:
     try:
         snapshot = await runtime_service.get_session_snapshot(session_id, user.id)
@@ -252,7 +321,35 @@ async def download_research_report_pdf(
 
     path = _resolve_insight_artifact_path(snapshot, artifact_key="pdf_path")
     if path is None:
-        raise HTTPException(status_code=404, detail="insight_pdf_not_ready")
+        markdown = _resolve_runtime_insight_markdown(snapshot)
+        if not markdown:
+            raise HTTPException(status_code=404, detail="insight_pdf_not_ready")
+
+        language = _resolve_runtime_insight_language(snapshot)
+        raw_pdf_path = _resolve_insight_artifact_raw_path(snapshot, artifact_key="pdf_path")
+        raw_markdown_path = _resolve_insight_artifact_raw_path(snapshot, artifact_key="markdown_path")
+
+        if raw_pdf_path is not None:
+            target_pdf_path = raw_pdf_path
+        elif raw_markdown_path is not None:
+            target_pdf_path = raw_markdown_path.with_suffix(".pdf")
+        else:
+            target_pdf_path = insight_service.report_root / str(session_id or "").strip() / "insight.pdf"
+
+        try:
+            path = await asyncio.to_thread(
+                insight_service.render_markdown_pdf,
+                markdown=markdown,
+                pdf_path=target_pdf_path,
+                language=language,
+            )
+            _persist_runtime_pdf_artifact_path(snapshot, pdf_path=path)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail="insight_pdf_generate_failed") from exc
 
     return FileResponse(
         path=str(path),
