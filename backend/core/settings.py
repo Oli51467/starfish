@@ -33,6 +33,8 @@ class Settings:
         # External APIs
         self.semantic_scholar_api_key = (os.getenv("SEMANTIC_SCHOLAR_API_KEY") or "").strip()
         self.openalex_mailto = (os.getenv("OPENALEX_MAILTO") or "").strip()
+        self.crossref_mailto = (os.getenv("CROSSREF_MAILTO") or self.openalex_mailto or "").strip()
+        self.opencitations_access_token = (os.getenv("OPENCITATIONS_ACCESS_TOKEN") or "").strip()
         self.scite_api_key = (os.getenv("SCITE_API_KEY") or "").strip()
         self.github_token = (os.getenv("GITHUB_TOKEN") or "").strip()
         self.retrieval_max_workers = max(2, int(os.getenv("RETRIEVAL_MAX_WORKERS", "4")))
@@ -50,6 +52,14 @@ class Settings:
         )
         self.retrieval_enable_arxiv = self._parse_bool(
             os.getenv("RETRIEVAL_ENABLE_ARXIV"),
+            default=True,
+        )
+        self.retrieval_enable_crossref = self._parse_bool(
+            os.getenv("RETRIEVAL_ENABLE_CROSSREF"),
+            default=True,
+        )
+        self.retrieval_enable_opencitations = self._parse_bool(
+            os.getenv("RETRIEVAL_ENABLE_OPENCITATIONS"),
             default=True,
         )
 

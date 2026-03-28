@@ -46,6 +46,12 @@ class DomainExplorer:
         "推荐系统": "recommender system",
         "计算机视觉": "computer vision",
         "自然语言处理": "natural language processing",
+        "注意力机制": "attention mechanism",
+        "注意力": "attention mechanism",
+        "自注意力机制": "self-attention mechanism",
+        "自注意力": "self-attention",
+        "交叉注意力": "cross-attention",
+        "多头注意力": "multi-head attention",
     }
     _ZH_QUERY_CORRECTIONS = {
         "深蹲学习": "深度学习",

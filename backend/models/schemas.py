@@ -326,7 +326,7 @@ class RetrievedPaper(BaseModel):
 
 class KnowledgeGraphRetrievalResponse(BaseModel):
     query: str
-    provider: Literal["semantic_scholar", "openalex", "arxiv", "mock"]
+    provider: Literal["semantic_scholar", "openalex", "crossref", "arxiv", "mock"]
     providers_used: list[str] = Field(default_factory=list)
     provider_stats: list[RetrievalProviderStat] = Field(default_factory=list)
     candidate_count: int = Field(default=0, ge=0)

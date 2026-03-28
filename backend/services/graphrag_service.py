@@ -14,7 +14,9 @@ from typing import Any
 from urllib.parse import quote_plus
 from uuid import uuid4
 
+from external.crossref import CrossrefClient
 from external.openalex import OpenAlexClient, OpenAlexClientError
+from external.opencitations import OpenCitationsClient
 from external.semantic_scholar import (
     SemanticScholarClient,
     SemanticScholarClientError,
@@ -77,10 +79,17 @@ class GraphRAGService:
         "new",
         "via",
     }
+    _ARXIV_ID_PATTERN = re.compile(
+        r"(?:(?:\d{4}\.\d{4,5})|(?:[a-z\-]+(?:\.[a-z\-]+)?/\d{7}))(?:v\d+)?",
+        flags=re.IGNORECASE,
+    )
+    _DOI_PATTERN = re.compile(r"10\.\d{4,9}/\S+", flags=re.IGNORECASE)
 
     def __init__(self, neo4j_repo: Neo4jRepository | None = None) -> None:
         self.semantic = SemanticScholarClient()
         self.openalex = OpenAlexClient()
+        self.crossref = CrossrefClient()
+        self.opencitations = OpenCitationsClient()
         self.domain_explorer = DomainExplorer(
             semantic_client=self.semantic,
             openalex_client=self.openalex,
@@ -88,12 +97,14 @@ class GraphRAGService:
         self.retriever = MultiSourceRetriever(
             semantic_client=self.semantic,
             openalex_client=self.openalex,
+            crossref_client=self.crossref,
         )
         self.neo4j_repo = neo4j_repo or get_neo4j_repository()
         self.settings = get_settings()
         self._embedding_client = None
         self._embedding_cache: dict[str, list[float]] = {}
         self._paper_relation_cache: dict[str, dict[str, list[str]]] = {}
+        self._citation_backfill_cache: dict[str, int] = {}
         self._embedding_unavailable = False
 
     def build_knowledge_graph(self, request: KnowledgeGraphBuildRequest) -> KnowledgeGraphResponse:
@@ -495,7 +506,11 @@ class GraphRAGService:
         seed_title = str(seed_paper.get("title") or "").strip() or safe_value
         seed_paper_id = str(seed_paper.get("paper_id") or "").strip()
         inferred_provider = self._infer_seed_provider(seed_paper)
-        provider_used = inferred_provider if inferred_provider in {"semantic_scholar", "openalex", "arxiv"} else preferred_seed_provider
+        provider_used = (
+            inferred_provider
+            if inferred_provider in {"semantic_scholar", "openalex", "crossref", "arxiv"}
+            else preferred_seed_provider
+        )
 
         candidates = self._collect_seed_candidates(seed_paper, candidate_limit=candidate_limit)
         related_references = len(seed_paper.get("references") or [])
@@ -538,7 +553,7 @@ class GraphRAGService:
         )
         range_hint = self._build_year_range_hint(normalized_range, range_filter_stats)
 
-        retrieve_status = "done" if provider_used in {"semantic_scholar", "openalex", "arxiv"} else "fallback"
+        retrieve_status = "done" if provider_used in {"semantic_scholar", "openalex", "crossref", "arxiv"} else "fallback"
         trace_provider = "+".join(seed_providers_used) if seed_providers_used else provider_used
         steps.append(
             self._build_retrieval_step(
@@ -564,6 +579,7 @@ class GraphRAGService:
             seed_title or safe_value,
             ranking_profile="seed_lineage",
         )
+        selected_papers = self._backfill_selected_citation_counts(selected_papers)
         selected_papers = self._ensure_seed_first(selected_papers, seed_paper_id)
         steps.append(
             self._build_retrieval_step(
@@ -890,6 +906,7 @@ class GraphRAGService:
             paper_range_years=normalized_range,
             query_variants=query_variants if domain_authority_mode else None,
         )
+        selected_papers = self._backfill_selected_citation_counts(selected_papers)
         steps.append(
             self._build_retrieval_step(
                 phase="filter",
@@ -1118,6 +1135,21 @@ class GraphRAGService:
             f"{safe_query} landmark paper",
         ]
         if (
+            bool(re.search(r"\b(attention|self[-\s]?attention|cross[-\s]?attention|multi[-\s]?head)\b", lower_query))
+            or bool(re.search(r"(注意力|自注意力|交叉注意力|多头注意力)", safe_query, flags=re.IGNORECASE))
+        ):
+            heuristic_candidates = [
+                safe_query,
+                f"{safe_query} seminal paper",
+                "attention is all you need transformer vaswani 2017",
+                "neural machine translation by jointly learning to align and translate bahdanau 2014",
+                "effective approaches to attention-based neural machine translation luong 2015",
+                "self-attention with relative position representations shaw 2018",
+                "vision transformer an image is worth 16x16 words dosovitskiy 2021",
+                "flashattention fast memory-efficient exact attention",
+                "attention mechanism deep learning survey",
+            ]
+        if (
             "large language model" in lower_query
             or re.search(r"\bllm\b", lower_query)
             or bool(re.search(r"(大语言模型|大型语言模型|语言大模型|llm)", safe_query, flags=re.IGNORECASE))
@@ -1216,7 +1248,146 @@ class GraphRAGService:
         normalized = str(preferred_provider or "semantic_scholar").strip().lower()
         if normalized.startswith("openalex"):
             return "openalex"
+        if normalized.startswith("crossref"):
+            return "crossref"
         return "semantic_scholar"
+
+    @classmethod
+    def _extract_arxiv_id_from_text(cls, raw_value: str) -> str:
+        value = str(raw_value or "").strip()
+        if not value:
+            return ""
+        value = re.sub(r"^arxiv:\s*", "", value, flags=re.IGNORECASE)
+        value = re.sub(
+            r"^https?://(?:www\.)?arxiv\.org/(?:abs|pdf)/",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        )
+        value = re.sub(r"\.pdf$", "", value, flags=re.IGNORECASE).strip().strip("/")
+        match = cls._ARXIV_ID_PATTERN.search(value)
+        if not match:
+            return ""
+        return re.sub(r"v\d+$", "", match.group(0), flags=re.IGNORECASE)
+
+    @classmethod
+    def _extract_doi_from_text(cls, raw_value: str) -> str:
+        value = str(raw_value or "").strip()
+        if not value:
+            return ""
+        match = cls._DOI_PATTERN.search(value)
+        if not match:
+            return ""
+        return match.group(0).lower().rstrip(").,;")
+
+    def _backfill_selected_citation_counts(self, papers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not papers:
+            return papers
+
+        max_lookups = 8
+        lookups = 0
+        enriched: list[dict[str, Any]] = []
+
+        for item in papers:
+            normalized = self._normalize_retrieved_paper(item)
+            citation_count = self._safe_int(normalized.get("citation_count"))
+            if citation_count > 0:
+                enriched.append(item)
+                continue
+
+            paper_id = str(normalized.get("paper_id") or "")
+            url = str(normalized.get("url") or "")
+
+            arxiv_id = self._extract_arxiv_id_from_text(paper_id) or self._extract_arxiv_id_from_text(url)
+            doi = (
+                self._extract_doi_from_text(paper_id)
+                or self._extract_doi_from_text(url)
+                or self._extract_doi_from_text(str(normalized.get("title") or ""))
+            )
+
+            cache_key = f"arxiv:{arxiv_id.lower()}" if arxiv_id else (f"doi:{doi}" if doi else "")
+            if cache_key and cache_key in self._citation_backfill_cache:
+                cached = self._safe_int(self._citation_backfill_cache.get(cache_key))
+                if cached > 0:
+                    updated = dict(item)
+                    updated["citation_count"] = cached
+                    enriched.append(updated)
+                else:
+                    enriched.append(item)
+                continue
+
+            if lookups >= max_lookups or (not arxiv_id and not doi):
+                enriched.append(item)
+                continue
+
+            lookups += 1
+            fetched: dict[str, Any] | None = None
+            try:
+                if arxiv_id:
+                    fetched = self.openalex.fetch_paper_by_arxiv_id(
+                        arxiv_id,
+                        reference_limit=1,
+                        citation_limit=1,
+                    )
+                elif doi:
+                    fetched = self.openalex.fetch_paper_by_doi(
+                        doi,
+                        reference_limit=1,
+                        citation_limit=1,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("citation backfill failed for paper %s: %s", paper_id or doi or arxiv_id, exc)
+                fetched = None
+
+            fetched_citation = self._safe_int((fetched or {}).get("citation_count"))
+            if doi and fetched_citation <= 0 and bool(self.settings.retrieval_enable_crossref):
+                try:
+                    crossref_payload = self.crossref.fetch_paper_by_doi(
+                        doi,
+                        reference_limit=1,
+                        citation_limit=1,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("crossref backfill failed for doi %s: %s", doi, exc)
+                    crossref_payload = None
+                crossref_citation = self._safe_int((crossref_payload or {}).get("citation_count"))
+                if crossref_citation > fetched_citation:
+                    fetched = crossref_payload
+                    fetched_citation = crossref_citation
+
+            if doi and fetched_citation <= 0 and bool(self.settings.retrieval_enable_opencitations):
+                try:
+                    opencitation_count = self.opencitations.fetch_citation_count_by_doi(doi)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("opencitations backfill failed for doi %s: %s", doi, exc)
+                    opencitation_count = 0
+                if opencitation_count > fetched_citation:
+                    fetched = dict(fetched or {})
+                    fetched["citation_count"] = opencitation_count
+                    fetched_citation = opencitation_count
+
+            if cache_key:
+                self._citation_backfill_cache[cache_key] = fetched_citation
+
+            if fetched_citation <= 0:
+                enriched.append(item)
+                continue
+
+            updated = dict(item)
+            updated["citation_count"] = fetched_citation
+            if not self._safe_int(updated.get("year")) and self._safe_int((fetched or {}).get("year")):
+                updated["year"] = self._safe_int((fetched or {}).get("year"))
+            if not str(updated.get("venue") or "").strip():
+                venue = str((fetched or {}).get("venue") or "").strip()
+                if venue:
+                    updated["venue"] = venue
+            if not str(updated.get("url") or "").strip():
+                fetched_url = str((fetched or {}).get("url") or "").strip()
+                if fetched_url:
+                    updated["url"] = fetched_url
+            enriched.append(updated)
+
+        return enriched
 
     def _normalize_seed_input_value(self, *, input_type: str, input_value: str) -> str:
         value = str(input_value or "").strip()
@@ -1254,6 +1425,7 @@ class GraphRAGService:
         safe_value = self._normalize_seed_input_value(input_type=input_type, input_value=input_value)
         normalized_provider = str(preferred_provider or "semantic_scholar").strip().lower()
         use_openalex = normalized_provider == "openalex"
+        use_crossref = normalized_provider == "crossref"
         if input_type == "arxiv_id":
             return (
                 (
@@ -1264,13 +1436,17 @@ class GraphRAGService:
                 else [f"https://api.semanticscholar.org/graph/v1/paper/ARXIV:{quote_plus(safe_value)}"],
             )
         if input_type == "doi":
+            if use_crossref:
+                links = [f"https://api.crossref.org/works/{quote_plus(safe_value)}"]
+            elif use_openalex:
+                links = [f"https://api.openalex.org/works?search={quote_plus(safe_value)}"]
+            else:
+                links = [f"https://api.semanticscholar.org/graph/v1/paper/DOI:{quote_plus(safe_value)}"]
             return (
                 (
                     "正在解析 DOI，并行定位种子论文及其关联研究。"
                 ),
-                [f"https://api.openalex.org/works?search={quote_plus(safe_value)}"]
-                if use_openalex
-                else [f"https://api.semanticscholar.org/graph/v1/paper/DOI:{quote_plus(safe_value)}"],
+                links,
             )
         return (
             "正在根据论文标题检索种子论文并拉取引用/被引关系。",
@@ -1443,11 +1619,20 @@ class GraphRAGService:
         paper_id = self._paper_key(str(seed_paper.get("paper_id") or ""))
         if not paper_id:
             return "mock"
+        source_providers = [
+            str(item).strip().lower()
+            for item in (seed_paper.get("source_providers") or [])
+            if str(item).strip()
+        ]
+        if "crossref" in source_providers:
+            return "crossref"
         if paper_id.startswith("openalex:"):
             return "openalex"
         if paper_id.startswith("arxiv:"):
             return "arxiv"
-        if paper_id.startswith(("doi:", "title:", "pdf:")):
+        if paper_id.startswith("doi:"):
+            return "crossref"
+        if paper_id.startswith(("title:", "pdf:")):
             return "mock"
         return "semantic_scholar"
 
@@ -1789,6 +1974,8 @@ class GraphRAGService:
             return "semantic_scholar"
         if "openalex" in normalized:
             return "openalex"
+        if "crossref" in normalized:
+            return "crossref"
         if "arxiv" in normalized:
             return "arxiv"
         return "mock"
@@ -1989,6 +2176,12 @@ class GraphRAGService:
                 )
             else:
                 selected = [item for _score, _representative, item in ranked[:max_papers]]
+            selected = self._ensure_seminal_attention_anchor_selected(
+                query=query,
+                ranked=ranked,
+                selected=selected,
+                max_papers=max_papers,
+            )
         else:
             selected = [item for _score, _representative, item in ranked[:max_papers]]
         stats = {
@@ -1998,6 +2191,70 @@ class GraphRAGService:
             "elapsed_seconds": perf_counter() - start,
         }
         return selected, stats
+
+    @staticmethod
+    def _is_attention_topic_query(query: str) -> bool:
+        lower_query = str(query or "").lower()
+        return bool(
+            re.search(r"\b(attention|self[-\s]?attention|cross[-\s]?attention|multi[-\s]?head)\b", lower_query)
+            or re.search(r"(注意力|自注意力|交叉注意力|多头注意力)", str(query or ""), flags=re.IGNORECASE)
+        )
+
+    def _is_attention_anchor_title(self, title: str) -> bool:
+        normalized = self._normalized_title_key(title)
+        if not normalized:
+            return False
+        return normalized == "attention is all you need" or normalized.startswith("attention is all you need ")
+
+    def _ensure_seminal_attention_anchor_selected(
+        self,
+        *,
+        query: str,
+        ranked: list[tuple[float, float, dict[str, Any]]],
+        selected: list[dict[str, Any]],
+        max_papers: int,
+    ) -> list[dict[str, Any]]:
+        if max_papers <= 0 or not ranked or not self._is_attention_topic_query(query):
+            return selected
+
+        anchor_candidate: dict[str, Any] | None = None
+        for _score, _representative, paper in ranked:
+            title = str(paper.get("title") or "")
+            if not self._is_attention_anchor_title(title):
+                continue
+            anchor_candidate = paper
+            break
+        if anchor_candidate is None:
+            return selected
+
+        anchor_key = self._paper_key(str(anchor_candidate.get("paper_id") or ""))
+        selected_keys = {
+            self._paper_key(str(item.get("paper_id") or ""))
+            for item in selected
+            if self._paper_key(str(item.get("paper_id") or ""))
+        }
+        if anchor_key and anchor_key in selected_keys:
+            return selected
+
+        merged: list[dict[str, Any]] = [anchor_candidate, *selected]
+        deduped: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        seen_titles: set[str] = set()
+        for item in merged:
+            paper_id = self._paper_key(str(item.get("paper_id") or ""))
+            title_key = self._normalized_title_key(str(item.get("title") or ""))
+            if paper_id and paper_id in seen_ids:
+                continue
+            if title_key and title_key in seen_titles:
+                continue
+            if paper_id:
+                seen_ids.add(paper_id)
+            if title_key:
+                seen_titles.add(title_key)
+            deduped.append(item)
+            if len(deduped) >= max_papers:
+                break
+        return deduped
 
     def _select_ranked_with_year_coverage(
         self,
@@ -2062,19 +2319,23 @@ class GraphRAGService:
                 paper_id = self._paper_key(str(paper.get("paper_id") or ""))
                 if not paper_id or paper_id in selected_ids:
                     continue
+                title = str(paper.get("title") or "")
                 relevance = self._compute_relevance(
                     query=query,
-                    title=str(paper.get("title") or ""),
+                    title=title,
                     abstract=str(paper.get("abstract") or ""),
                 )
-                if relevance < 0.24:
+                title_overlap = self._title_token_overlap(query, title)
+                if relevance < 0.24 and title_overlap < 0.42:
                     continue
                 citation_count = self._safe_int(paper.get("citation_count"))
                 year = self._safe_int(paper.get("year"))
-                if citation_count < 50:
+                high_confidence_title_match = relevance >= 0.72 or title_overlap >= 0.66
+                if citation_count < 50 and not high_confidence_title_match:
                     continue
-                relevance_bucket = min(5, max(0, int(relevance * 5.0)))
+                relevance_bucket = min(6, max(0, int(max(relevance, title_overlap) * 6.0)))
                 candidate_key = (
+                    1 if high_confidence_title_match else 0,
                     relevance_bucket,
                     citation_count,
                     float(score),

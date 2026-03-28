@@ -11,10 +11,12 @@ from time import perf_counter
 from typing import Any
 
 from core.settings import Settings, get_settings
+from external.crossref import CrossrefClient
 from external.openalex import OpenAlexClient
 from external.semantic_scholar import SemanticScholarClient
 from services.retrieval.providers.arxiv_provider import ArxivProvider
 from services.retrieval.providers.base import RetrievalProvider
+from services.retrieval.providers.crossref_provider import CrossrefProvider
 from services.retrieval.providers.openalex_provider import OpenAlexProvider
 from services.retrieval.providers.semantic_scholar_provider import SemanticScholarProvider
 
@@ -40,12 +42,14 @@ class MultiSourceRetriever:
         settings: Settings | None = None,
         semantic_client: SemanticScholarClient | None = None,
         openalex_client: OpenAlexClient | None = None,
+        crossref_client: CrossrefClient | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.max_workers = max(2, int(self.settings.retrieval_max_workers))
         self.provider_timeout_seconds = max(2.0, float(self.settings.retrieval_provider_timeout_seconds))
         self.semantic = semantic_client or SemanticScholarClient()
         self.openalex = openalex_client or OpenAlexClient()
+        self.crossref = crossref_client or CrossrefClient()
         self.providers = self._build_provider_registry()
 
     def search_papers(
@@ -175,6 +179,8 @@ class MultiSourceRetriever:
             providers["openalex"] = OpenAlexProvider(self.openalex)
         if self.settings.retrieval_enable_arxiv:
             providers["arxiv"] = ArxivProvider()
+        if self.settings.retrieval_enable_crossref:
+            providers["crossref"] = CrossrefProvider(self.crossref)
         return providers
 
     def _ordered_provider_names(
@@ -202,6 +208,7 @@ class MultiSourceRetriever:
         default_priority = [
             "semantic_scholar",
             "openalex",
+            "crossref",
             "arxiv",
         ]
         for name in default_priority:
@@ -625,6 +632,8 @@ class MultiSourceRetriever:
             return "semantic_scholar"
         if value.startswith("openalex"):
             return "openalex"
+        if value.startswith("crossref"):
+            return "crossref"
         if value.startswith("arxiv"):
             return "arxiv"
         return value
