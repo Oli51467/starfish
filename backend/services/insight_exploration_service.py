@@ -66,8 +66,8 @@ _MAX_EXPANSION_PAPERS = 24
 _MAX_EXPANSION_QUERIES_PER_ROUND = 2
 _ALLOWED_AGENT_MODES = {"legacy", "orchestrated"}
 _DEFAULT_ARTIFACT_PDF_TIMEOUT_SECONDS = 15.0
-_REPORT_MIN_CHARS_ZH = 10000
-_REPORT_TARGET_CHARS_ZH = 12000
+_REPORT_MIN_CHARS_ZH = 800
+_REPORT_TARGET_CHARS_ZH = 1200
 _REPORT_MIN_CHARS_EN = 7000
 _REPORT_TARGET_CHARS_EN = 9000
 _REPORT_EXPANSION_MAX_ROUNDS = 3
@@ -1927,38 +1927,40 @@ class InsightExplorationService:
             "innovation_points": innovation_points,
             "references": reference_catalog,
         }
+        context_json = json.dumps(context, ensure_ascii=False)
 
         if language == "zh":
             user_prompt = (
-                "请基于下方证据，生成一份中文科研风格 Markdown 报告。\n"
+                "你是一位熟悉学术圈的学长，帮师弟梳理一个领域的文献全貌。\n"
+                "语气直接、口语化，像在对话，不要写成论文。\n\n"
+                "基于下方的论文数据，生成一份 Markdown 报告，严格按以下结构：\n\n"
+                "---\n\n"
+                f"# {query}：文献地图\n\n"
+                "## 你应该先读这几篇（按顺序）\n\n"
+                "列出 3-5 篇，每篇写：\n"
+                "- 标题（年份）\n"
+                "- 一句话说为什么先读这篇，不超过 30 字\n"
+                "- 读完之后你会得到什么\n\n"
+                "## 可以暂时跳过的\n\n"
+                "列出 2-3 篇，说明为什么可以跳过（比如被后来的工作取代了，或者和你的方向关系不大）\n\n"
+                "## 你可能不知道但很重要\n\n"
+                "从隐藏宝石论文中选 1-2 篇，每篇写：\n"
+                "- 标题（年份）\n"
+                "- 为什么重要但容易被忽视\n"
+                "- 一句话说它和领域主流的关系\n\n"
+                "## 这个领域现在最活跃的争议\n\n"
+                "2-3 个真实存在的学术分歧，每个用一句话说清楚两边的立场\n\n"
+                "## 如果你只有一周时间\n\n"
+                "给出一个具体的阅读顺序建议，3-5 篇，说明每天读什么\n\n"
+                "---\n\n"
                 "硬性约束：\n"
-                "1) 只能使用给定 references 中的信息，禁止臆造论文或数值；\n"
-                "2) 严禁出现 workflow/agent/子代理/协同轮次/工具调用等过程描述；\n"
-                "3) 全文只用中文叙述（论文标题可保留原文）；\n"
-                "4) 每个关键判断后必须给文内引用编号，如 [R3] 或 [R3][R8]；\n"
-                "5) 避免模板化重复句，不要输出空洞口号；\n"
-                "6) 正文（不含参考文献）不少于 10000 字，目标 12000 字左右；\n"
-                "7) 每个一级章节不少于 800 字，摘要不少于 600 字。\n"
-                "请使用以下固定结构标题：\n"
-                f"# 研究洞察报告：{query}\n"
-                "## 摘要\n"
-                "## 1. 研究问题界定与评价框架\n"
-                "## 2. 研究起源与关键演进\n"
-                "## 3. 方法谱系与机制拆解\n"
-                "## 4. 关键论文深读与证据矩阵\n"
-                "## 5. 证据对照、分歧与可证伪性\n"
-                "## 6. 应用落地、产业化与商业模式\n"
-                "## 7. 工程实现、算力成本与系统约束\n"
-                "## 8. 创新机会、研究议程与实验设计\n"
-                "## 9. 风险、伦理与治理建议\n"
-                "## 10. 结论与执行路线图\n"
-                "## 参考文献\n"
-                "“关键论文深读与证据矩阵”至少逐篇分析 8 篇核心论文，并比较其方法差异与适用边界。\n"
-                "“证据对照、分歧与可证伪性”必须包含至少 1 个可执行对照实验设计。\n"
-                "其中“参考文献”仅列正文实际引用过的条目，格式为：\n"
-                "- [R1] Title（Year，Venue，引用 N）\n"
-                "如果证据不足，请明确写“当前证据不足以支持该结论”。\n"
-                f"证据上下文(JSON)：{json.dumps(context, ensure_ascii=False)}"
+                "1) 只使用给定 references 中的论文，不编造\n"
+                "2) 每篇论文推荐必须带引用编号 [R*]\n"
+                "3) 总字数 800-1200 字，不能更长\n"
+                "4) 禁止出现\"综上所述\"、\"本报告\"、\"研究表明\"等学术套话\n"
+                "5) 禁止出现公式、证据矩阵、方法谱系等学术结构\n"
+                "6) 如果证据不足，直接说\"这块文献不够，建议补充检索\"\n\n"
+                f"证据上下文(JSON)：{context_json}"
             )
         else:
             user_prompt = (
@@ -1988,17 +1990,23 @@ class InsightExplorationService:
                 "In the References section, include only cited entries with format:\n"
                 "- [R1] Title (Year, Venue, citations N)\n"
                 "If evidence is insufficient, explicitly state: 'Current evidence is insufficient to support this claim.'\n"
-                f"Evidence context (JSON): {json.dumps(context, ensure_ascii=False)}"
+                f"Evidence context (JSON): {context_json}"
             )
 
         try:
+            if language == "zh":
+                system_content = (
+                    "你是文献导读助手。严格遵守用户给定的 Markdown 结构与硬性约束输出，不要添加额外章节。"
+                )
+            else:
+                system_content = (
+                    "You are a senior research report writer. "
+                    "Deliver precise, evidence-constrained, publication-style synthesis."
+                )
             messages = [
                 {
                     "role": "system",
-                    "content": (
-                        "You are a senior research report writer. "
-                        "Deliver precise, evidence-constrained, publication-style synthesis."
-                    ),
+                    "content": system_content,
                 },
                 {
                     "role": "user",
@@ -2045,14 +2053,18 @@ class InsightExplorationService:
             )
             if not cleaned:
                 return _ComposeMarkdownResult(markdown="", streamed=False, streamed_chars=0)
-            refined_markdown, refined_streamed_chars = await self._expand_markdown_if_needed(
-                language=language,
-                query=query,
-                context=context,
-                markdown=cleaned,
-                stream_callback=stream_callback,
-                accumulated_chars=int(streamed_chars if streamed else 0),
-            )
+            if language == "zh":
+                refined_markdown = cleaned
+                refined_streamed_chars = int(streamed_chars if streamed else 0)
+            else:
+                refined_markdown, refined_streamed_chars = await self._expand_markdown_if_needed(
+                    language=language,
+                    query=query,
+                    context=context,
+                    markdown=cleaned,
+                    stream_callback=stream_callback,
+                    accumulated_chars=int(streamed_chars if streamed else 0),
+                )
             final_markdown = self._ensure_reference_section(
                 markdown=refined_markdown or cleaned,
                 reference_catalog=reference_catalog,

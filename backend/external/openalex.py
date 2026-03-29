@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import math
+import re
 from typing import Any
 from urllib.parse import quote
 
@@ -44,6 +47,16 @@ class OpenAlexClient:
             "concepts",
             "doi",
         ]
+    )
+    _SURVEY_FILTER_KEYWORDS = (
+        "survey",
+        "review",
+        "overview",
+        "tutorial",
+        "a introduction to",
+        "an introduction to",
+        "introduction to",
+        "systematic",
     )
 
     def __init__(self) -> None:
@@ -128,20 +141,39 @@ class OpenAlexClient:
         safe_limit = max(1, min(limit, 50))
         safe_offset = max(0, offset)
         page = safe_offset // safe_limit + 1
+        safe_query = query.strip()
         payload = self._get(
             "/works",
             params={
-                "search": query.strip(),
+                "search": safe_query,
                 "per-page": safe_limit,
                 "page": page,
                 "select": self._SEARCH_SELECT,
+                "sort": "cited_by_count:desc",
+                "filter": "type:article",
             },
         )
         if not payload:
             return {"total": 0, "offset": safe_offset, "next": None, "papers": []}
 
         works = payload.get("results") or []
-        papers = [self._normalize_search_work(work) for work in works if isinstance(work, dict)]
+        papers = [
+            self._normalize_search_work(work)
+            for work in works
+            if isinstance(work, dict) and not self._is_survey_like_title(work.get("title"))
+        ]
+        for paper in papers:
+            paper["importance_score"] = round(
+                self._estimate_importance_score(query=safe_query, paper=paper),
+                6,
+            )
+        papers.sort(
+            key=lambda item: (
+                self._safe_int(item.get("citation_count")),
+                float(item.get("importance_score") or 0.0),
+            ),
+            reverse=True,
+        )
         meta = payload.get("meta") or {}
         return {
             "total": int(meta.get("count") or len(papers)),
@@ -445,3 +477,44 @@ class OpenAlexClient:
                 if payload.get(key):
                     return str(payload[key])
         return str(payload)
+
+    @classmethod
+    def _is_survey_like_title(cls, raw_title: Any) -> bool:
+        title = re.sub(r"\s+", " ", str(raw_title or "").strip().lower())
+        if not title:
+            return False
+        return any(keyword in title for keyword in cls._SURVEY_FILTER_KEYWORDS)
+
+    @staticmethod
+    def _tokenize_text(text: str) -> set[str]:
+        return {
+            token
+            for token in re.findall(r"[a-z0-9\u4e00-\u9fff]{2,}", str(text or "").lower())
+            if token
+        }
+
+    @classmethod
+    def _estimate_importance_score(cls, *, query: str, paper: dict[str, Any]) -> float:
+        citation_count = cls._safe_int(paper.get("citation_count"))
+        citation_signal = min(1.0, math.log1p(citation_count) / 8.0)
+
+        year = cls._safe_int(paper.get("year"))
+        current_year = datetime.now(timezone.utc).year
+        if year > 0:
+            age = max(0, current_year - year)
+            recency_signal = max(0.0, 1.0 - min(age, 12) / 12.0)
+        else:
+            recency_signal = 0.0
+
+        query_tokens = cls._tokenize_text(query)
+        doc_tokens = cls._tokenize_text(
+            f"{str(paper.get('title') or '')} {str(paper.get('abstract') or '')}"
+        )
+        relevance_signal = (
+            len(query_tokens.intersection(doc_tokens)) / float(len(query_tokens))
+            if query_tokens and doc_tokens
+            else 0.0
+        )
+
+        score = relevance_signal * 0.5 + citation_signal * 0.35 + recency_signal * 0.15
+        return max(0.0, min(1.0, score)) * 100.0
