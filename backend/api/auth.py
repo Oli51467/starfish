@@ -3,7 +3,13 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from models.schemas import AuthGoogleRequest, AuthSessionResponse, UserProfile
+from models.schemas import (
+    AuthGithubCodeRequest,
+    AuthGithubStartResponse,
+    AuthGoogleRequest,
+    AuthSessionResponse,
+    UserProfile,
+)
 from services.auth_service import AuthService, get_auth_service
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -16,6 +22,21 @@ def auth_with_google(
     auth_service: AuthService = Depends(get_auth_service),
 ) -> AuthSessionResponse:
     return auth_service.exchange_google_credential(request.credential)
+
+
+@router.get("/github/start", response_model=AuthGithubStartResponse)
+def start_github_auth(
+    auth_service: AuthService = Depends(get_auth_service),
+) -> AuthGithubStartResponse:
+    return AuthGithubStartResponse(authorize_url=auth_service.build_github_authorize_url())
+
+
+@router.post("/github", response_model=AuthSessionResponse)
+def auth_with_github(
+    request: AuthGithubCodeRequest,
+    auth_service: AuthService = Depends(get_auth_service),
+) -> AuthSessionResponse:
+    return auth_service.exchange_github_code(code=request.code, state_value=request.state)
 
 
 @router.get("/me", response_model=UserProfile)

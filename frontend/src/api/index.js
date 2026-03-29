@@ -67,6 +67,18 @@ export function authWithGoogle(credential) {
   });
 }
 
+export function getGithubAuthorizeUrl() {
+  return request('/api/auth/github/start');
+}
+
+export function authWithGithub(code, state) {
+  return request('/api/auth/github', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code, state })
+  });
+}
+
 export function getAuthMe(accessToken) {
   return request('/api/auth/me', {
     headers: buildAuthHeaders(accessToken)

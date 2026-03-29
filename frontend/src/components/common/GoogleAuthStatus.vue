@@ -1,8 +1,6 @@
 <template>
   <div class="header-auth">
-    <p v-if="!googleClientId" class="header-auth-tip mono">请配置 Google 登录</p>
-
-    <template v-else-if="isAuthenticated">
+    <template v-if="isAuthenticated">
       <div ref="userMenuRef" class="header-user-menu">
         <button
           class="header-user-pill header-user-trigger"
@@ -46,8 +44,27 @@
       </div>
     </template>
 
-    <div v-else class="header-google-entry">
-      <div ref="googleButtonRef" class="header-google-button" />
+    <div v-else class="header-auth-entry">
+      <p v-if="!googleClientId" class="header-auth-tip mono">未配置 Google 登录，可使用 GitHub 登录</p>
+      <div class="header-auth-options">
+        <div v-if="googleClientId" ref="googleButtonRef" class="header-google-button" />
+        <button
+          class="header-github-auth-btn mono"
+          type="button"
+          :disabled="loading || githubLoading"
+          @click="startGithubLogin"
+        >
+          <span class="header-github-auth-icon" aria-hidden="true">
+            <svg viewBox="0 0 16 16">
+              <path
+                fill="currentColor"
+                d="M8 0C3.58 0 0 3.58 0 8a8 8 0 0 0 5.47 7.59c.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49C4 14.09 3.48 13.73 3.32 13.5c-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.01.08-2.11 0 0 .67-.21 2.2.82a7.7 7.7 0 0 1 4 0c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.91.08 2.11.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.19 0 .21.15.46.55.38A8 8 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
+              />
+            </svg>
+          </span>
+          <span>{{ githubButtonText }}</span>
+        </button>
+      </div>
       <p v-if="loginErrorMessage" class="header-auth-error mono">{{ loginErrorMessage }}</p>
     </div>
   </div>
@@ -57,6 +74,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 
+import { getGithubAuthorizeUrl } from '../../api';
 import { useAuthStore } from '../../stores/authStore';
 import { useCollectionStore } from '../../stores/collectionStore';
 
@@ -65,6 +83,8 @@ const googleButtonRef = ref(null);
 const userMenuRef = ref(null);
 const userMenuOpen = ref(false);
 const scriptLoadError = ref('');
+const githubLoginError = ref('');
+const githubLoading = ref(false);
 const router = useRouter();
 const route = useRoute();
 const { user, isAuthenticated, loading, errorMessage, loginWithGoogleCredential, logout } = useAuthStore();
@@ -74,8 +94,9 @@ const userEmail = computed(() => String(user.value?.email || '').trim());
 const avatarInitial = computed(() => userEmail.value.slice(0, 1).toUpperCase() || 'U');
 const isHistoryPage = computed(() => route.name === 'research-history');
 const isCollectionWorkbenchPage = computed(() => route.name === 'collection-workbench');
+const githubButtonText = computed(() => (githubLoading.value ? 'GitHub 登录中...' : '使用 GitHub 登录'));
 const loginErrorMessage = computed(() => {
-  return scriptLoadError.value || errorMessage.value;
+  return scriptLoadError.value || githubLoginError.value || errorMessage.value;
 });
 
 let gisScriptPromise = null;
@@ -116,11 +137,51 @@ async function handleCredentialResponse(response) {
   try {
     await loginWithGoogleCredential(credential);
     scriptLoadError.value = '';
+    githubLoginError.value = '';
     if (googleButtonRef.value) {
       googleButtonRef.value.innerHTML = '';
     }
   } catch {
     // error message is managed by authStore
+  }
+}
+
+function normalizeGithubLoginError(rawMessage) {
+  const safe = String(rawMessage || '').trim();
+  if (!safe) return 'GitHub 登录初始化失败，请稍后重试。';
+
+  const mapped = {
+    github_login_not_configured: '请先配置 GitHub 登录。',
+    invalid_github_state: 'GitHub 登录状态已失效，请重试。',
+    invalid_github_code: 'GitHub 授权码无效或已过期，请重新登录。',
+    github_email_not_verified: 'GitHub 账户缺少可用的已验证邮箱，请检查后重试。',
+    github_token_exchange_failed: 'GitHub 登录初始化失败，请稍后重试。',
+    github_profile_request_failed: 'GitHub 登录初始化失败，请稍后重试。',
+    github_email_request_failed: 'GitHub 登录初始化失败，请稍后重试。',
+    invalid_github_access_token: 'GitHub 登录初始化失败，请稍后重试。',
+    github_access_token_missing: 'GitHub 登录初始化失败，请稍后重试。',
+    github_profile_incomplete: 'GitHub 账户信息不完整，请检查后重试。'
+  };
+  return mapped[safe] || 'GitHub 登录初始化失败，请稍后重试。';
+}
+
+async function startGithubLogin() {
+  if (loading.value || githubLoading.value) return;
+  githubLoading.value = true;
+  githubLoginError.value = '';
+  scriptLoadError.value = '';
+
+  try {
+    const payload = await getGithubAuthorizeUrl();
+    const authorizeUrl = String(payload?.authorize_url || '').trim();
+    if (!authorizeUrl) {
+      throw new Error('GitHub 登录地址无效，请稍后重试。');
+    }
+    window.location.assign(authorizeUrl);
+  } catch (error) {
+    githubLoginError.value = normalizeGithubLoginError(error?.message);
+  } finally {
+    githubLoading.value = false;
   }
 }
 
@@ -204,6 +265,7 @@ async function mountGoogleButton() {
 watch(isAuthenticated, (next) => {
   if (!next) {
     closeUserMenu();
+    githubLoginError.value = '';
     void mountGoogleButton();
     return;
   }

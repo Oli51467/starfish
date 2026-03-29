@@ -48,6 +48,15 @@ class AuthGoogleRequest(BaseModel):
     credential: str = Field(..., min_length=10)
 
 
+class AuthGithubCodeRequest(BaseModel):
+    code: str = Field(..., min_length=8)
+    state: str = Field(..., min_length=16)
+
+
+class AuthGithubStartResponse(BaseModel):
+    authorize_url: str = Field(..., min_length=1)
+
+
 class UserProfile(BaseModel):
     id: str
     email: str

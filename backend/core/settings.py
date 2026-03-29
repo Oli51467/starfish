@@ -138,6 +138,9 @@ class Settings:
 
         # Auth
         self.google_client_id = (os.getenv("GOOGLE_CLIENT_ID") or "").strip()
+        self.github_oauth_client_id = (os.getenv("GITHUB_OAUTH_CLIENT_ID") or "").strip()
+        self.github_oauth_client_secret = (os.getenv("GITHUB_OAUTH_CLIENT_SECRET") or "").strip()
+        self.github_oauth_redirect_uri = (os.getenv("GITHUB_OAUTH_REDIRECT_URI") or "").strip()
         self.session_secret = (os.getenv("SESSION_SECRET") or "change-this-session-secret").strip()
         self.session_expire_hours = max(1, int(os.getenv("SESSION_EXPIRE_HOURS", "168")))
 

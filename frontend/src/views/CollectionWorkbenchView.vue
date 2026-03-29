@@ -124,7 +124,10 @@
 
             <LoadingState v-if="savedPapersLoading" message="正在加载论文..." />
             <ErrorBoundary v-else-if="savedPapersErrorMessage && !savedPapers.length" :message="savedPapersErrorMessage" />
-            <p v-else-if="!visiblePapers.length" class="muted">当前筛选条件下暂无论文。</p>
+            <section v-else-if="!visiblePapers.length" class="collection-empty-state">
+              <p class="collection-empty-state-title">暂无可展示论文</p>
+              <p class="collection-empty-state-subtitle mono">可调整筛选条件或切换分组后重试</p>
+            </section>
             <div v-else class="collection-paper-list">
               <article
                 v-for="item in visiblePapers"
@@ -1172,6 +1175,32 @@ onMounted(async () => {
   align-content: start;
 }
 
+.collection-empty-state {
+  margin-top: 10px;
+  min-height: 320px;
+  display: grid;
+  gap: 8px;
+  place-content: center;
+  justify-items: center;
+  text-align: center;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+}
+
+.collection-empty-state-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.collection-empty-state-subtitle {
+  margin: 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
 .collection-paper-card {
   position: relative;
   border: 1px solid var(--line);
@@ -1545,6 +1574,10 @@ onMounted(async () => {
   .collection-layout {
     min-height: auto;
     grid-template-columns: 1fr;
+  }
+
+  .collection-empty-state {
+    min-height: 240px;
   }
 
   .collection-main-body {

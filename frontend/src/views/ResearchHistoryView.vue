@@ -12,7 +12,10 @@
           <div class="panel-body">
             <ErrorBoundary v-if="errorMessage && !hasRecords" :message="errorMessage" />
             <LoadingState v-else-if="listLoading" message="正在加载研究历史..." />
-            <p v-else-if="!hasRecords" class="muted history-empty">暂无研究记录。</p>
+            <section v-else-if="!hasRecords" class="history-empty-state history-empty-state-list">
+              <p class="history-empty-state-title">还没有研究历史</p>
+              <p class="history-empty-state-subtitle mono">完成一次研究后会自动记录在这里</p>
+            </section>
             <div v-else class="history-table-wrap">
               <table class="history-table">
                 <thead>
@@ -144,7 +147,10 @@
 
         <article class="panel history-detail-panel">
           <LoadingState v-if="detailLoading" message="正在加载图谱详情..." />
-          <p v-else-if="!selectedDetail" class="muted history-empty">请选择一条记录查看知识图谱。</p>
+          <section v-else-if="!selectedDetail" class="history-empty-state history-empty-state-detail">
+            <p class="history-empty-state-title">请先选择研究记录</p>
+            <p class="history-empty-state-subtitle mono">选中左侧条目后可查看对应知识图谱与报告</p>
+          </section>
           <div v-else class="history-detail-content">
             <section v-if="showSignalPanel" class="history-signal-panel">
               <header class="history-signal-head">

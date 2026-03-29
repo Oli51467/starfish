@@ -190,14 +190,63 @@
   white-space: nowrap;
 }
 
-.header-google-entry {
+.header-auth-entry {
   display: grid;
   justify-items: end;
   gap: 4px;
 }
 
+.header-auth-options {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .header-google-button {
   min-height: 36px;
+}
+
+.header-github-auth-btn {
+  height: 36px;
+  border-radius: 999px;
+  border: 1px solid #111;
+  background: #111;
+  color: #fff;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.header-github-auth-btn:hover {
+  opacity: 0.92;
+}
+
+.header-github-auth-btn:active {
+  transform: translateY(1px);
+}
+
+.header-github-auth-btn:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.header-github-auth-icon {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.header-github-auth-icon svg {
+  width: 14px;
+  height: 14px;
+  display: block;
 }
 
 .header-auth-error {
@@ -470,6 +519,11 @@
 
   .header-auth {
     gap: 6px;
+  }
+
+  .header-auth-options {
+    gap: 6px;
+    justify-content: flex-end;
   }
 
   .header-user-pill {

@@ -81,6 +81,9 @@ REDIS_URL=redis://localhost:6379/0
 
 # Auth
 GOOGLE_CLIENT_ID=
+GITHUB_OAUTH_CLIENT_ID=
+GITHUB_OAUTH_CLIENT_SECRET=
+GITHUB_OAUTH_REDIRECT_URI=http://localhost:17327/auth/github/callback
 SESSION_SECRET=change-this-session-secret
 
 # Service
@@ -92,5 +95,7 @@ CORS_ORIGINS=http://localhost:17327,http://127.0.0.1:17327
 VITE_API_BASE_URL=http://localhost:14032
 VITE_GOOGLE_CLIENT_ID=
 ```
+
+使用 GitHub OAuth 时，请确保 GitHub OAuth App 中配置的回调地址与 `GITHUB_OAUTH_REDIRECT_URI` 完全一致。
 
 可选检索增强配置（按需启用）：`SEMANTIC_SCHOLAR_API_KEY`、`OPENALEX_MAILTO`、`SCITE_API_KEY`、`GITHUB_TOKEN`。

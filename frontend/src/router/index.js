@@ -10,12 +10,18 @@ import ReadingListView from '../views/ReadingListView.vue';
 import GapFinderView from '../views/GapFinderView.vue';
 import CollectionWorkbenchView from '../views/CollectionWorkbenchView.vue';
 import ResearchHistoryView from '../views/ResearchHistoryView.vue';
+import GithubAuthCallbackView from '../views/GithubAuthCallbackView.vue';
 
 const routes = [
   {
     path: '/',
     name: 'home',
     component: HomeView
+  },
+  {
+    path: '/auth/github/callback',
+    name: 'github-auth-callback',
+    component: GithubAuthCallbackView
   },
   {
     path: '/research/domain/graph',
