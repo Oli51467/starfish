@@ -12,6 +12,7 @@ TaskRunner = Callable[[AgentTask, str], Awaitable[AgentTaskResult]]
 @dataclass(frozen=True)
 class WorkerPoolConfig:
     worker_count: int = 4
+    task_timeout_seconds: float = 75.0
 
 
 class InsightWorkerPool:
@@ -20,6 +21,7 @@ class InsightWorkerPool:
     def __init__(self, *, config: WorkerPoolConfig | None = None) -> None:
         safe = config or WorkerPoolConfig()
         self.worker_count = max(1, int(safe.worker_count))
+        self.task_timeout_seconds = max(1.0, min(300.0, float(safe.task_timeout_seconds)))
 
     async def run(
         self,
@@ -37,21 +39,49 @@ class InsightWorkerPool:
             await queue.put((-1, None))
 
         ordered_results: list[AgentTaskResult | None] = [None] * len(tasks)
-        first_error: Exception | None = None
-
         async def worker_loop(worker_index: int) -> None:
-            nonlocal first_error
             worker_id = f"insight-worker-{worker_index}"
             while True:
                 index, task = await queue.get()
                 try:
                     if task is None:
                         return
-                    result = await runner(task, worker_id)
+                    configured_timeout = max(1.0, float(self.task_timeout_seconds))
+                    task_timeout = max(
+                        configured_timeout,
+                        float(getattr(task, "timeout_seconds", 0.0) or 0.0),
+                    )
+                    try:
+                        result = await asyncio.wait_for(
+                            runner(task, worker_id),
+                            timeout=task_timeout,
+                        )
+                    except TimeoutError:
+                        result = AgentTaskResult(
+                            task_id=str(task.task_id or "").strip(),
+                            profile_id=str(task.profile_id or "").strip(),
+                            role_id=str(task.role_id or "").strip(),
+                            status="failed",
+                            output="",
+                            extra={
+                                "error": "worker_task_timeout",
+                                "worker_id": worker_id,
+                                "timeout_seconds": round(task_timeout, 2),
+                            },
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        result = AgentTaskResult(
+                            task_id=str(task.task_id or "").strip(),
+                            profile_id=str(task.profile_id or "").strip(),
+                            role_id=str(task.role_id or "").strip(),
+                            status="failed",
+                            output="",
+                            extra={
+                                "error": str(exc),
+                                "worker_id": worker_id,
+                            },
+                        )
                     ordered_results[index] = result
-                except Exception as exc:  # noqa: BLE001
-                    if first_error is None:
-                        first_error = exc
                 finally:
                     queue.task_done()
 
@@ -62,6 +92,4 @@ class InsightWorkerPool:
         await queue.join()
         await asyncio.gather(*workers, return_exceptions=True)
 
-        if first_error is not None:
-            raise first_error
         return [item for item in ordered_results if isinstance(item, AgentTaskResult)]

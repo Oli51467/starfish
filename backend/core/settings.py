@@ -119,6 +119,10 @@ class Settings:
             5.0,
             min(180.0, float(os.getenv("INSIGHT_WORKER_SUBPROCESS_TIMEOUT_SECONDS", "40"))),
         )
+        self.insight_worker_task_timeout_seconds = max(
+            10.0,
+            min(300.0, float(os.getenv("INSIGHT_WORKER_TASK_TIMEOUT_SECONDS", "75"))),
+        )
         self.insight_pdf_render_timeout_seconds = max(
             8.0,
             min(90.0, float(os.getenv("INSIGHT_PDF_RENDER_TIMEOUT_SECONDS", "15"))),

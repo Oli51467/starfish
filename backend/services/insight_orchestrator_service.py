@@ -297,6 +297,7 @@ def get_insight_orchestrator_service() -> InsightOrchestratorService:
         worker_pool=InsightWorkerPool(
             config=WorkerPoolConfig(
                 worker_count=max(1, int(settings.insight_worker_count)),
+                task_timeout_seconds=max(10.0, float(settings.insight_worker_task_timeout_seconds)),
             )
         ),
     )

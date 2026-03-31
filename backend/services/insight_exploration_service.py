@@ -136,6 +136,7 @@ class InsightExplorationService:
                 worker_pool=InsightWorkerPool(
                     config=WorkerPoolConfig(
                         worker_count=max(1, int(self.settings.insight_worker_count)),
+                        task_timeout_seconds=max(10.0, float(self.settings.insight_worker_task_timeout_seconds)),
                     )
                 ),
             )
@@ -461,6 +462,19 @@ class InsightExplorationService:
                 )
 
         for round_index in range(1, rounds + 1):
+            await self._emit_lifecycle_event(
+                stream_callback=stream_callback,
+                session_id=session_id,
+                event_type="insight_round_progress",
+                accumulated_chars=streamed_chars,
+                details={
+                    "phase": "round_started",
+                    "round_index": round_index,
+                    "total_rounds": rounds,
+                    "base_papers": len(normalized_papers),
+                    "extension_papers": len(extension_papers),
+                },
+            )
             expansion_queries = self._build_round_expansion_queries(
                 base_query=query,
                 round_index=round_index,
@@ -526,6 +540,20 @@ class InsightExplorationService:
             journal.rounds.append(round_result)
             round_task_totals.append(int(round_result.total_task_count))
             round_spawn_totals.append(int(round_result.spawned_task_count))
+            await self._emit_lifecycle_event(
+                stream_callback=stream_callback,
+                session_id=session_id,
+                event_type="insight_round_progress",
+                accumulated_chars=streamed_chars,
+                details={
+                    "phase": "round_completed",
+                    "round_index": round_index,
+                    "total_rounds": rounds,
+                    "completed_tasks": int(round_result.total_task_count),
+                    "spawned_tasks": int(round_result.spawned_task_count),
+                    "extension_papers": len(extension_papers),
+                },
+            )
 
             role_outputs: list[str] = []
             for result in round_result.results:

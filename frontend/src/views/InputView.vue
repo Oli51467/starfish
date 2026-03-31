@@ -78,7 +78,6 @@
             id="input-value"
             class="seed-text-input mono"
             v-model="mapInput.input_value"
-            :placeholder="currentInputMeta.placeholder"
             :disabled="!hasInputType || !canUseFeatures"
           />
           <div class="seed-strategy-picker" ref="strategyPickerRef">
@@ -228,23 +227,6 @@ const modeMenuOpen = ref(false);
 const paperSubmenuOpen = ref(false);
 const domainSubmenuOpen = ref(false);
 const strategyMenuOpen = ref(false);
-const inputTypeMeta = {
-  arxiv_id: {
-    placeholder: '例如：2301.07041',
-    hint: '输入 arXiv ID，构建以该论文为中心的知识图谱。'
-  },
-  doi: {
-    placeholder: '例如：10.1145/3442188.3445922',
-    hint: '输入 DOI ID，构建以该论文为中心的知识图谱。'
-  },
-  domain: {
-    placeholder: '例如：transformer、深度强化学习、多模态大模型',
-    hint: '输入研究领域，生成子方向与核心论文的知识图谱。'
-  }
-};
-const currentInputMeta = computed(
-  () => inputTypeMeta[mapInput.value.input_type] || { placeholder: '', hint: '' }
-);
 const selectedMode = computed(() => {
   const type = String(mapInput.value.input_type || '').trim();
   if (type === 'domain') return 'domain';

@@ -839,9 +839,18 @@ export function usePaperWorkflow({
     if (insightStreamWatchdogTimer || typeof window === 'undefined') return;
     insightStreamWatchdogTimer = window.setInterval(() => {
       if (!unifiedRuntimeActive.value) return;
-      if (!insightReportStreaming.value) return;
+      const insightStep = steps.value.find((item) => item.key === 'insight');
+      const insightStepStatus = String(insightStep?.status || '').trim().toLowerCase();
+      const shouldWatch = Boolean(
+        insightReportStreaming.value
+        || (insightStepStatus === 'running' && !insightReportReady.value)
+      );
+      if (!shouldWatch) return;
       const lastAt = Number(lastInsightStreamAt.value || 0);
-      if (!Number.isFinite(lastAt) || lastAt <= 0) return;
+      if (!Number.isFinite(lastAt) || lastAt <= 0) {
+        markInsightStreamHeartbeat();
+        return;
+      }
       if (Date.now() - lastAt < INSIGHT_STREAM_STALL_MS) return;
       if (insightStreamReconcileInFlight) return;
       insightStreamReconcileInFlight = true;
@@ -853,8 +862,12 @@ export function usePaperWorkflow({
 
   function reconcileInsightProgressFromSnapshot(snapshot = {}) {
     const status = String(snapshot?.status || '').trim().toLowerCase();
+    const waiting = String(snapshot?.waiting_checkpoint || '').trim().toLowerCase();
+    const currentNode = String(snapshot?.current_node || '').trim().toLowerCase();
     const insightPayload = snapshot?.insight && typeof snapshot.insight === 'object' ? snapshot.insight : {};
-    const serverMarkdown = String(insightPayload?.markdown || '').trim();
+    const serverMarkdown = String(insightPayload?.markdown || snapshot?.report || '').trim();
+    const insightStep = steps.value.find((item) => item.key === 'insight');
+    const insightStepStatus = String(insightStep?.status || '').trim().toLowerCase();
 
     if (serverMarkdown) {
       insightReportMarkdown.value = serverMarkdown;
@@ -868,6 +881,19 @@ export function usePaperWorkflow({
       if (status !== 'completed') {
         setStepStatusByKey('insight', 'running', '探索报告已生成，正在保存与收敛。');
       }
+      return true;
+    }
+
+    if (
+      status === 'running'
+      && waiting !== 'checkpoint_2'
+      && (insightStepStatus === 'action_required' || currentNode === 'insight' || currentNode === 'checkpoint_2')
+    ) {
+      markEarlierStepsDone('insight');
+      setStepAction('insight', null);
+      insightConfigSubmitting.value = false;
+      setStepStatusByKey('insight', 'running', '正在执行 Insight Agent。');
+      markInsightStreamHeartbeat();
       return true;
     }
 
@@ -1427,9 +1453,10 @@ export function usePaperWorkflow({
   }
 
   function hydrateRuntimeArtifacts(snapshot = {}) {
+    const fallbackReport = String(snapshot?.report || '').trim();
     if (snapshot?.insight && typeof snapshot.insight === 'object') {
       const insightPayload = snapshot.insight;
-      const markdown = String(insightPayload?.markdown || '').trim();
+      const markdown = String(insightPayload?.markdown || fallbackReport).trim();
       const language = String(insightPayload?.language || '').trim().toLowerCase();
       syncInsightInlineConfig({
         agent_count: insightPayload?.agent_count,
@@ -1442,6 +1469,16 @@ export function usePaperWorkflow({
       insightReportLanguage.value = language === 'en' ? 'en' : 'zh';
       insightReportReady.value = String(insightPayload?.status || '').trim().toLowerCase() === 'completed' || Boolean(markdown);
       if (insightReportReady.value) {
+        insightReportStreaming.value = false;
+      }
+    } else if (fallbackReport) {
+      insightReportMarkdown.value = fallbackReport;
+      insightStreamAccumulatedChars.value = Math.max(
+        insightStreamAccumulatedChars.value,
+        fallbackReport.length
+      );
+      insightReportReady.value = Boolean(fallbackReport);
+      if (String(snapshot?.status || '').trim().toLowerCase() === 'completed') {
         insightReportStreaming.value = false;
       }
     }
@@ -2259,6 +2296,7 @@ export function usePaperWorkflow({
   }
 
   function handleInsightOrchestratorEvent(event = {}) {
+    markInsightStreamHeartbeat();
     const payload = event?.event && typeof event.event === 'object' ? event.event : {};
     const eventType = String(payload?.type || '').trim().toLowerCase();
     if (!eventType) return;
@@ -2530,7 +2568,12 @@ export function usePaperWorkflow({
         }
       }
     } else {
+      waitingResearchCheckpoint.value = '';
       runtimeAutoResumingCheckpoint.value = '';
+      const insightStep = steps.value.find((item) => item.key === 'insight');
+      if (String(insightStep?.status || '').trim().toLowerCase() === 'action_required') {
+        setStepAction('insight', null);
+      }
     }
 
     return snapshot;
