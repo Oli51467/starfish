@@ -90,6 +90,10 @@ class GraphRAGService:
         "recency": 0.06,
         "representative": 0.14,
     }
+    _DOMAIN_SEED_TITLE_OVERLAP_MIN = 0.58
+    _DOMAIN_SEED_YEAR_TOLERANCE = 3
+    _DOMAIN_FORCE_SEED_MIN = 2
+    _DOMAIN_FORCE_SEED_MAX = 3
 
     def __init__(self, neo4j_repo: Neo4jRepository | None = None) -> None:
         self.semantic = SemanticScholarClient()
@@ -1203,6 +1207,10 @@ class GraphRAGService:
                 candidates=candidate_pool,
                 max_papers=max_papers,
             )
+            seed_anchors = self._choose_domain_seed_anchors(
+                resolved_seeds=resolved_seeds,
+                max_papers=max_papers,
+            )
             filter_status = "done"
             if bool(rerank_payload.get("success")):
                 selected_papers = list(rerank_payload.get("selected_papers") or [])
@@ -1216,6 +1224,12 @@ class GraphRAGService:
                     paper_range_years=paper_range_years,
                 )
                 rerank_payload["selected_count"] = int(fallback_stats.get("selected") or len(selected_papers))
+            selected_papers, forced_seed_count = self._ensure_domain_seed_coverage(
+                selected_papers=selected_papers,
+                candidate_pool=candidate_pool,
+                seed_anchors=seed_anchors,
+                max_papers=max_papers,
+            )
             filter_elapsed = perf_counter() - filter_start
 
             providers_used = self._merge_provider_list(
@@ -1246,16 +1260,17 @@ class GraphRAGService:
 
             valid_id_count = self._safe_int(rerank_payload.get("valid_id_count"))
             invalid_id_count = self._safe_int(rerank_payload.get("invalid_id_count"))
+            forced_hint = f" 已强制保留经典 seed {forced_seed_count} 篇。" if forced_seed_count > 0 else ""
             if filter_status == "done":
                 filter_detail = (
                     f"候选 {len(candidate_pool)} 篇，LLM 二次重排成功（有效ID {valid_id_count}，"
-                    f"剔除非法/重复ID {invalid_id_count} 个），按固定权重筛选保留 {len(selected_papers)} 篇。"
+                    f"剔除非法/重复ID {invalid_id_count} 个），按固定权重筛选保留 {len(selected_papers)} 篇。{forced_hint}"
                 )
             else:
                 fallback_reason = str(rerank_payload.get("failure_reason") or "llm_rerank_failed")
                 filter_detail = (
                     f"候选 {len(candidate_pool)} 篇，LLM 二次重排失败（{fallback_reason}），"
-                    f"已回退稳定排序保留 {len(selected_papers)} 篇。"
+                    f"已回退稳定排序保留 {len(selected_papers)} 篇。{forced_hint}"
                 )
 
             return {
@@ -1373,7 +1388,7 @@ class GraphRAGService:
         source_stats: list[dict[str, Any]] = []
         resolved_raw: list[dict[str, Any]] = []
 
-        for suggestion in seed_suggestions[:50]:
+        for suggestion_index, suggestion in enumerate(seed_suggestions[:50]):
             title = re.sub(r"\s+", " ", str(suggestion.get("title") or "").strip())
             if len(title) < 3:
                 unresolved_count += 1
@@ -1391,7 +1406,7 @@ class GraphRAGService:
             )
             source_stats = self._merge_source_stats(source_stats, list(payload.get("source_stats") or []))
 
-            matched = self._match_domain_seed_candidate(
+            matched, match_score = self._match_domain_seed_candidate(
                 requested_title=title,
                 requested_year=expected_year,
                 candidates=list(payload.get("papers") or []),
@@ -1399,6 +1414,8 @@ class GraphRAGService:
             if not matched:
                 unresolved_count += 1
                 continue
+            matched["_seed_match_score"] = round(max(0.0, min(1.0, match_score)), 6)
+            matched["_seed_rank_index"] = suggestion_index
             resolved_raw.append(matched)
 
         deduped = self._dedupe_domain_candidates(resolved_raw)
@@ -1425,13 +1442,14 @@ class GraphRAGService:
         requested_title: str,
         requested_year: int,
         candidates: list[dict[str, Any]],
-    ) -> dict[str, Any] | None:
+    ) -> tuple[dict[str, Any] | None, float]:
         requested_key = self._normalized_title_key(requested_title)
         if not requested_key:
-            return None
+            return None, 0.0
 
         best_candidate: dict[str, Any] | None = None
-        best_key: tuple[float, float, float, int, int] | None = None
+        best_key: tuple[float, float, float, float, int, int] | None = None
+        best_confidence = 0.0
         for candidate in candidates:
             normalized = self._normalize_retrieved_paper(candidate)
             title = str(normalized.get("title") or "").strip()
@@ -1441,25 +1459,32 @@ class GraphRAGService:
 
             candidate_key = self._normalized_title_key(title)
             exact_match = 1.0 if requested_key == candidate_key else 0.0
+            contains_match = (
+                1.0
+                if requested_key and candidate_key and (requested_key in candidate_key or candidate_key in requested_key)
+                else 0.0
+            )
             overlap = self._title_token_overlap(requested_title, title)
-            if exact_match <= 0.0 and overlap < 0.66:
+            if exact_match <= 0.0 and contains_match <= 0.0 and overlap < float(self._DOMAIN_SEED_TITLE_OVERLAP_MIN):
                 continue
 
             year_value = self._safe_int(normalized.get("year"))
-            if requested_year > 0 and year_value > 0 and abs(year_value - requested_year) > 2:
+            year_tolerance = max(0, int(self._DOMAIN_SEED_YEAR_TOLERANCE))
+            if requested_year > 0 and year_value > 0 and abs(year_value - requested_year) > year_tolerance:
                 continue
 
             if requested_year > 0:
                 if year_value <= 0:
                     year_match = 0.0
                 else:
-                    year_match = max(0.0, 1.0 - abs(year_value - requested_year) / 3.0)
+                    year_match = max(0.0, 1.0 - abs(year_value - requested_year) / max(1, year_tolerance + 1))
             else:
                 year_match = 0.5 if year_value > 0 else 0.0
 
             citation_count = self._safe_int(normalized.get("citation_count"))
             ranking_key = (
                 exact_match,
+                contains_match,
                 overlap,
                 year_match,
                 citation_count,
@@ -1468,8 +1493,15 @@ class GraphRAGService:
             if best_key is None or ranking_key > best_key:
                 best_key = ranking_key
                 best_candidate = normalized
+                best_confidence = max(
+                    exact_match,
+                    contains_match * 0.9,
+                    overlap * 0.85,
+                )
+                if requested_year > 0 and year_value > 0:
+                    best_confidence = max(0.0, min(1.0, best_confidence * 0.8 + year_match * 0.2))
 
-        return best_candidate
+        return best_candidate, best_confidence
 
     def _expand_domain_seed_candidates(
         self,
@@ -1743,6 +1775,10 @@ class GraphRAGService:
 
         for paper in papers:
             normalized = self._normalize_retrieved_paper(paper)
+            if "_seed_match_score" in paper:
+                normalized["_seed_match_score"] = self._safe_float(paper.get("_seed_match_score"))
+            if "_seed_rank_index" in paper:
+                normalized["_seed_rank_index"] = self._safe_int(paper.get("_seed_rank_index"))
             paper_id = str(normalized.get("paper_id") or "").strip()
             title = str(normalized.get("title") or "").strip()
             if not paper_id or not title:
@@ -1781,6 +1817,123 @@ class GraphRAGService:
                     key_to_index[key] = existing_index
 
         return deduped
+
+    def _choose_domain_seed_anchors(
+        self,
+        *,
+        resolved_seeds: list[dict[str, Any]],
+        max_papers: int,
+    ) -> list[dict[str, Any]]:
+        if not resolved_seeds or max_papers <= 0:
+            return []
+        seed_target = max(1, min(int(self._DOMAIN_FORCE_SEED_MAX), max_papers))
+        if max_papers >= 6:
+            seed_target = max(seed_target, int(self._DOMAIN_FORCE_SEED_MIN))
+        seed_target = min(seed_target, len(resolved_seeds), max_papers)
+
+        ranked = sorted(
+            resolved_seeds,
+            key=lambda item: (
+                self._safe_float(item.get("_seed_match_score")),
+                self._safe_int(item.get("citation_count")),
+                -self._safe_int(item.get("_seed_rank_index")),
+            ),
+            reverse=True,
+        )
+        anchors: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in ranked:
+            key = self._domain_candidate_primary_key(item)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            anchors.append(item)
+            if len(anchors) >= seed_target:
+                break
+        return anchors
+
+    def _ensure_domain_seed_coverage(
+        self,
+        *,
+        selected_papers: list[dict[str, Any]],
+        candidate_pool: list[dict[str, Any]],
+        seed_anchors: list[dict[str, Any]],
+        max_papers: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        if max_papers <= 0:
+            return [], 0
+        if not seed_anchors:
+            return selected_papers[:max_papers], 0
+
+        normalized_selected = [self._normalize_retrieved_paper(item) for item in selected_papers]
+        selected_keys = {
+            self._domain_candidate_primary_key(item)
+            for item in normalized_selected
+            if self._domain_candidate_primary_key(item)
+        }
+        pool_by_key: dict[str, dict[str, Any]] = {}
+        for item in candidate_pool:
+            normalized = self._normalize_retrieved_paper(item)
+            key = self._domain_candidate_primary_key(normalized)
+            if key and key not in pool_by_key:
+                pool_by_key[key] = normalized
+
+        to_add: list[dict[str, Any]] = []
+        for anchor in seed_anchors:
+            key = self._domain_candidate_primary_key(anchor)
+            if not key or key in selected_keys:
+                continue
+            selected_keys.add(key)
+            to_add.append(pool_by_key.get(key) or self._normalize_retrieved_paper(anchor))
+
+        if not to_add:
+            return normalized_selected[:max_papers], 0
+
+        merged = [*to_add, *normalized_selected]
+        deduped: list[dict[str, Any]] = []
+        seen_primary: set[str] = set()
+        seen_titles: set[str] = set()
+        for item in merged:
+            primary = self._domain_candidate_primary_key(item)
+            title_key = self._normalized_title_key(str(item.get("title") or ""))
+            if primary and primary in seen_primary:
+                continue
+            if title_key and title_key in seen_titles:
+                continue
+            if primary:
+                seen_primary.add(primary)
+            if title_key:
+                seen_titles.add(title_key)
+            deduped.append(item)
+            if len(deduped) >= max_papers:
+                break
+        forced_inserted = sum(
+            1
+            for item in deduped
+            if self._domain_candidate_primary_key(item)
+            in {
+                self._domain_candidate_primary_key(anchor)
+                for anchor in to_add
+                if self._domain_candidate_primary_key(anchor)
+            }
+        )
+        return deduped[:max_papers], forced_inserted
+
+    def _domain_candidate_primary_key(self, paper: dict[str, Any]) -> str:
+        identity = self._domain_candidate_identity_keys(paper)
+        if identity.get("doi"):
+            return str(identity["doi"])
+        if identity.get("arxiv"):
+            return str(identity["arxiv"])
+        if identity.get("title_year"):
+            return str(identity["title_year"])
+        paper_key = self._paper_key(str(paper.get("paper_id") or ""))
+        if paper_key:
+            return f"id:{paper_key}"
+        title_key = self._normalized_title_key(str(paper.get("title") or ""))
+        if title_key:
+            return f"title:{title_key}"
+        return ""
 
     def _domain_candidate_identity_keys(self, paper: dict[str, Any]) -> dict[str, str]:
         paper_id = str(paper.get("paper_id") or "")

@@ -444,6 +444,68 @@ class DomainAuthorityQueryTests(unittest.TestCase):
         )
         self.assertAlmostEqual(full_score, 1.0, places=6)
 
+    def test_seed_candidate_match_accepts_year_tolerance_of_three(self) -> None:
+        service = GraphRAGService()
+        matched, score = service._match_domain_seed_candidate(
+            requested_title="Attention Is All You Need",
+            requested_year=2017,
+            candidates=[
+                {
+                    "paper_id": "openalex:W-older",
+                    "title": "Attention Is All You Need",
+                    "abstract": "",
+                    "year": 2014,
+                    "citation_count": 5000,
+                    "venue": "NeurIPS",
+                }
+            ],
+        )
+        self.assertIsNotNone(matched)
+        self.assertGreater(score, 0.5)
+
+    def test_seed_coverage_forces_anchor_into_topk(self) -> None:
+        service = GraphRAGService()
+        current_year = datetime.now(timezone.utc).year
+        seed_anchor = {
+            "paper_id": "openalex:seed-anchor",
+            "title": "Anchor Seed Paper",
+            "abstract": "classic",
+            "year": current_year - 1,
+            "citation_count": 9000,
+            "venue": "TopConf",
+            "_seed_match_score": 0.98,
+            "_seed_rank_index": 0,
+        }
+        selected = [
+            {
+                "paper_id": "openalex:selected-1",
+                "title": "Selected Paper 1",
+                "abstract": "selected",
+                "year": current_year,
+                "citation_count": 200,
+                "venue": "Conf",
+            },
+            {
+                "paper_id": "openalex:selected-2",
+                "title": "Selected Paper 2",
+                "abstract": "selected",
+                "year": current_year,
+                "citation_count": 190,
+                "venue": "Conf",
+            },
+        ]
+        candidate_pool = [seed_anchor, *selected]
+        anchors = service._choose_domain_seed_anchors(resolved_seeds=[seed_anchor], max_papers=2)
+        adjusted, forced_count = service._ensure_domain_seed_coverage(
+            selected_papers=selected,
+            candidate_pool=candidate_pool,
+            seed_anchors=anchors,
+            max_papers=2,
+        )
+        adjusted_ids = [str(item.get("paper_id") or "") for item in adjusted]
+        self.assertIn("openalex:seed-anchor", adjusted_ids)
+        self.assertEqual(forced_count, 1)
+
     def test_seed_inputs_still_use_seed_retrieval_path(self) -> None:
         service = GraphRAGService()
         with patch.object(
