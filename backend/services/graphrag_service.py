@@ -84,6 +84,12 @@ class GraphRAGService:
         flags=re.IGNORECASE,
     )
     _DOI_PATTERN = re.compile(r"10\.\d{4,9}/\S+", flags=re.IGNORECASE)
+    _DOMAIN_AUTHORITY_WEIGHTS = {
+        "relevance": 0.46,
+        "citation": 0.34,
+        "recency": 0.06,
+        "representative": 0.14,
+    }
 
     def __init__(self, neo4j_repo: Neo4jRepository | None = None) -> None:
         self.semantic = SemanticScholarClient()
@@ -740,6 +746,7 @@ class GraphRAGService:
         candidate_limit = min(180, max(safe_max + 20, safe_max * 6)) if domain_authority_mode else min(120, max(safe_max + 20, safe_max * 6))
         normalized_range = self._normalize_paper_range_years(paper_range_years)
         primary_provider = self._normalize_search_provider(preferred_provider)
+        domain_pipeline_fallback_reason = ""
         steps: list[dict[str, Any]] = []
         web_links = [
             f"https://api.semanticscholar.org/graph/v1/paper/search?query={quote_plus(safe_query)}",
@@ -823,6 +830,60 @@ class GraphRAGService:
             }
 
         if domain_authority_mode:
+            staged_result = self._run_domain_authority_pipeline(
+                query=safe_query,
+                max_papers=safe_max,
+                candidate_limit=candidate_limit,
+                paper_range_years=normalized_range,
+                preferred_provider=primary_provider,
+            )
+            if bool(staged_result.get("success")):
+                provider_used = str(staged_result.get("provider") or primary_provider)
+                providers_used = [
+                    str(item).strip()
+                    for item in (staged_result.get("providers_used") or [])
+                    if str(item).strip()
+                ]
+                provider_stats = list(staged_result.get("source_stats") or [])
+                candidate_papers = list(staged_result.get("candidate_papers") or [])
+                selected_papers = self._backfill_selected_citation_counts(
+                    list(staged_result.get("selected_papers") or [])
+                )
+                trace_provider = "+".join(providers_used) if providers_used else provider_used
+                steps.append(
+                    self._build_retrieval_step(
+                        phase="retrieve",
+                        title="候选论文检索",
+                        detail=str(staged_result.get("retrieve_detail") or "检索链路执行完成。"),
+                        status="done",
+                        provider=trace_provider,
+                        count=len(candidate_papers),
+                        links=[],
+                        elapsed_seconds=float(staged_result.get("retrieve_elapsed_seconds") or 0.0),
+                    )
+                )
+                steps.append(
+                    self._build_retrieval_step(
+                        phase="filter",
+                        title="候选筛选与排序",
+                        detail=str(staged_result.get("filter_detail") or "候选筛选完成。"),
+                        status=str(staged_result.get("filter_status") or "done"),
+                        provider=trace_provider,
+                        count=len(selected_papers),
+                        links=[],
+                        elapsed_seconds=float(staged_result.get("filter_elapsed_seconds") or 0.0),
+                    )
+                )
+                return {
+                    "query": safe_query,
+                    "provider": provider_used,
+                    "providers_used": providers_used,
+                    "provider_stats": provider_stats,
+                    "candidate_count": len(candidate_papers),
+                    "selected_papers": selected_papers,
+                    "steps": steps,
+                }
+            domain_pipeline_fallback_reason = str(staged_result.get("fallback_reason") or "").strip()
             search_result = self._search_domain_authority_candidates(
                 query=safe_query,
                 limit=candidate_limit,
@@ -864,25 +925,38 @@ class GraphRAGService:
         query_variants = list(search_result.get("query_variants") or [])
 
         if provider_used == "mock":
-            retrieve_detail = f"外部检索失败，已降级为 mock 数据（{len(candidate_papers)} 条候选）。{range_hint}"
+            fallback_hint = (
+                f" 新链路失败，已回退旧流程（{domain_pipeline_fallback_reason}）。"
+                if domain_authority_mode and domain_pipeline_fallback_reason
+                else ""
+            )
+            retrieve_detail = (
+                f"外部检索失败，已降级为 mock 数据（{len(candidate_papers)} 条候选）。"
+                f"{range_hint}{fallback_hint}"
+            )
         else:
             variant_hint = (
                 f" 基于 {len(query_variants)} 个主题扩展查询聚合结果。"
                 if domain_authority_mode and len(query_variants) > 1
                 else ""
             )
+            fallback_hint = (
+                f" 新链路失败，已回退旧流程（{domain_pipeline_fallback_reason}）。"
+                if domain_authority_mode and domain_pipeline_fallback_reason
+                else ""
+            )
             if len(providers_used) > 1:
                 retrieve_detail = (
                     f"并行检索已完成，多个学术索引共返回 {len(candidate_papers)} 条候选论文。"
-                    f"{variant_hint}{range_hint}"
+                    f"{variant_hint}{range_hint}{fallback_hint}"
                 )
             elif used_fallback and provider_used != primary_provider:
                 retrieve_detail = (
                     f"主检索通道暂不可用，"
-                    f"已自动切换备用通道，返回 {len(candidate_papers)} 条候选论文。{variant_hint}{range_hint}"
+                    f"已自动切换备用通道，返回 {len(candidate_papers)} 条候选论文。{variant_hint}{range_hint}{fallback_hint}"
                 )
             else:
-                retrieve_detail = f"检索通道返回 {len(candidate_papers)} 条候选论文。{variant_hint}{range_hint}"
+                retrieve_detail = f"检索通道返回 {len(candidate_papers)} 条候选论文。{variant_hint}{range_hint}{fallback_hint}"
 
         trace_provider = "+".join(providers_used) if providers_used else provider_used
         steps.append(
@@ -1075,6 +1149,703 @@ class GraphRAGService:
             "source_stats": merged_stats,
             "query_variants": query_variants,
         }
+
+    def _run_domain_authority_pipeline(
+        self,
+        *,
+        query: str,
+        max_papers: int,
+        candidate_limit: int,
+        paper_range_years: int | None,
+        preferred_provider: str,
+    ) -> dict[str, Any]:
+        safe_query = re.sub(r"\s+", " ", str(query or "").strip())
+        if not safe_query:
+            return {"success": False, "fallback_reason": "empty_query"}
+
+        try:
+            retrieve_start = perf_counter()
+            stage_a_suggestions = self._plan_domain_seed_papers_with_llm(
+                query=safe_query,
+                paper_range_years=paper_range_years,
+                max_seeds=50,
+            )
+            suggested_count = len(stage_a_suggestions)
+            if suggested_count <= 0:
+                return {"success": False, "fallback_reason": "stage_a_invalid_or_empty"}
+
+            stage_b_payload = self._resolve_domain_seed_candidates(
+                seed_suggestions=stage_a_suggestions,
+                preferred_provider=preferred_provider,
+                paper_range_years=paper_range_years,
+            )
+            resolved_seeds = list(stage_b_payload.get("resolved_seeds") or [])
+            if not resolved_seeds:
+                return {"success": False, "fallback_reason": "stage_b_no_resolved_seed"}
+
+            stage_c_payload = self._expand_domain_seed_candidates(
+                query=safe_query,
+                resolved_seeds=resolved_seeds,
+                preferred_provider=preferred_provider,
+                paper_range_years=paper_range_years,
+                max_expand_per_seed=10,
+                candidate_cap=min(200, max(200, candidate_limit)),
+            )
+            candidate_pool = list(stage_c_payload.get("candidate_pool") or [])
+            if not candidate_pool:
+                return {"success": False, "fallback_reason": "stage_c_empty_candidate_pool"}
+
+            retrieve_elapsed = perf_counter() - retrieve_start
+
+            filter_start = perf_counter()
+            rerank_payload = self._rerank_domain_candidates_with_llm(
+                query=safe_query,
+                candidates=candidate_pool,
+                max_papers=max_papers,
+            )
+            filter_status = "done"
+            if bool(rerank_payload.get("success")):
+                selected_papers = list(rerank_payload.get("selected_papers") or [])
+            else:
+                filter_status = "fallback"
+                selected_papers, fallback_stats = self._filter_and_rank_papers(
+                    candidate_pool,
+                    max_papers,
+                    safe_query,
+                    ranking_profile="domain_authority",
+                    paper_range_years=paper_range_years,
+                )
+                rerank_payload["selected_count"] = int(fallback_stats.get("selected") or len(selected_papers))
+            filter_elapsed = perf_counter() - filter_start
+
+            providers_used = self._merge_provider_list(
+                list(stage_b_payload.get("providers_used") or []),
+                list(stage_c_payload.get("providers_used") or []),
+            )
+            source_stats = self._merge_source_stats(
+                list(stage_b_payload.get("source_stats") or []),
+                list(stage_c_payload.get("source_stats") or []),
+            )
+            provider = self._merge_provider_labels(set(providers_used))
+            if provider == "mock":
+                provider = str(preferred_provider or "semantic_scholar").strip() or "semantic_scholar"
+
+            range_hint = self._build_year_range_hint(
+                paper_range_years,
+                dict(stage_c_payload.get("year_filter_stats") or {"applied": False, "removed": 0, "from_year": None}),
+            )
+            dropped_count = max(0, suggested_count - len(resolved_seeds))
+            expanded_count = self._safe_int(stage_c_payload.get("expanded_count"))
+            candidate_before_cap = self._safe_int(stage_c_payload.get("candidate_before_cap"))
+            truncated_count = self._safe_int(stage_c_payload.get("truncated_count"))
+            retrieve_detail = (
+                f"新链路完成：LLM 建议 {suggested_count} 篇，可解析 {len(resolved_seeds)} 篇，丢弃 {dropped_count} 篇；"
+                f"每种子最多扩展 10 篇，共扩展 {expanded_count} 篇，候选池 {candidate_before_cap} 篇，"
+                f"截断 {truncated_count} 篇，最终保留 {len(candidate_pool)} 篇。{range_hint}"
+            )
+
+            valid_id_count = self._safe_int(rerank_payload.get("valid_id_count"))
+            invalid_id_count = self._safe_int(rerank_payload.get("invalid_id_count"))
+            if filter_status == "done":
+                filter_detail = (
+                    f"候选 {len(candidate_pool)} 篇，LLM 二次重排成功（有效ID {valid_id_count}，"
+                    f"剔除非法/重复ID {invalid_id_count} 个），按固定权重筛选保留 {len(selected_papers)} 篇。"
+                )
+            else:
+                fallback_reason = str(rerank_payload.get("failure_reason") or "llm_rerank_failed")
+                filter_detail = (
+                    f"候选 {len(candidate_pool)} 篇，LLM 二次重排失败（{fallback_reason}），"
+                    f"已回退稳定排序保留 {len(selected_papers)} 篇。"
+                )
+
+            return {
+                "success": True,
+                "provider": provider,
+                "providers_used": providers_used,
+                "source_stats": source_stats,
+                "candidate_papers": candidate_pool,
+                "selected_papers": selected_papers,
+                "retrieve_elapsed_seconds": retrieve_elapsed,
+                "filter_elapsed_seconds": filter_elapsed,
+                "retrieve_detail": retrieve_detail,
+                "filter_detail": filter_detail,
+                "filter_status": filter_status,
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("domain staged pipeline failed, fallback to legacy flow: %s", exc, exc_info=True)
+            return {"success": False, "fallback_reason": "stage_exception"}
+
+    def _plan_domain_seed_papers_with_llm(
+        self,
+        *,
+        query: str,
+        paper_range_years: int | None,
+        max_seeds: int = 50,
+    ) -> list[dict[str, Any]]:
+        safe_query = re.sub(r"\s+", " ", str(query or "").strip())
+        if not safe_query or not is_configured():
+            return []
+
+        safe_max_seeds = max(10, min(max_seeds, 50))
+        normalized_range = self._normalize_paper_range_years(paper_range_years)
+        current_year = datetime.now(timezone.utc).year
+        year_hint = ""
+        if normalized_range is not None:
+            from_year = max(1, current_year - normalized_range)
+            year_hint = (
+                f"Prioritize papers published in [{from_year}, {current_year}]. "
+                "If uncertain about year, omit year."
+            )
+
+        prompt = (
+            "You are a research planning assistant.\n"
+            "Given a domain query, list the most relevant and classic papers as retrieval seeds.\n"
+            "Return STRICT JSON only:\n"
+            "{\n"
+            '  "papers": [\n'
+            '    {"title": "paper title", "year": 2020}\n'
+            "  ]\n"
+            "}\n"
+            f"Rules:\n1) Max {safe_max_seeds} items.\n"
+            "2) title is required; year is optional.\n"
+            "3) No extra keys and no explanation text.\n"
+            f"4) {year_hint or 'Focus on canonical, representative papers.'}\n\n"
+            f"Domain query: {safe_query}"
+        )
+
+        try:
+            response = chat(
+                [{"role": "user", "content": prompt}],
+                max_tokens=1800,
+                timeout=45,
+            )
+            raw_content = str(response.choices[0].message.content or "").strip()
+            payload = self._extract_json_payload(raw_content)
+            if not isinstance(payload, dict):
+                return []
+            raw_papers = payload.get("papers")
+            if not isinstance(raw_papers, list):
+                return []
+
+            planned: list[dict[str, Any]] = []
+            seen_titles: set[str] = set()
+            for item in raw_papers:
+                if isinstance(item, dict):
+                    title = re.sub(r"\s+", " ", str(item.get("title") or "").strip())
+                    year_value = self._safe_int(item.get("year"))
+                else:
+                    title = re.sub(r"\s+", " ", str(item or "").strip())
+                    year_value = 0
+                if len(title) < 3:
+                    continue
+                title_key = self._normalized_title_key(title)
+                if not title_key or title_key in seen_titles:
+                    continue
+                if normalized_range is not None and year_value > 0 and not self._is_year_in_paper_range(
+                    year=year_value,
+                    paper_range_years=normalized_range,
+                ):
+                    continue
+                seen_titles.add(title_key)
+                planned.append(
+                    {
+                        "title": title,
+                        "year": year_value if year_value > 0 else None,
+                    }
+                )
+                if len(planned) >= safe_max_seeds:
+                    break
+            return planned
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("stage A planner failed: %s", exc, exc_info=True)
+            return []
+
+    def _resolve_domain_seed_candidates(
+        self,
+        *,
+        seed_suggestions: list[dict[str, Any]],
+        preferred_provider: str,
+        paper_range_years: int | None,
+    ) -> dict[str, Any]:
+        unresolved_count = 0
+        total_elapsed = 0.0
+        providers_used: list[str] = []
+        source_stats: list[dict[str, Any]] = []
+        resolved_raw: list[dict[str, Any]] = []
+
+        for suggestion in seed_suggestions[:50]:
+            title = re.sub(r"\s+", " ", str(suggestion.get("title") or "").strip())
+            if len(title) < 3:
+                unresolved_count += 1
+                continue
+            expected_year = self._safe_int(suggestion.get("year"))
+            payload = self.retriever.search_papers(
+                query=title,
+                limit=14,
+                preferred_provider=preferred_provider,
+            )
+            total_elapsed += float(payload.get("elapsed_seconds") or 0.0)
+            providers_used = self._merge_provider_list(
+                providers_used,
+                list(payload.get("providers_used") or []),
+            )
+            source_stats = self._merge_source_stats(source_stats, list(payload.get("source_stats") or []))
+
+            matched = self._match_domain_seed_candidate(
+                requested_title=title,
+                requested_year=expected_year,
+                candidates=list(payload.get("papers") or []),
+            )
+            if not matched:
+                unresolved_count += 1
+                continue
+            resolved_raw.append(matched)
+
+        deduped = self._dedupe_domain_candidates(resolved_raw)
+        duplicate_count = max(0, len(resolved_raw) - len(deduped))
+        in_range, year_stats = self._apply_paper_year_range(
+            deduped,
+            paper_range_years=paper_range_years,
+        )
+        year_drop_count = self._safe_int((year_stats or {}).get("removed"))
+
+        return {
+            "resolved_seeds": in_range,
+            "unresolved_count": unresolved_count,
+            "duplicate_count": duplicate_count,
+            "year_drop_count": year_drop_count,
+            "providers_used": providers_used,
+            "source_stats": source_stats,
+            "elapsed_seconds": total_elapsed,
+        }
+
+    def _match_domain_seed_candidate(
+        self,
+        *,
+        requested_title: str,
+        requested_year: int,
+        candidates: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        requested_key = self._normalized_title_key(requested_title)
+        if not requested_key:
+            return None
+
+        best_candidate: dict[str, Any] | None = None
+        best_key: tuple[float, float, float, int, int] | None = None
+        for candidate in candidates:
+            normalized = self._normalize_retrieved_paper(candidate)
+            title = str(normalized.get("title") or "").strip()
+            paper_id = str(normalized.get("paper_id") or "").strip()
+            if not title or not paper_id:
+                continue
+
+            candidate_key = self._normalized_title_key(title)
+            exact_match = 1.0 if requested_key == candidate_key else 0.0
+            overlap = self._title_token_overlap(requested_title, title)
+            if exact_match <= 0.0 and overlap < 0.66:
+                continue
+
+            year_value = self._safe_int(normalized.get("year"))
+            if requested_year > 0 and year_value > 0 and abs(year_value - requested_year) > 2:
+                continue
+
+            if requested_year > 0:
+                if year_value <= 0:
+                    year_match = 0.0
+                else:
+                    year_match = max(0.0, 1.0 - abs(year_value - requested_year) / 3.0)
+            else:
+                year_match = 0.5 if year_value > 0 else 0.0
+
+            citation_count = self._safe_int(normalized.get("citation_count"))
+            ranking_key = (
+                exact_match,
+                overlap,
+                year_match,
+                citation_count,
+                year_value,
+            )
+            if best_key is None or ranking_key > best_key:
+                best_key = ranking_key
+                best_candidate = normalized
+
+        return best_candidate
+
+    def _expand_domain_seed_candidates(
+        self,
+        *,
+        query: str,
+        resolved_seeds: list[dict[str, Any]],
+        preferred_provider: str,
+        paper_range_years: int | None,
+        max_expand_per_seed: int = 10,
+        candidate_cap: int = 200,
+    ) -> dict[str, Any]:
+        safe_expand_limit = max(1, min(10, max_expand_per_seed))
+        safe_cap = max(1, min(200, candidate_cap))
+        providers_used: list[str] = []
+        source_stats: list[dict[str, Any]] = []
+        total_elapsed = 0.0
+
+        expanded_candidates: list[dict[str, Any]] = []
+        for seed in resolved_seeds:
+            seed_title = str(seed.get("title") or "").strip()
+            if not seed_title:
+                continue
+            payload = self.retriever.search_papers(
+                query=seed_title,
+                limit=max(20, safe_expand_limit * 2),
+                preferred_provider=preferred_provider,
+            )
+            total_elapsed += float(payload.get("elapsed_seconds") or 0.0)
+            providers_used = self._merge_provider_list(
+                providers_used,
+                list(payload.get("providers_used") or []),
+            )
+            source_stats = self._merge_source_stats(source_stats, list(payload.get("source_stats") or []))
+
+            seed_identity = self._domain_candidate_identity_keys(seed)
+            seed_primary_key = seed_identity.get("doi") or seed_identity.get("arxiv") or seed_identity.get("title_year")
+            ranked_candidates: list[tuple[float, int, int, dict[str, Any]]] = []
+            for candidate in payload.get("papers") or []:
+                normalized = self._normalize_retrieved_paper(candidate)
+                paper_id = str(normalized.get("paper_id") or "").strip()
+                title = str(normalized.get("title") or "").strip()
+                if not paper_id or not title:
+                    continue
+                candidate_identity = self._domain_candidate_identity_keys(normalized)
+                candidate_primary = (
+                    candidate_identity.get("doi")
+                    or candidate_identity.get("arxiv")
+                    or candidate_identity.get("title_year")
+                )
+                if candidate_primary and seed_primary_key and candidate_primary == seed_primary_key:
+                    continue
+                if self._paper_key(paper_id) == self._paper_key(str(seed.get("paper_id") or "")):
+                    continue
+                overlap = self._title_token_overlap(seed_title, title)
+                lexical = self._compute_relevance(query=seed_title, title=title, abstract=str(normalized.get("abstract") or ""))
+                similarity = max(overlap, lexical)
+                ranked_candidates.append(
+                    (
+                        similarity,
+                        self._safe_int(normalized.get("citation_count")),
+                        self._safe_int(normalized.get("year")),
+                        normalized,
+                    )
+                )
+
+            ranked_candidates.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+            per_seed_added = 0
+            seen_local: set[str] = set()
+            for _similarity, _citation, _year, candidate in ranked_candidates:
+                identity = self._domain_candidate_identity_keys(candidate)
+                key = identity.get("doi") or identity.get("arxiv") or identity.get("title_year")
+                if not key or key in seen_local:
+                    continue
+                seen_local.add(key)
+                expanded_candidates.append(candidate)
+                per_seed_added += 1
+                if per_seed_added >= safe_expand_limit:
+                    break
+
+        merged_candidates = [*resolved_seeds, *expanded_candidates]
+        merged_in_range, year_filter_stats = self._apply_paper_year_range(
+            merged_candidates,
+            paper_range_years=paper_range_years,
+        )
+        deduped_candidates = self._dedupe_domain_candidates(merged_in_range)
+        candidate_before_cap = len(deduped_candidates)
+        truncated_count = max(0, candidate_before_cap - safe_cap)
+        final_candidates = deduped_candidates[:safe_cap]
+
+        return {
+            "candidate_pool": final_candidates,
+            "expanded_count": len(expanded_candidates),
+            "candidate_before_cap": candidate_before_cap,
+            "truncated_count": truncated_count,
+            "year_filter_stats": year_filter_stats,
+            "providers_used": providers_used,
+            "source_stats": source_stats,
+            "elapsed_seconds": total_elapsed,
+        }
+
+    def _rerank_domain_candidates_with_llm(
+        self,
+        *,
+        query: str,
+        candidates: list[dict[str, Any]],
+        max_papers: int,
+    ) -> dict[str, Any]:
+        if not candidates:
+            return {
+                "success": False,
+                "failure_reason": "empty_candidate_pool",
+                "valid_id_count": 0,
+                "invalid_id_count": 0,
+            }
+        if not is_configured():
+            return {
+                "success": False,
+                "failure_reason": "llm_not_configured",
+                "valid_id_count": 0,
+                "invalid_id_count": 0,
+            }
+
+        candidate_cards: list[str] = []
+        candidate_by_id: dict[str, dict[str, Any]] = {}
+        for index, candidate in enumerate(candidates, start=1):
+            internal_id = f"P{index:03d}"
+            normalized = self._normalize_retrieved_paper(candidate)
+            candidate_by_id[internal_id] = normalized
+            candidate_cards.append(
+                f'{internal_id} | y={self._safe_int(normalized.get("year"))} | '
+                f'c={self._safe_int(normalized.get("citation_count"))} | '
+                f'title="{str(normalized.get("title") or "").strip()}"'
+            )
+
+        prompt = (
+            "You are ranking candidate papers for a domain query.\n"
+            "Return STRICT JSON only with this schema:\n"
+            "{\n"
+            '  "ranked": [\n'
+            '    {"id": "P001", "relevance_score": 0.93, "representative_score": 0.88}\n'
+            "  ]\n"
+            "}\n"
+            "Rules:\n"
+            "1) You may only use IDs from the provided candidate list.\n"
+            "2) No new IDs, no renamed IDs, and no duplicate IDs.\n"
+            "3) Scores must be floats within [0,1].\n"
+            "4) relevance_score means topic relevance to the query.\n"
+            "5) representative_score means representativeness/classicness in this domain.\n\n"
+            f"Query: {query}\n\n"
+            "Candidate list:\n"
+            + "\n".join(candidate_cards)
+        )
+
+        try:
+            response = chat(
+                [{"role": "user", "content": prompt}],
+                max_tokens=3600,
+                timeout=60,
+            )
+            raw_content = str(response.choices[0].message.content or "").strip()
+            payload = self._extract_json_payload(raw_content)
+            if not isinstance(payload, dict):
+                return {
+                    "success": False,
+                    "failure_reason": "stage_d_invalid_json",
+                    "valid_id_count": 0,
+                    "invalid_id_count": 0,
+                }
+            raw_ranked = payload.get("ranked")
+            if not isinstance(raw_ranked, list):
+                return {
+                    "success": False,
+                    "failure_reason": "stage_d_invalid_payload",
+                    "valid_id_count": 0,
+                    "invalid_id_count": 0,
+                }
+
+            llm_scores: dict[str, dict[str, float]] = {}
+            invalid_count = 0
+            for item in raw_ranked:
+                if not isinstance(item, dict):
+                    invalid_count += 1
+                    continue
+                internal_id = str(item.get("id") or "").strip()
+                if internal_id not in candidate_by_id:
+                    invalid_count += 1
+                    continue
+                if internal_id in llm_scores:
+                    invalid_count += 1
+                    continue
+                relevance_score = max(0.0, min(1.0, self._safe_float(item.get("relevance_score"))))
+                representative_score = max(0.0, min(1.0, self._safe_float(item.get("representative_score"))))
+                llm_scores[internal_id] = {
+                    "relevance": relevance_score,
+                    "representative": representative_score,
+                }
+
+            if not llm_scores:
+                return {
+                    "success": False,
+                    "failure_reason": "stage_d_no_valid_ids",
+                    "valid_id_count": 0,
+                    "invalid_id_count": invalid_count,
+                }
+
+            current_year = datetime.now(timezone.utc).year
+            ranked: list[tuple[float, float, dict[str, Any]]] = []
+            for internal_id, candidate in candidate_by_id.items():
+                llm_payload = llm_scores.get(internal_id) or {}
+                relevance_signal = (
+                    float(llm_payload.get("relevance"))
+                    if "relevance" in llm_payload
+                    else self._compute_relevance(
+                        query=query,
+                        title=str(candidate.get("title") or ""),
+                        abstract=str(candidate.get("abstract") or ""),
+                    )
+                )
+                representative_signal = (
+                    float(llm_payload.get("representative"))
+                    if "representative" in llm_payload
+                    else self._domain_representative_signal(candidate)
+                )
+                citation_count = self._safe_int(candidate.get("citation_count"))
+                citation_signal = min(1.0, math.log1p(citation_count) / 8.0)
+                year = self._safe_int(candidate.get("year"))
+                age = max(0, current_year - year) if year > 0 else 12
+                recency_signal = max(0.0, 1.0 - min(age, 12) / 12)
+                score = self._domain_authority_weighted_score(
+                    relevance_signal=relevance_signal,
+                    citation_signal=citation_signal,
+                    recency_signal=recency_signal,
+                    representative_signal=representative_signal,
+                )
+                ranked.append((score, representative_signal, candidate))
+
+            ranked.sort(
+                key=lambda item: (
+                    item[0],
+                    self._safe_int(item[2].get("citation_count")),
+                    item[1],
+                    self._safe_int(item[2].get("year")),
+                ),
+                reverse=True,
+            )
+            selected = [paper for _score, _representative, paper in ranked[: max(1, max_papers)]]
+            selected = self._ensure_seminal_attention_anchor_selected(
+                query=query,
+                ranked=ranked,
+                selected=selected,
+                max_papers=max(1, max_papers),
+            )
+            return {
+                "success": True,
+                "selected_papers": selected,
+                "valid_id_count": len(llm_scores),
+                "invalid_id_count": invalid_count,
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("stage D rerank failed: %s", exc, exc_info=True)
+            return {
+                "success": False,
+                "failure_reason": "stage_d_exception",
+                "valid_id_count": 0,
+                "invalid_id_count": 0,
+            }
+
+    def _dedupe_domain_candidates(self, papers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        deduped: list[dict[str, Any]] = []
+        key_to_index: dict[str, int] = {}
+
+        for paper in papers:
+            normalized = self._normalize_retrieved_paper(paper)
+            paper_id = str(normalized.get("paper_id") or "").strip()
+            title = str(normalized.get("title") or "").strip()
+            if not paper_id or not title:
+                continue
+
+            identity = self._domain_candidate_identity_keys(normalized)
+            lookup_keys = [
+                identity.get("doi") or "",
+                identity.get("arxiv") or "",
+                identity.get("title_year") or "",
+                f"id:{self._paper_key(paper_id)}",
+            ]
+            existing_index: int | None = None
+            for key in lookup_keys:
+                if key and key in key_to_index:
+                    existing_index = key_to_index[key]
+                    break
+
+            if existing_index is None:
+                deduped.append(normalized)
+                existing_index = len(deduped) - 1
+            else:
+                current = deduped[existing_index]
+                if self._should_replace_domain_candidate(current=current, challenger=normalized):
+                    deduped[existing_index] = normalized
+
+            winner = deduped[existing_index]
+            winner_identity = self._domain_candidate_identity_keys(winner)
+            for key in {
+                winner_identity.get("doi") or "",
+                winner_identity.get("arxiv") or "",
+                winner_identity.get("title_year") or "",
+                *lookup_keys,
+            }:
+                if key:
+                    key_to_index[key] = existing_index
+
+        return deduped
+
+    def _domain_candidate_identity_keys(self, paper: dict[str, Any]) -> dict[str, str]:
+        paper_id = str(paper.get("paper_id") or "")
+        title = str(paper.get("title") or "")
+        url = str(paper.get("url") or "")
+
+        doi = self._extract_doi_from_text(paper_id) or self._extract_doi_from_text(url)
+        arxiv_id = self._extract_arxiv_id_from_text(paper_id) or self._extract_arxiv_id_from_text(url)
+        title_key = self._normalized_title_key(title)
+        year = self._safe_int(paper.get("year"))
+
+        return {
+            "doi": f"doi:{doi.lower()}" if doi else "",
+            "arxiv": f"arxiv:{arxiv_id.lower()}" if arxiv_id else "",
+            "title_year": f"title-year:{title_key}:{year}" if title_key and year > 0 else "",
+        }
+
+    def _should_replace_domain_candidate(
+        self,
+        *,
+        current: dict[str, Any],
+        challenger: dict[str, Any],
+    ) -> bool:
+        current_identity = self._domain_candidate_identity_keys(current)
+        challenger_identity = self._domain_candidate_identity_keys(challenger)
+        current_rank = (
+            1 if current_identity.get("doi") else 0,
+            1 if current_identity.get("arxiv") else 0,
+            self._safe_int(current.get("citation_count")),
+            self._safe_int(current.get("year")),
+            len(str(current.get("abstract") or "")),
+        )
+        challenger_rank = (
+            1 if challenger_identity.get("doi") else 0,
+            1 if challenger_identity.get("arxiv") else 0,
+            self._safe_int(challenger.get("citation_count")),
+            self._safe_int(challenger.get("year")),
+            len(str(challenger.get("abstract") or "")),
+        )
+        return challenger_rank > current_rank
+
+    def _is_year_in_paper_range(self, *, year: int, paper_range_years: int | None) -> bool:
+        normalized_range = self._normalize_paper_range_years(paper_range_years)
+        if normalized_range is None:
+            return True
+        if year <= 0:
+            return False
+        current_year = datetime.now(timezone.utc).year
+        from_year = max(1, current_year - normalized_range)
+        return from_year <= year <= current_year
+
+    def _domain_authority_weighted_score(
+        self,
+        *,
+        relevance_signal: float,
+        citation_signal: float,
+        recency_signal: float,
+        representative_signal: float,
+    ) -> float:
+        return (
+            max(0.0, min(1.0, relevance_signal)) * float(self._DOMAIN_AUTHORITY_WEIGHTS["relevance"])
+            + max(0.0, min(1.0, citation_signal)) * float(self._DOMAIN_AUTHORITY_WEIGHTS["citation"])
+            + max(0.0, min(1.0, recency_signal)) * float(self._DOMAIN_AUTHORITY_WEIGHTS["recency"])
+            + max(0.0, min(1.0, representative_signal)) * float(self._DOMAIN_AUTHORITY_WEIGHTS["representative"])
+        )
 
     def _build_domain_authority_queries_with_llm(self, query: str) -> list[str]:
         safe_query = re.sub(r"\s+", " ", str(query or "").strip())
@@ -2092,11 +2863,11 @@ class GraphRAGService:
             relation_weight = 0.26
             representative_weight = 0.0
         elif profile == "domain_authority":
-            relevance_weight = 0.46
-            citation_weight = 0.34
-            recency_weight = 0.06
+            relevance_weight = float(self._DOMAIN_AUTHORITY_WEIGHTS["relevance"])
+            citation_weight = float(self._DOMAIN_AUTHORITY_WEIGHTS["citation"])
+            recency_weight = float(self._DOMAIN_AUTHORITY_WEIGHTS["recency"])
             relation_weight = 0.0
-            representative_weight = 0.14
+            representative_weight = float(self._DOMAIN_AUTHORITY_WEIGHTS["representative"])
         else:
             relevance_weight = 0.62
             citation_weight = 0.26
@@ -3366,6 +4137,13 @@ class GraphRAGService:
                 )
 
         return edges
+
+    @staticmethod
+    def _safe_float(value: object) -> float:
+        try:
+            return float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 0.0
 
     @staticmethod
     def _safe_int(value: object) -> int:

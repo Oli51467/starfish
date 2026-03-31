@@ -77,6 +77,9 @@ def _run_single(config: EvalConfig) -> dict[str, Any]:
     response = service.retrieve_papers(request)
     titles = [paper.title for paper in response.papers]
     matched = _matches_reference_titles(titles)
+    top10_titles = titles[:10]
+    top10_matched = _matches_reference_titles(top10_titles)
+    total_reference = max(1, len(REFERENCE_PAPERS))
 
     return {
         "mode": "quick" if config.quick_mode else "normal",
@@ -87,6 +90,11 @@ def _run_single(config: EvalConfig) -> dict[str, Any]:
         "selected_count": response.selected_count,
         "hit_count": len(matched),
         "hits": matched,
+        "core_hit_rate": round(len(matched) / total_reference, 4),
+        "core_hit_ratio": f"{len(matched)}/{total_reference}",
+        "top10_hit_count": len(top10_matched),
+        "top10_hits": top10_matched,
+        "top10_titles": top10_titles,
         "top15_titles": titles[:15],
         "provider_stats": [
             {
