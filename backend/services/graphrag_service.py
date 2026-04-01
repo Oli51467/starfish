@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from functools import lru_cache
 from itertools import combinations
@@ -9,6 +10,7 @@ import json
 import logging
 import math
 import re
+from threading import Lock
 from time import perf_counter
 from typing import Any
 from urllib.parse import quote_plus
@@ -116,6 +118,19 @@ class GraphRAGService:
         self._paper_relation_cache: dict[str, dict[str, list[str]]] = {}
         self._citation_backfill_cache: dict[str, int] = {}
         self._embedding_unavailable = False
+        self._query_variant_max_concurrency = max(
+            1,
+            int(getattr(self.settings, "retrieval_query_variant_max_concurrency", 3) or 3),
+        )
+        self._query_variant_timeout_seconds = max(
+            2.0,
+            float(getattr(self.settings, "retrieval_query_variant_timeout_seconds", 15.0) or 15.0),
+        )
+        self._relation_enrich_max_concurrency = max(
+            1,
+            int(getattr(self.settings, "relation_enrich_max_concurrency", 6) or 6),
+        )
+        self._paper_relation_cache_lock = Lock()
 
     def build_knowledge_graph(self, request: KnowledgeGraphBuildRequest) -> KnowledgeGraphResponse:
         graph_id = f"kg-{uuid4().hex[:12]}"
@@ -1104,27 +1119,132 @@ class GraphRAGService:
         merged_providers: list[str] = []
         total_elapsed = 0.0
         used_fallback = False
+        if query_variants:
+            safe_workers = max(1, min(self._query_variant_max_concurrency, len(query_variants)))
+            timeout_seconds = max(2.0, float(self._query_variant_timeout_seconds))
+            ordered_payloads: list[dict[str, Any] | None] = [None] * len(query_variants)
 
-        for expansion_query in query_variants:
-            payload = self.retriever.search_papers(
-                query=expansion_query,
-                limit=per_query_limit,
-                preferred_provider=preferred_provider,
-            )
-            total_elapsed += float(payload.get("elapsed_seconds") or 0.0)
-            used_fallback = used_fallback or bool(payload.get("used_fallback"))
-            merged_stats = self._merge_source_stats(merged_stats, list(payload.get("source_stats") or []))
-            merged_providers = self._merge_provider_list(
-                merged_providers,
-                list(payload.get("providers_used") or []),
-            )
-            merged_candidates = self._merge_candidate_lists(
-                primary=merged_candidates,
-                secondary=list(payload.get("papers") or []),
-                limit=merge_limit,
-            )
-            if len(merged_candidates) >= merge_limit:
-                break
+            executor = ThreadPoolExecutor(max_workers=safe_workers)
+            futures: dict[Any, int] = {}
+            try:
+                futures = {
+                    executor.submit(
+                        self.retriever.search_papers,
+                        query=expansion_query,
+                        limit=per_query_limit,
+                        preferred_provider=preferred_provider,
+                    ): index
+                    for index, expansion_query in enumerate(query_variants)
+                }
+                done, pending = wait(set(futures.keys()), timeout=timeout_seconds)
+                for future in pending:
+                    variant_index = futures[future]
+                    future.cancel()
+                    ordered_payloads[variant_index] = {
+                        "provider": preferred_provider,
+                        "providers_used": [],
+                        "papers": [],
+                        "status": "fallback",
+                        "elapsed_seconds": timeout_seconds,
+                        "used_fallback": True,
+                        "source_stats": [
+                            {
+                                "provider": preferred_provider,
+                                "status": "fallback",
+                                "count": 0,
+                                "elapsed_ms": int(timeout_seconds * 1000),
+                                "error": "query_variant_timeout",
+                            }
+                        ],
+                    }
+                for future in done:
+                    variant_index = futures[future]
+                    try:
+                        payload = future.result()
+                        ordered_payloads[variant_index] = payload if isinstance(payload, dict) else {}
+                    except Exception as exc:  # noqa: BLE001
+                        ordered_payloads[variant_index] = {
+                            "provider": preferred_provider,
+                            "providers_used": [],
+                            "papers": [],
+                            "status": "fallback",
+                            "elapsed_seconds": 0.0,
+                            "used_fallback": True,
+                            "source_stats": [
+                                {
+                                    "provider": preferred_provider,
+                                    "status": "fallback",
+                                    "count": 0,
+                                    "elapsed_ms": 0,
+                                    "error": str(exc),
+                                }
+                            ],
+                        }
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+
+            for payload in ordered_payloads:
+                if not isinstance(payload, dict):
+                    continue
+                total_elapsed += float(payload.get("elapsed_seconds") or 0.0)
+                used_fallback = used_fallback or bool(payload.get("used_fallback"))
+                merged_stats = self._merge_source_stats(merged_stats, list(payload.get("source_stats") or []))
+                merged_providers = self._merge_provider_list(
+                    merged_providers,
+                    list(payload.get("providers_used") or []),
+                )
+                merged_candidates = self._merge_candidate_lists(
+                    primary=merged_candidates,
+                    secondary=list(payload.get("papers") or []),
+                    limit=merge_limit,
+                )
+                if len(merged_candidates) >= merge_limit:
+                    break
+
+        if not merged_candidates:
+            # Accuracy safeguard: if all variant branches timed out/failed,
+            # run one direct query before degrading to synthetic fallback.
+            try:
+                recovery_payload = self.retriever.search_papers(
+                    query=safe_query,
+                    limit=safe_limit,
+                    preferred_provider=preferred_provider,
+                )
+            except Exception as exc:  # noqa: BLE001
+                recovery_payload = {
+                    "provider": preferred_provider,
+                    "providers_used": [],
+                    "papers": [],
+                    "status": "fallback",
+                    "elapsed_seconds": 0.0,
+                    "used_fallback": True,
+                    "source_stats": [
+                        {
+                            "provider": preferred_provider,
+                            "status": "fallback",
+                            "count": 0,
+                            "elapsed_ms": 0,
+                            "error": str(exc),
+                        }
+                    ],
+                }
+
+            if isinstance(recovery_payload, dict):
+                total_elapsed += float(recovery_payload.get("elapsed_seconds") or 0.0)
+                used_fallback = True
+                merged_stats = self._merge_source_stats(
+                    merged_stats,
+                    list(recovery_payload.get("source_stats") or []),
+                )
+                merged_providers = self._merge_provider_list(
+                    merged_providers,
+                    list(recovery_payload.get("providers_used") or []),
+                )
+                merged_candidates = self._merge_candidate_lists(
+                    primary=merged_candidates,
+                    secondary=list(recovery_payload.get("papers") or []),
+                    limit=merge_limit,
+                )
 
         if not merged_candidates:
             return {
@@ -3834,33 +3954,55 @@ class GraphRAGService:
         return ["Computer Science"]
 
     def _attach_relation_ids(self, papers: list[dict[str, Any]]) -> None:
-        for paper in papers:
+        if not papers:
+            return
+
+        indexed_papers: list[tuple[int, dict[str, Any], str]] = []
+        for index, paper in enumerate(papers):
+            if not isinstance(paper, dict):
+                continue
             paper_id = str(paper.get("paper_id") or "").strip()
             if not paper_id:
                 continue
+            indexed_papers.append((index, paper, paper_id))
+        if not indexed_papers:
+            return
 
+        def _worker(item: tuple[int, dict[str, Any], str]) -> tuple[int, dict[str, Any]]:
+            idx, paper, paper_id = item
             existing_references = {
-                str(item).strip()
-                for item in (paper.get("reference_ids") or [])
-                if str(item).strip()
+                str(value).strip()
+                for value in (paper.get("reference_ids") or [])
+                if str(value).strip()
             }
             existing_citations = {
-                str(item).strip()
-                for item in (paper.get("citation_ids") or [])
-                if str(item).strip()
+                str(value).strip()
+                for value in (paper.get("citation_ids") or [])
+                if str(value).strip()
+            }
+            try:
+                relation_ids = self._fetch_relation_ids(paper_id)
+            except Exception:  # noqa: BLE001
+                relation_ids = {"references": [], "citations": []}
+            merged_references = list(dict.fromkeys([*existing_references, *list(relation_ids.get("references") or [])]))
+            merged_citations = list(dict.fromkeys([*existing_citations, *list(relation_ids.get("citations") or [])]))
+            return idx, {
+                "reference_ids": merged_references[:120],
+                "citation_ids": merged_citations[:120],
             }
 
-            relation_ids = self._fetch_relation_ids(paper_id)
-            merged_references = list(dict.fromkeys([*existing_references, *relation_ids["references"]]))
-            merged_citations = list(dict.fromkeys([*existing_citations, *relation_ids["citations"]]))
-
-            paper["reference_ids"] = merged_references[:120]
-            paper["citation_ids"] = merged_citations[:120]
+        max_workers = max(1, min(self._relation_enrich_max_concurrency, len(indexed_papers)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for index, payload in executor.map(_worker, indexed_papers):
+                papers[index]["reference_ids"] = list(payload.get("reference_ids") or [])
+                papers[index]["citation_ids"] = list(payload.get("citation_ids") or [])
 
     def _fetch_relation_ids(self, paper_id: str) -> dict[str, list[str]]:
         key = self._paper_key(paper_id)
-        if key in self._paper_relation_cache:
-            return self._paper_relation_cache[key]
+        with self._paper_relation_cache_lock:
+            cached = self._paper_relation_cache.get(key)
+        if cached is not None:
+            return cached
 
         empty_result = {"references": [], "citations": []}
         if not key:
@@ -3905,7 +4047,8 @@ class GraphRAGService:
         }
         normalized["references"] = list(dict.fromkeys(normalized["references"]))
         normalized["citations"] = list(dict.fromkeys(normalized["citations"]))
-        self._paper_relation_cache[key] = normalized
+        with self._paper_relation_cache_lock:
+            self._paper_relation_cache[key] = normalized
         return normalized
 
     def _build_citation_graph(self, papers: list[dict[str, Any]]) -> dict[str, set[str]]:
@@ -4179,7 +4322,7 @@ class GraphRAGService:
         entity_type_map: dict[str, str],
     ) -> list[KnowledgeGraphNode]:
         nodes: list[KnowledgeGraphNode] = []
-        for name, frequency in entity_counter.most_common(60):
+        for name, frequency in entity_counter.most_common(120):
             size = 4.0 + min(12.0, frequency * 1.6)
             nodes.append(
                 KnowledgeGraphNode(
@@ -4195,7 +4338,7 @@ class GraphRAGService:
 
     def _build_domain_nodes(self, domain_counter: Counter[str]) -> list[KnowledgeGraphNode]:
         nodes: list[KnowledgeGraphNode] = []
-        for domain, frequency in domain_counter.most_common(12):
+        for domain, frequency in domain_counter.most_common(24):
             nodes.append(
                 KnowledgeGraphNode(
                     id=f"domain:{self._slug(domain)}",

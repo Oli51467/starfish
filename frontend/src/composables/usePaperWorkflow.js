@@ -2316,6 +2316,18 @@ export function usePaperWorkflow({
       return;
     }
 
+    if (eventType === 'insight_progressive_draft_ready') {
+      const draftChars = Number(payload?.draft_chars);
+      const charsHint = Number.isFinite(draftChars) ? `（约 ${Math.max(0, Math.round(draftChars))} 字）` : '';
+      setStepStatusByKey('insight', 'running', '首版草稿已生成，正在继续优化...');
+      appendStepLog('insight', {
+        title: 'Insight Orchestrator',
+        detail: `首版草稿已就绪${charsHint}，已优先输出可阅读内容。`,
+        status: 'done'
+      });
+      return;
+    }
+
     if (eventType === 'insight_report_compose_completed') {
       appendStepLog('insight', {
         title: 'Insight Orchestrator',
@@ -2393,6 +2405,21 @@ export function usePaperWorkflow({
         title: 'Insight Orchestrator',
         detail: `报告后处理收敛完成${elapsedText}。`,
         status: 'done'
+      });
+      return;
+    }
+
+    if (eventType === 'insight_round_early_stopped') {
+      const round = Number(payload?.round_index);
+      const signalCount = Number(payload?.new_signal_count);
+      const roundText = Number.isFinite(round) ? `第 ${Math.max(1, Math.round(round))} 轮后` : '当前轮次后';
+      const signalText = Number.isFinite(signalCount)
+        ? `，新增有效信号 ${Math.max(0, Math.round(signalCount))}`
+        : '';
+      appendStepLog('insight', {
+        title: 'Insight Orchestrator',
+        detail: `${roundText}触发早停${signalText}，进入报告收敛阶段。`,
+        status: 'fallback'
       });
       return;
     }

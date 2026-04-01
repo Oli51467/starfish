@@ -68,8 +68,8 @@ Use `backend/.env` for backend settings and `frontend/.env.local` for frontend s
 ```env
 # LLM
 API_KEY=your_api_key
-OPENAI_BASE_URL=
-OPENAI_MODEL=gpt-4o-mini
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-5.3-codex
 EMBEDDING_MODEL=text-embedding-v3
 
 # Data Layer

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Any
 
 from openai import OpenAI
@@ -7,6 +8,7 @@ from openai import OpenAI
 from core.settings import get_settings
 
 
+@lru_cache(maxsize=1)
 def get_client() -> OpenAI:
     settings = get_settings()
     if not settings.api_key:

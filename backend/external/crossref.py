@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import random
 import re
+import time
 from typing import Any
 from urllib.parse import quote
 
@@ -22,6 +24,17 @@ class CrossrefClient:
         settings = get_settings()
         self.timeout = settings.http_timeout_seconds
         self.mailto = settings.crossref_mailto
+        self.retry_max_retries = max(0, int(settings.retrieval_retry_max_retries))
+        self.retry_base_delay_seconds = max(0.01, float(settings.retrieval_retry_base_delay_seconds))
+        self.retry_jitter_seconds = max(0.0, float(settings.retrieval_retry_jitter_seconds))
+        self._client = httpx.Client(
+            timeout=self.timeout,
+            follow_redirects=True,
+            limits=httpx.Limits(
+                max_connections=max(8, int(settings.http_client_max_connections)),
+                max_keepalive_connections=max(4, int(settings.http_client_max_keepalive_connections)),
+            ),
+        )
 
     def search_papers(self, query: str, limit: int = 12, offset: int = 0) -> dict[str, Any]:
         safe_query = str(query or "").strip()
@@ -72,25 +85,50 @@ class CrossrefClient:
         if self.mailto and "mailto" not in request_params:
             request_params["mailto"] = self.mailto
 
-        try:
-            with httpx.Client(timeout=self.timeout, follow_redirects=True) as client:
-                response = client.get(f"{self.BASE_URL}{path}", params=request_params)
-        except httpx.RequestError as exc:
-            raise CrossrefClientError(str(exc)) from exc
+        attempts = max(1, self.retry_max_retries + 1)
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                response = self._client.get(f"{self.BASE_URL}{path}", params=request_params)
+            except httpx.RequestError as exc:
+                last_error = exc
+                if attempt >= attempts - 1:
+                    raise CrossrefClientError(str(exc)) from exc
+                self._sleep_before_retry(attempt)
+                continue
 
-        if response.status_code == 404:
-            return {}
-        if response.status_code >= 400:
-            raise CrossrefClientError(self._extract_error_message(response))
+            if response.status_code == 404:
+                return {}
+            if response.status_code in {429, 502, 503, 504}:
+                if attempt >= attempts - 1:
+                    raise CrossrefClientError(self._extract_error_message(response))
+                self._sleep_before_retry(attempt)
+                continue
+            if response.status_code >= 500:
+                if attempt >= attempts - 1:
+                    raise CrossrefClientError(self._extract_error_message(response))
+                self._sleep_before_retry(attempt)
+                continue
+            if response.status_code >= 400:
+                raise CrossrefClientError(self._extract_error_message(response))
 
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise CrossrefClientError("invalid_crossref_json_response") from exc
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise CrossrefClientError("invalid_crossref_json_response") from exc
 
-        if not isinstance(payload, dict):
-            raise CrossrefClientError("invalid_crossref_payload")
-        return payload
+            if not isinstance(payload, dict):
+                raise CrossrefClientError("invalid_crossref_payload")
+            return payload
+
+        if last_error is not None:
+            raise CrossrefClientError(str(last_error)) from last_error
+        raise CrossrefClientError("crossref_request_failed")
+
+    def _sleep_before_retry(self, attempt: int) -> None:
+        base = self.retry_base_delay_seconds * (2 ** max(0, attempt))
+        jitter = random.uniform(0.0, self.retry_jitter_seconds) if self.retry_jitter_seconds > 0 else 0.0
+        time.sleep(base + jitter)
 
     def _normalize_work(self, payload: dict[str, Any]) -> dict[str, Any]:
         title = self._first_text(payload.get("title")) or self._first_text(payload.get("short-title"))

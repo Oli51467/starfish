@@ -73,6 +73,14 @@ _REPORT_TARGET_CHARS_EN = 9000
 _REPORT_EXPANSION_MAX_ROUNDS = 3
 _REPORT_BASE_MAX_TOKENS = 3200
 _REPORT_EXPANSION_MAX_TOKENS = 2400
+_REPORT_DRAFT_MAX_TOKENS = 1400
+_REPORT_REFINE_MAX_TOKENS = 2200
+_ROUND_EARLY_STOP_SIGNAL_THRESHOLD = 2
+_ROUND_EARLY_STOP_STREAK = 2
+_QUICK_MODE_MAX_SUBTASKS_PER_ROUND = 8
+_QUICK_MODE_MAX_SUBTASKS_PER_PARENT = 1
+_NORMAL_MODE_MAX_SUBTASKS_PER_ROUND = 16
+_NORMAL_MODE_MAX_SUBTASKS_PER_PARENT = 2
 
 
 @dataclass(frozen=True)
@@ -146,6 +154,16 @@ class InsightExplorationService:
             or _DEFAULT_ARTIFACT_PDF_TIMEOUT_SECONDS
         )
         self.artifact_pdf_timeout_seconds = max(8.0, min(90.0, configured_pdf_timeout))
+        self.extension_retrieval_concurrency = max(
+            1,
+            int(getattr(self.settings, "insight_extension_retrieval_concurrency", 2) or 2),
+        )
+        self.llm_concurrency = max(
+            1,
+            int(getattr(self.settings, "insight_llm_concurrency", 6) or 6),
+        )
+        self._extension_retrieval_semaphore = asyncio.Semaphore(self.extension_retrieval_concurrency)
+        self._llm_semaphore = asyncio.Semaphore(self.llm_concurrency)
 
     async def generate_report(
         self,
@@ -154,6 +172,7 @@ class InsightExplorationService:
         user_id: str,
         query: str,
         input_type: str,
+        quick_mode: bool,
         papers: list[dict[str, Any]],
         graph_payload: dict[str, Any] | None,
         agent_count: int,
@@ -184,7 +203,11 @@ class InsightExplorationService:
         resolved_mode = self._resolve_agent_mode(agent_mode)
         language = self._resolve_report_language(preferred_language, safe_query)
         active_roles = list(self._ROLE_POOL[:resolved_agent_count])
-        rounds = max(1, resolved_depth * 2)
+        resolved_quick_mode = bool(quick_mode)
+        rounds = self._resolve_round_budget(
+            exploration_depth=resolved_depth,
+            quick_mode=resolved_quick_mode,
+        )
 
         if resolved_mode == "orchestrated":
             return await self._generate_report_orchestrated(
@@ -192,6 +215,7 @@ class InsightExplorationService:
                 user_id=safe_user_id,
                 query=safe_query,
                 input_type=safe_input_type,
+                quick_mode=resolved_quick_mode,
                 normalized_papers=self._normalize_papers(papers),
                 graph_payload=graph_payload if isinstance(graph_payload, dict) else {},
                 agent_count=resolved_agent_count,
@@ -213,8 +237,12 @@ class InsightExplorationService:
         }
         extension_notes: list[str] = []
         extension_papers: list[dict[str, Any]] = []
+        observed_signal_keys: set[str] = set()
+        low_signal_streak = 0
+        executed_rounds = 0
 
         for round_index in range(1, rounds + 1):
+            previous_extension_count = len(extension_papers)
             expansion_queries = self._build_round_expansion_queries(
                 base_query=safe_query,
                 round_index=round_index,
@@ -249,6 +277,40 @@ class InsightExplorationService:
                 session_memory=session_memory,
             )
             session_memory["decisions"].extend(role_outputs)
+            executed_rounds = round_index
+
+            round_new_signal_count = 0
+            for output in role_outputs:
+                signal_key = re.sub(r"\s+", " ", str(output or "").strip().lower())[:280]
+                if not signal_key or signal_key in observed_signal_keys:
+                    continue
+                observed_signal_keys.add(signal_key)
+                round_new_signal_count += 1
+            round_new_extension_count = max(0, len(extension_papers) - previous_extension_count)
+
+            if (
+                round_new_signal_count < _ROUND_EARLY_STOP_SIGNAL_THRESHOLD
+                and round_new_extension_count <= 0
+            ):
+                low_signal_streak += 1
+            else:
+                low_signal_streak = 0
+            if low_signal_streak >= _ROUND_EARLY_STOP_STREAK and round_index < rounds:
+                await self._emit_lifecycle_event(
+                    stream_callback=stream_callback,
+                    session_id=safe_session_id,
+                    event_type="insight_round_early_stopped",
+                    details={
+                        "round_index": round_index,
+                        "total_rounds": rounds,
+                        "low_signal_streak": low_signal_streak,
+                        "new_signal_count": round_new_signal_count,
+                        "new_extension_papers": round_new_extension_count,
+                    },
+                )
+                break
+        if executed_rounds <= 0:
+            executed_rounds = 1
 
         compose_started_at = perf_counter()
         await self._emit_lifecycle_event(
@@ -274,7 +336,8 @@ class InsightExplorationService:
             history_memory=history_memory,
             session_memory=session_memory,
             active_roles=active_roles,
-            rounds=rounds,
+            rounds=executed_rounds,
+            quick_mode=resolved_quick_mode,
             extension_notes=extension_notes,
             stream_callback=stream_callback,
             stream_start_accumulated=0,
@@ -371,7 +434,7 @@ class InsightExplorationService:
             language=language,
             extension_count=len(extension_papers),
             role_count=len(active_roles),
-            rounds=rounds,
+            rounds=executed_rounds,
             base_papers=len(normalized_papers),
         )
         await self._emit_lifecycle_event(
@@ -398,7 +461,7 @@ class InsightExplorationService:
             "stats": {
                 "base_paper_count": len(normalized_papers),
                 "extension_paper_count": len(extension_papers),
-                "rounds": rounds,
+                "rounds": executed_rounds,
                 "agent_count": len(active_roles),
                 "mode": resolved_mode,
                 "execution_backend": "inprocess",
@@ -421,6 +484,7 @@ class InsightExplorationService:
         user_id: str,
         query: str,
         input_type: str,
+        quick_mode: bool,
         normalized_papers: list[dict[str, Any]],
         graph_payload: dict[str, Any],
         agent_count: int,
@@ -446,6 +510,14 @@ class InsightExplorationService:
         session_memory = memory_service.build_session_view(run_id=journal.run_id)
         round_task_totals: list[int] = []
         round_spawn_totals: list[int] = []
+        observed_signal_keys: set[str] = set()
+        low_signal_streak = 0
+        max_subtasks_per_round = (
+            _QUICK_MODE_MAX_SUBTASKS_PER_ROUND if bool(quick_mode) else _NORMAL_MODE_MAX_SUBTASKS_PER_ROUND
+        )
+        max_subtasks_per_parent = (
+            _QUICK_MODE_MAX_SUBTASKS_PER_PARENT if bool(quick_mode) else _NORMAL_MODE_MAX_SUBTASKS_PER_PARENT
+        )
 
         async def on_orchestrator_event(event: dict[str, Any]) -> None:
             safe_event = dict(event)
@@ -475,6 +547,7 @@ class InsightExplorationService:
                     "extension_papers": len(extension_papers),
                 },
             )
+            previous_extension_count = len(extension_papers)
             expansion_queries = self._build_round_expansion_queries(
                 base_query=query,
                 round_index=round_index,
@@ -536,24 +609,12 @@ class InsightExplorationService:
                     memory_service=memory_service,
                 ),
                 event_callback=on_orchestrator_event,
+                max_subtasks_per_round=max_subtasks_per_round,
+                max_subtasks_per_parent=max_subtasks_per_parent,
             )
             journal.rounds.append(round_result)
             round_task_totals.append(int(round_result.total_task_count))
             round_spawn_totals.append(int(round_result.spawned_task_count))
-            await self._emit_lifecycle_event(
-                stream_callback=stream_callback,
-                session_id=session_id,
-                event_type="insight_round_progress",
-                accumulated_chars=streamed_chars,
-                details={
-                    "phase": "round_completed",
-                    "round_index": round_index,
-                    "total_rounds": rounds,
-                    "completed_tasks": int(round_result.total_task_count),
-                    "spawned_tasks": int(round_result.spawned_task_count),
-                    "extension_papers": len(extension_papers),
-                },
-            )
 
             role_outputs: list[str] = []
             for result in round_result.results:
@@ -568,6 +629,57 @@ class InsightExplorationService:
                 if output:
                     role_outputs.append(output)
             session_memory = memory_service.build_session_view(run_id=journal.run_id)
+
+            round_new_signal_count = 0
+            for output in role_outputs:
+                signal_key = re.sub(r"\s+", " ", str(output or "").strip().lower())[:280]
+                if not signal_key or signal_key in observed_signal_keys:
+                    continue
+                observed_signal_keys.add(signal_key)
+                round_new_signal_count += 1
+            round_new_extension_count = max(0, len(extension_papers) - previous_extension_count)
+
+            await self._emit_lifecycle_event(
+                stream_callback=stream_callback,
+                session_id=session_id,
+                event_type="insight_round_progress",
+                accumulated_chars=streamed_chars,
+                details={
+                    "phase": "round_completed",
+                    "round_index": round_index,
+                    "total_rounds": rounds,
+                    "completed_tasks": int(round_result.total_task_count),
+                    "spawned_tasks": int(round_result.spawned_task_count),
+                    "extension_papers": len(extension_papers),
+                    "new_signal_count": round_new_signal_count,
+                    "new_extension_papers": round_new_extension_count,
+                },
+            )
+
+            if (
+                round_new_signal_count < _ROUND_EARLY_STOP_SIGNAL_THRESHOLD
+                and round_new_extension_count <= 0
+            ):
+                low_signal_streak += 1
+            else:
+                low_signal_streak = 0
+            if low_signal_streak >= _ROUND_EARLY_STOP_STREAK and round_index < rounds:
+                await self._emit_lifecycle_event(
+                    stream_callback=stream_callback,
+                    session_id=session_id,
+                    event_type="insight_round_early_stopped",
+                    accumulated_chars=streamed_chars,
+                    details={
+                        "round_index": round_index,
+                        "total_rounds": rounds,
+                        "low_signal_streak": low_signal_streak,
+                        "new_signal_count": round_new_signal_count,
+                        "new_extension_papers": round_new_extension_count,
+                    },
+                )
+                break
+
+        executed_rounds = max(1, len(round_task_totals))
 
         compose_started_at = perf_counter()
         await self._emit_lifecycle_event(
@@ -595,7 +707,8 @@ class InsightExplorationService:
             history_memory=history_memory,
             session_memory=session_memory,
             active_roles=active_roles,
-            rounds=rounds,
+            rounds=executed_rounds,
+            quick_mode=bool(quick_mode),
             extension_notes=extension_notes,
             stream_callback=stream_callback,
             stream_start_accumulated=streamed_chars,
@@ -695,7 +808,7 @@ class InsightExplorationService:
             language=language,
             extension_count=len(extension_papers),
             role_count=len(active_roles),
-            rounds=rounds,
+            rounds=executed_rounds,
             base_papers=len(normalized_papers),
         )
         await self._emit_lifecycle_event(
@@ -723,7 +836,7 @@ class InsightExplorationService:
             "stats": {
                 "base_paper_count": len(normalized_papers),
                 "extension_paper_count": len(extension_papers),
-                "rounds": rounds,
+                "rounds": executed_rounds,
                 "agent_count": len(active_roles),
                 "mode": "orchestrated",
                 "execution_backend": self.worker_execution_backend,
@@ -1290,6 +1403,13 @@ class InsightExplorationService:
         return max(min_value, min(max_value, parsed))
 
     @staticmethod
+    def _resolve_round_budget(*, exploration_depth: int, quick_mode: bool) -> int:
+        safe_depth = max(_MIN_EXPLORATION_DEPTH, min(_MAX_EXPLORATION_DEPTH, int(exploration_depth or 1)))
+        if bool(quick_mode):
+            return min(2, max(1, safe_depth))
+        return min(4, max(2, safe_depth + 1))
+
+    @staticmethod
     def _resolve_report_language(preferred_language: str | None, query: str) -> str:
         safe_preferred = str(preferred_language or "").strip().lower()
         if safe_preferred in {"zh", "en"}:
@@ -1435,22 +1555,44 @@ class InsightExplorationService:
         collected: list[dict[str, Any]] = []
         if remaining <= 0:
             return collected
+
+        safe_queries: list[str] = []
+        seen_queries: set[str] = set()
         for query in query_list:
             safe_query = str(query or "").strip()
             if not safe_query:
                 continue
+            key = safe_query.lower()
+            if key in seen_queries:
+                continue
+            seen_queries.add(key)
+            safe_queries.append(safe_query)
+        if not safe_queries:
+            return collected
+
+        per_query_limit = max(3, min(8, remaining))
+
+        async def run_one(query: str) -> list[dict[str, Any]]:
             request = KnowledgeGraphRetrieveRequest(
-                query=safe_query,
-                max_papers=max(3, min(8, remaining)),
+                query=query,
+                max_papers=per_query_limit,
                 input_type="domain" if input_type == "domain" else "domain",
                 quick_mode=True,
                 paper_range_years=None,
             )
             try:
-                payload = await asyncio.to_thread(self.graph_service.retrieve_papers, request)
+                async with self._extension_retrieval_semaphore:
+                    payload = await asyncio.to_thread(self.graph_service.retrieve_papers, request)
             except Exception:  # noqa: BLE001
+                return []
+            return [paper.model_dump(mode="json") for paper in payload.papers]
+
+        tasks = [asyncio.create_task(run_one(query)) for query in safe_queries]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception):
                 continue
-            papers = [paper.model_dump(mode="json") for paper in payload.papers]
+            papers = [item for item in (result or []) if isinstance(item, dict)]
             if not papers:
                 continue
             collected = self._merge_papers(collected, papers, limit=remaining)
@@ -1614,28 +1756,29 @@ class InsightExplorationService:
             skill_outputs=skill_outputs,
         )
         try:
-            response = await asyncio.wait_for(
-                asyncio.to_thread(
-                    chat,
-                    [
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are a senior scientific analyst. "
-                                "Write rigorous, evidence-grounded content only. "
-                                "Do not mention workflows, agents, orchestration, rounds, or tool calls."
-                            ),
-                        },
-                        {
-                            "role": "user",
-                            "content": prompt,
-                        },
-                    ],
-                    temperature=0.25,
-                    timeout=20,
-                ),
-                timeout=24,
-            )
+            async with self._llm_semaphore:
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        chat,
+                        [
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You are a senior scientific analyst. "
+                                    "Write rigorous, evidence-grounded content only. "
+                                    "Do not mention workflows, agents, orchestration, rounds, or tool calls."
+                                ),
+                            },
+                            {
+                                "role": "user",
+                                "content": prompt,
+                            },
+                        ],
+                        temperature=0.25,
+                        timeout=20,
+                    ),
+                    timeout=24,
+                )
             content = str(response.choices[0].message.content or "").strip()
             if content:
                 return content
@@ -1806,6 +1949,7 @@ class InsightExplorationService:
         language: str,
         query: str,
         input_type: str,
+        quick_mode: bool,
         base_papers: list[dict[str, Any]],
         extension_papers: list[dict[str, Any]],
         graph_stats: dict[str, int],
@@ -1876,6 +2020,7 @@ class InsightExplorationService:
         llm_result = await self._compose_markdown_with_llm(
             language=safe_language,
             query=query,
+            quick_mode=bool(quick_mode),
             graph_stats=graph_stats,
             all_paper_count=len(all_papers),
             founder_candidates=founder_candidates,
@@ -1920,6 +2065,7 @@ class InsightExplorationService:
         *,
         language: str,
         query: str,
+        quick_mode: bool,
         graph_stats: dict[str, int],
         all_paper_count: int,
         founder_candidates: list[dict[str, Any]],
@@ -2050,7 +2196,7 @@ class InsightExplorationService:
                         messages=messages,
                         temperature=0.15,
                         timeout_seconds=120,
-                        max_tokens=_REPORT_BASE_MAX_TOKENS,
+                        max_tokens=_REPORT_DRAFT_MAX_TOKENS,
                         stream_callback=stream_callback,
                         section="insight_markdown",
                         start_accumulated=stream_start_accumulated,
@@ -2059,16 +2205,17 @@ class InsightExplorationService:
                 )
                 streamed = bool(raw_content)
             else:
-                response = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        chat,
-                        messages,
-                        temperature=0.15,
-                        timeout=120,
-                        max_tokens=_REPORT_BASE_MAX_TOKENS,
-                    ),
-                    timeout=140,
-                )
+                async with self._llm_semaphore:
+                    response = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            chat,
+                            messages,
+                            temperature=0.15,
+                            timeout=120,
+                            max_tokens=_REPORT_DRAFT_MAX_TOKENS,
+                        ),
+                        timeout=140,
+                    )
                 raw_content = str(response.choices[0].message.content or "").strip()
                 streamed_chars = 0
                 streamed = False
@@ -2081,18 +2228,39 @@ class InsightExplorationService:
             )
             if not cleaned:
                 return _ComposeMarkdownResult(markdown="", streamed=False, streamed_chars=0)
-            if language == "zh":
-                refined_markdown = cleaned
-                refined_streamed_chars = int(streamed_chars if streamed else 0)
-            else:
-                refined_markdown, refined_streamed_chars = await self._expand_markdown_if_needed(
+
+            accumulated_chars = int(streamed_chars if streamed else 0)
+            if stream_callback is not None:
+                await stream_callback(
+                    {
+                        "section": "insight_orchestrator_event",
+                        "event": {
+                            "type": "insight_progressive_draft_ready",
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                            "elapsed_ms": 0,
+                            "draft_chars": len(cleaned),
+                        },
+                        "chunk": "",
+                        "accumulated_chars": max(0, accumulated_chars),
+                        "done": False,
+                    }
+                )
+
+            refined_markdown = cleaned
+            if self._should_refine_after_draft(
+                language=language,
+                quick_mode=bool(quick_mode),
+                draft_markdown=cleaned,
+            ):
+                maybe_refined = await self._refine_markdown_once(
                     language=language,
                     query=query,
                     context=context,
-                    markdown=cleaned,
-                    stream_callback=stream_callback,
-                    accumulated_chars=int(streamed_chars if streamed else 0),
+                    draft_markdown=cleaned,
                 )
+                if maybe_refined:
+                    refined_markdown = maybe_refined
+
             final_markdown = self._ensure_reference_section(
                 markdown=refined_markdown or cleaned,
                 reference_catalog=reference_catalog,
@@ -2102,7 +2270,7 @@ class InsightExplorationService:
                 return _ComposeMarkdownResult(
                     markdown=final_markdown if final_markdown.endswith("\n") else f"{final_markdown}\n",
                     streamed=True,
-                    streamed_chars=max(0, int(refined_streamed_chars or streamed_chars)),
+                    streamed_chars=max(0, int(accumulated_chars or streamed_chars)),
                 )
             return _ComposeMarkdownResult(
                 markdown=final_markdown if final_markdown.endswith("\n") else f"{final_markdown}\n",
@@ -2131,6 +2299,102 @@ class InsightExplorationService:
         body = re.sub(r"\[[Rr]\d+\]", " ", body)
         body = re.sub(r"\s+", "", body)
         return len(body)
+
+    def _should_refine_after_draft(
+        self,
+        *,
+        language: str,
+        quick_mode: bool,
+        draft_markdown: str,
+    ) -> bool:
+        if not str(draft_markdown or "").strip():
+            return False
+        if not quick_mode:
+            return True
+        min_chars, _target_chars = self._resolve_report_length_targets(language)
+        current_chars = self._report_body_char_count(draft_markdown)
+        threshold = max(200, int(min_chars * 0.7))
+        return current_chars < threshold
+
+    async def _refine_markdown_once(
+        self,
+        *,
+        language: str,
+        query: str,
+        context: dict[str, Any],
+        draft_markdown: str,
+    ) -> str:
+        if not is_configured():
+            return ""
+        safe_draft = str(draft_markdown or "").strip()
+        if not safe_draft:
+            return ""
+
+        min_chars, target_chars = self._resolve_report_length_targets(language)
+        current_chars = self._report_body_char_count(safe_draft)
+        context_snapshot = {
+            "query": str(query or "").strip(),
+            "graph_stats": dict(context.get("graph_stats") or {}),
+            "references": list(context.get("references") or [])[:24],
+            "role_signals": list(context.get("role_signals") or [])[:14],
+            "innovation_points": list(context.get("innovation_points") or [])[:10],
+        }
+        context_json = json.dumps(context_snapshot, ensure_ascii=False)
+
+        if language == "zh":
+            prompt = (
+                "你将收到一份报告草稿，请在不改变核心结论的前提下做一次增强版修订。\n"
+                "要求：\n"
+                "1) 输出完整 Markdown（不是增量）；\n"
+                "2) 只使用给定 references，不得编造；\n"
+                "3) 每个关键判断附 [R*] 引用；\n"
+                "4) 如果证据不足必须明确标注；\n"
+                "5) 目标正文长度尽量接近目标字数。\n"
+                f"当前正文约 {current_chars} 字，最低目标 {min_chars} 字，建议目标 {target_chars} 字。\n\n"
+                f"草稿：\n{safe_draft}\n\n"
+                f"证据上下文(JSON)：{context_json}"
+            )
+        else:
+            prompt = (
+                "Refine the following draft into a stronger final markdown report in one pass.\n"
+                "Rules:\n"
+                "1) Return full markdown, not a delta.\n"
+                "2) Keep core conclusions stable while adding depth.\n"
+                "3) Use only provided references and keep [R*] citations for key claims.\n"
+                "4) Explicitly state uncertainty when evidence is insufficient.\n"
+                "5) Improve toward target body length.\n"
+                f"Current body length: {current_chars}. Minimum target: {min_chars}. Preferred target: {target_chars}.\n\n"
+                f"Draft:\n{safe_draft}\n\n"
+                f"Evidence context (JSON): {context_json}"
+            )
+
+        try:
+            async with self._llm_semaphore:
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        chat,
+                        [
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You are an evidence-grounded report refiner. "
+                                    "Keep factual consistency and improve clarity and depth."
+                                ),
+                            },
+                            {"role": "user", "content": prompt},
+                        ],
+                        temperature=0.1,
+                        timeout=100,
+                        max_tokens=_REPORT_REFINE_MAX_TOKENS,
+                    ),
+                    timeout=130,
+                )
+            content = str(response.choices[0].message.content or "").strip()
+            if not content:
+                return ""
+            return self._clean_report_markdown(content, language=language)
+        except Exception:  # noqa: BLE001
+            return ""
 
     def _build_report_expansion_prompt(
         self,
@@ -2317,16 +2581,17 @@ class InsightExplorationService:
                     )
                     current_accumulated = max(current_accumulated, int(streamed_chars or 0))
                 else:
-                    response = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            chat,
-                            messages,
-                            temperature=0.15,
-                            timeout=110,
-                            max_tokens=_REPORT_EXPANSION_MAX_TOKENS,
-                        ),
-                        timeout=135,
-                    )
+                    async with self._llm_semaphore:
+                        response = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                chat,
+                                messages,
+                                temperature=0.15,
+                                timeout=110,
+                                max_tokens=_REPORT_EXPANSION_MAX_TOKENS,
+                            ),
+                            timeout=135,
+                        )
                     raw_chunk = str(response.choices[0].message.content or "").strip()
                 chunk = self._normalize_report_expansion_chunk(raw_chunk)
                 if not chunk:
@@ -3187,7 +3452,8 @@ class InsightExplorationService:
                 pass
             return ("".join(pieces), accumulated)
 
-        return await asyncio.to_thread(_producer)
+        async with self._llm_semaphore:
+            return await asyncio.to_thread(_producer)
 
     @staticmethod
     def _extract_stream_delta_content(chunk: Any) -> str:

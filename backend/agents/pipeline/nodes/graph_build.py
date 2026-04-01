@@ -111,7 +111,7 @@ async def graph_build_node(state: PipelineState) -> PipelineState:
     ]
     request = KnowledgeGraphBuildRequest(
         query=str(state.get("input_value") or "").strip(),
-        max_papers=min(30, max(3, len(prefetched_papers) or 24)),
+        max_papers=min(60, max(3, len(prefetched_papers) or 24)),
         max_entities_per_paper=6,
         prefetched_papers=prefetched_papers,
         research_type=str(state.get("input_type") or "unknown"),

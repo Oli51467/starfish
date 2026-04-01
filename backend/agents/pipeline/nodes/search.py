@@ -13,6 +13,7 @@ from services.pipeline_runtime_service import get_pipeline_runtime_service
 _NODE = "search"
 _MIN_SEARCH_PAPERS = 6
 _TIER1_PREVIEW_PAPER_LIMIT = 5
+_MAX_SEARCH_PAPERS = 60
 
 
 def _runtime_event_enabled(state: PipelineState) -> bool:
@@ -60,7 +61,7 @@ def _paper_identity(paper: dict[str, Any]) -> str:
     return ""
 
 
-def _merge_unique_papers(primary: list[dict], secondary: list[dict], *, limit: int = 30) -> list[dict]:
+def _merge_unique_papers(primary: list[dict], secondary: list[dict], *, limit: int = _MAX_SEARCH_PAPERS) -> list[dict]:
     merged: list[dict] = []
     seen: set[str] = set()
     for source in (primary, secondary):
@@ -81,7 +82,7 @@ def _merge_unique_papers(primary: list[dict], secondary: list[dict], *, limit: i
 def _build_retrieve_request(state: PipelineState, paper_range_years: int | None) -> KnowledgeGraphRetrieveRequest:
     return KnowledgeGraphRetrieveRequest(
         query=str(state.get("input_value") or "").strip(),
-        max_papers=30,
+        max_papers=_MAX_SEARCH_PAPERS,
         input_type=str(state.get("input_type") or "domain").strip(),
         quick_mode=bool(state.get("quick_mode")),
         paper_range_years=paper_range_years,
@@ -215,7 +216,7 @@ async def search_node(state: PipelineState) -> PipelineState:
             fallback_request = _build_retrieve_request(state, candidate_range)
             fallback_retrieval = await asyncio.to_thread(graphrag_service.retrieve_papers, fallback_request)
             fallback_papers = [paper.model_dump(mode="json") for paper in fallback_retrieval.papers]
-            merged = _merge_unique_papers(papers, fallback_papers, limit=30)
+            merged = _merge_unique_papers(papers, fallback_papers, limit=_MAX_SEARCH_PAPERS)
             if len(merged) > len(papers):
                 papers = merged
                 retrieval = fallback_retrieval

@@ -59,6 +59,7 @@ async def insight_node(state: PipelineState) -> PipelineState:
         user_id=str(state.get("user_id") or "").strip(),
         query=str(state.get("input_value") or "").strip(),
         input_type=str(state.get("input_type") or "domain").strip(),
+        quick_mode=bool(state.get("quick_mode")),
         papers=list(state.get("papers") or []),
         graph_payload=state.get("graph_payload") if isinstance(state.get("graph_payload"), dict) else None,
         agent_count=agent_count,

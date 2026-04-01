@@ -129,7 +129,7 @@ async def save_node(state: PipelineState) -> PipelineState:
         graph_response = KnowledgeGraphResponse.model_validate(graph_payload)
         request = KnowledgeGraphBuildRequest(
             query=str(graph_response.query or state.get("input_value") or "").strip(),
-            max_papers=min(30, max(3, len(state.get("papers") or []))),
+            max_papers=min(60, max(3, len(state.get("papers") or []))),
             max_entities_per_paper=6,
             prefetched_papers=[],
             research_type=str(state.get("input_type") or "unknown"),

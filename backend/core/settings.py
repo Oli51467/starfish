@@ -62,6 +62,38 @@ class Settings:
             os.getenv("RETRIEVAL_ENABLE_OPENCITATIONS"),
             default=True,
         )
+        self.retrieval_query_variant_max_concurrency = max(
+            1,
+            min(16, int(os.getenv("RETRIEVAL_QUERY_VARIANT_MAX_CONCURRENCY", "3"))),
+        )
+        self.retrieval_query_variant_timeout_seconds = max(
+            2.0,
+            min(60.0, float(os.getenv("RETRIEVAL_QUERY_VARIANT_TIMEOUT_SECONDS", "15"))),
+        )
+        self.relation_enrich_max_concurrency = max(
+            1,
+            min(32, int(os.getenv("RELATION_ENRICH_MAX_CONCURRENCY", "6"))),
+        )
+        self.retrieval_retry_max_retries = max(
+            0,
+            min(6, int(os.getenv("RETRIEVAL_RETRY_MAX_RETRIES", "2"))),
+        )
+        self.retrieval_retry_base_delay_seconds = max(
+            0.01,
+            min(5.0, float(os.getenv("RETRIEVAL_RETRY_BASE_DELAY_SECONDS", "0.25"))),
+        )
+        self.retrieval_retry_jitter_seconds = max(
+            0.0,
+            min(5.0, float(os.getenv("RETRIEVAL_RETRY_JITTER_SECONDS", "0.2"))),
+        )
+        self.http_client_max_connections = max(
+            8,
+            min(512, int(os.getenv("HTTP_CLIENT_MAX_CONNECTIONS", "64"))),
+        )
+        self.http_client_max_keepalive_connections = max(
+            4,
+            min(256, int(os.getenv("HTTP_CLIENT_MAX_KEEPALIVE_CONNECTIONS", "16"))),
+        )
 
         # Data layer placeholders
         self.postgres_dsn = os.getenv(
@@ -122,6 +154,14 @@ class Settings:
         self.insight_worker_task_timeout_seconds = max(
             10.0,
             min(300.0, float(os.getenv("INSIGHT_WORKER_TASK_TIMEOUT_SECONDS", "75"))),
+        )
+        self.insight_extension_retrieval_concurrency = max(
+            1,
+            min(16, int(os.getenv("INSIGHT_EXTENSION_RETRIEVAL_CONCURRENCY", "2"))),
+        )
+        self.insight_llm_concurrency = max(
+            1,
+            min(32, int(os.getenv("INSIGHT_LLM_CONCURRENCY", "6"))),
         )
         self.insight_pdf_render_timeout_seconds = max(
             8.0,

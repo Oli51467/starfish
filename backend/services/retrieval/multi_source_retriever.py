@@ -234,7 +234,8 @@ class MultiSourceRetriever:
         futures: dict[Future[tuple[list[dict[str, Any]], float]], str] = {}
         executions: list[_ProviderExecution] = []
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        try:
             for name in provider_order:
                 provider = self.providers[name]
                 futures[
@@ -274,6 +275,9 @@ class MultiSourceRetriever:
                             error=str(exc),
                         )
                     )
+        finally:
+            # Avoid blocking request completion on slow provider calls after timeout.
+            executor.shutdown(wait=False, cancel_futures=True)
 
         execution_by_provider = {item.provider: item for item in executions}
         return [
@@ -298,7 +302,8 @@ class MultiSourceRetriever:
         futures: dict[Future[tuple[dict[str, Any] | None, float]], str] = {}
         executions: list[_ProviderExecution] = []
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        try:
             for name in provider_order:
                 provider = self.providers[name]
                 futures[
@@ -345,6 +350,9 @@ class MultiSourceRetriever:
                             error=str(exc),
                         )
                     )
+        finally:
+            # Avoid blocking request completion on slow provider calls after timeout.
+            executor.shutdown(wait=False, cancel_futures=True)
 
         execution_by_provider = {item.provider: item for item in executions}
         return [

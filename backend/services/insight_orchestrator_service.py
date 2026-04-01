@@ -80,17 +80,28 @@ class InsightOrchestratorService:
         profiles_by_id: dict[str, AgentProfile],
         executor: TaskExecutor,
         event_callback: EventCallback | None = None,
+        max_subtasks_per_round: int | None = None,
+        max_subtasks_per_parent: int | None = None,
+        max_batch_size: int | None = None,
     ) -> RoundExecutionResult:
         """Execute one round using orchestrated scheduling (phase-2 baseline)."""
         all_results: list[AgentTaskResult] = []
         pending: list[AgentTask] = list(base_tasks)
         spawned_count = 0
         processed_count = 0
+        safe_round_task_limit = max(
+            1,
+            int(max_subtasks_per_round if max_subtasks_per_round is not None else self.limits.max_subtasks_per_round),
+        )
+        safe_parent_spawn_limit = max(
+            0,
+            int(max_subtasks_per_parent if max_subtasks_per_parent is not None else self.limits.max_subtasks_per_parent),
+        )
+        safe_batch_limit = max(1, int(max_batch_size if max_batch_size is not None else self.limits.max_batch_size))
 
         while pending:
-            safe_batch_size = max(1, int(self.limits.max_batch_size or 1))
-            batch = list(pending[:safe_batch_size])
-            pending = list(pending[safe_batch_size:])
+            batch = list(pending[:safe_batch_limit])
+            pending = list(pending[safe_batch_limit:])
             batch_results = await self._execute_batch(
                 tasks=batch,
                 executor=executor,
@@ -103,19 +114,20 @@ class InsightOrchestratorService:
                 parent_task = next((item for item in batch if item.task_id == result.task_id), None)
                 if parent_task is None:
                     continue
-                remaining_spawn_budget = max(0, self.limits.max_subtasks_per_round - spawned_count)
+                remaining_spawn_budget = max(0, safe_round_task_limit - spawned_count)
                 next_tasks = self._build_subagent_tasks(
                     parent_task=parent_task,
                     result=result,
                     profiles_by_id=profiles_by_id,
                     remaining=remaining_spawn_budget,
+                    max_subtasks_per_parent=safe_parent_spawn_limit,
                 )
                 if not next_tasks:
                     continue
                 spawned_count += len(next_tasks)
                 pending.extend(next_tasks)
 
-            if processed_count >= self.limits.max_subtasks_per_round + len(base_tasks):
+            if processed_count >= safe_round_task_limit + len(base_tasks):
                 break
 
         return RoundExecutionResult(
@@ -177,6 +189,7 @@ class InsightOrchestratorService:
         result: AgentTaskResult,
         profiles_by_id: dict[str, AgentProfile],
         remaining: int,
+        max_subtasks_per_parent: int | None = None,
     ) -> list[AgentTask]:
         if remaining <= 0:
             return []
@@ -187,7 +200,10 @@ class InsightOrchestratorService:
             return []
 
         parent_profile = profiles_by_id.get(parent_task.profile_id)
-        max_per_parent = max(1, int(self.limits.max_subtasks_per_parent))
+        if max_subtasks_per_parent is None:
+            max_per_parent = max(1, int(self.limits.max_subtasks_per_parent))
+        else:
+            max_per_parent = max(0, int(max_subtasks_per_parent))
         if parent_profile is not None:
             max_per_parent = max(0, min(max_per_parent, int(parent_profile.max_subagents)))
         if max_per_parent <= 0:

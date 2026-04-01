@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import re
+import time
 from time import perf_counter
 from typing import Any
 from urllib.parse import quote
@@ -126,9 +128,19 @@ class SemanticScholarClient:
         settings = get_settings()
         self.api_key = settings.semantic_scholar_api_key
         self.timeout = settings.http_timeout_seconds
+        self.retry_max_retries = max(0, int(settings.retrieval_retry_max_retries))
+        self.retry_base_delay_seconds = max(0.01, float(settings.retrieval_retry_base_delay_seconds))
+        self.retry_jitter_seconds = max(0.0, float(settings.retrieval_retry_jitter_seconds))
         self._prefer_sdk = not bool(self.api_key)
         self._sdk_client: Any | None = None
         self._sdk_import_error: Exception | None = None
+        self._client = httpx.Client(
+            timeout=self.timeout,
+            limits=httpx.Limits(
+                max_connections=max(8, int(settings.http_client_max_connections)),
+                max_keepalive_connections=max(4, int(settings.http_client_max_keepalive_connections)),
+            ),
+        )
 
     @property
     def prefers_sdk(self) -> bool:
@@ -680,21 +692,51 @@ class SemanticScholarClient:
         if self.api_key:
             headers["x-api-key"] = self.api_key
 
-        try:
-            with httpx.Client(timeout=self.timeout, headers=headers) as client:
-                response = client.get(f"{self.BASE_URL}{path}", params=params)
-                response.raise_for_status()
-                return response.json()
-        except httpx.HTTPStatusError as exc:
-            status_code = exc.response.status_code
-            details = self._extract_error_message(exc.response)
+        attempts = max(1, self.retry_max_retries + 1)
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                response = self._client.get(f"{self.BASE_URL}{path}", params=params, headers=headers)
+            except httpx.RequestError as exc:
+                last_error = exc
+                if attempt >= attempts - 1:
+                    raise SemanticScholarClientError(str(exc)) from exc
+                self._sleep_before_retry(attempt)
+                continue
+
+            status_code = response.status_code
+            details = self._extract_error_message(response)
             if status_code == 404:
-                raise SemanticScholarNotFoundError(details) from exc
+                raise SemanticScholarNotFoundError(details)
             if status_code == 429 or (status_code == 403 and self._is_rate_limit_message(details)):
-                raise SemanticScholarRateLimitError(details) from exc
-            raise SemanticScholarClientError(details) from exc
-        except httpx.RequestError as exc:
-            raise SemanticScholarClientError(str(exc)) from exc
+                if attempt >= attempts - 1:
+                    raise SemanticScholarRateLimitError(details)
+                self._sleep_before_retry(attempt)
+                continue
+            if status_code in {502, 503, 504} or status_code >= 500:
+                if attempt >= attempts - 1:
+                    raise SemanticScholarClientError(details)
+                self._sleep_before_retry(attempt)
+                continue
+            if status_code >= 400:
+                raise SemanticScholarClientError(details)
+
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise SemanticScholarClientError("invalid_semantic_scholar_json_response") from exc
+            if not isinstance(payload, dict):
+                raise SemanticScholarClientError("invalid_semantic_scholar_payload")
+            return payload
+
+        if last_error is not None:
+            raise SemanticScholarClientError(str(last_error)) from last_error
+        raise SemanticScholarClientError("semantic_scholar_request_failed")
+
+    def _sleep_before_retry(self, attempt: int) -> None:
+        base = self.retry_base_delay_seconds * (2 ** max(0, attempt))
+        jitter = random.uniform(0.0, self.retry_jitter_seconds) if self.retry_jitter_seconds > 0 else 0.0
+        time.sleep(base + jitter)
 
     @staticmethod
     def _extract_error_message(response: httpx.Response) -> str:
