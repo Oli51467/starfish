@@ -382,6 +382,7 @@ function toggleCollapsed() {
 
 .workflow-stage-node.is-active .workflow-stage-node-status {
   color: var(--text);
+  animation: workflow-stage-status-pulse 1.2s ease-in-out infinite;
 }
 
 .workflow-stage-node.is-failed {
@@ -409,6 +410,25 @@ function toggleCollapsed() {
 
 .workflow-stage-connector.is-passed {
   color: var(--success);
+}
+
+@keyframes workflow-stage-status-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  50% {
+    opacity: 0.52;
+    transform: scale(1.08);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workflow-stage-node.is-active .workflow-stage-node-status {
+    animation: none;
+  }
 }
 
 @media (max-width: 768px) {

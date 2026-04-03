@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections import Counter
 import time
 import unittest
 from unittest.mock import patch
 
+from models.schemas import KnowledgeGraphNode
 from services.graphrag_service import GraphRAGService
 from services.insight_agent_contracts import AgentProfile, AgentTask, AgentTaskResult, SubAgentRequest
 from services.insight_exploration_service import InsightExplorationService
@@ -193,6 +195,96 @@ class GraphRAGParallelAccelerationTests(unittest.TestCase):
         self.assertNotEqual(str(payload.get("provider") or ""), "mock")
         titles = [str(item.get("title") or "") for item in list(payload.get("papers") or [])]
         self.assertIn("Topic Recovery Paper", titles)
+
+    def test_build_graph_components_dedups_duplicate_papers(self) -> None:
+        service = GraphRAGService()
+        service._attach_relation_ids = lambda papers: None  # type: ignore[method-assign]
+        service._semantic_relevance_score = lambda **kwargs: 0.42  # type: ignore[method-assign]
+        service._build_aha_summary_with_llm = lambda query, papers: "summary"  # type: ignore[method-assign]
+
+        papers = [
+            {
+                "paper_id": "same-id",
+                "title": "Paper A",
+                "abstract": "Graph neural network benchmark.",
+                "year": 2024,
+                "citation_count": 100,
+                "venue": "V1",
+            },
+            {
+                "paper_id": "SAME-ID",
+                "title": "Paper A",
+                "abstract": "Duplicate entry with different casing.",
+                "year": 2024,
+                "citation_count": 95,
+                "venue": "V2",
+            },
+            {
+                "paper_id": "paper-b",
+                "title": "Paper B",
+                "abstract": "Transformer retrieval system.",
+                "year": 2023,
+                "citation_count": 80,
+                "venue": "V3",
+            },
+        ]
+
+        paper_nodes, entity_nodes, domain_nodes, edges, _insight = service._build_graph_components(
+            papers=papers,
+            max_entities_per_paper=4,
+            query="graph retrieval",
+        )
+
+        _ = entity_nodes, domain_nodes, edges
+        paper_ids = [str(node.paper_id or "") for node in paper_nodes]
+        self.assertEqual(len(paper_ids), 2)
+        self.assertEqual(len(set(paper_ids)), 2)
+
+    def test_entity_and_domain_ids_are_unique_under_slug_collision(self) -> None:
+        service = GraphRAGService()
+        entity_nodes, entity_id_by_name = service._build_entity_nodes(
+            Counter({"GPT-4": 3, "GPT+4": 2}),
+            {"GPT-4": "method", "GPT+4": "method"},
+        )
+        domain_nodes, domain_id_by_name = service._build_domain_nodes(
+            Counter({"A-B": 2, "A B": 1}),
+        )
+
+        paper_nodes = [
+            KnowledgeGraphNode(
+                id="paper:p1",
+                paper_id="p1",
+                label="Seed Paper",
+                type="paper",
+                size=20.0,
+                score=0.8,
+                meta={},
+            )
+        ]
+        paper_entities = {"p1": {"GPT-4", "GPT+4"}}
+        paper_domains = {"p1": {"A-B", "A B"}}
+        domain_entities = {"A-B": {"GPT-4"}, "A B": {"GPT+4"}}
+
+        edges = service._build_edges(
+            paper_nodes=paper_nodes,
+            entity_counter=Counter({"GPT-4": 3, "GPT+4": 2}),
+            paper_entities=paper_entities,
+            paper_domains=paper_domains,
+            domain_entities=domain_entities,
+            entity_id_by_name=entity_id_by_name,
+            domain_id_by_name=domain_id_by_name,
+        )
+
+        self.assertEqual(len(entity_nodes), 2)
+        self.assertEqual(len({node.id for node in entity_nodes}), 2)
+        self.assertEqual(len(domain_nodes), 2)
+        self.assertEqual(len({node.id for node in domain_nodes}), 2)
+
+        known_node_ids = {node.id for node in paper_nodes}
+        known_node_ids.update(node.id for node in entity_nodes)
+        known_node_ids.update(node.id for node in domain_nodes)
+        self.assertTrue(all(edge.source in known_node_ids for edge in edges))
+        self.assertTrue(all(edge.target in known_node_ids for edge in edges))
 
 
 class MultiSourceRetrieverTimeoutTests(unittest.TestCase):

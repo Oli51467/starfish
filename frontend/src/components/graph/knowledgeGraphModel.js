@@ -1,10 +1,14 @@
 const QUERY_NODE_ID = 'seed:query';
-const MAX_PAPER_NODES = 24;
-const MAX_DOMAIN_NODES = 16;
-const MAX_PAPER_RELATED_EDGES = 34;
+const MAX_PAPER_NODES = 72;
+const MAX_DOMAIN_NODES = 5;
+const MAX_PAPER_RELATED_EDGES = 72;
 const MAX_DOMAIN_RELATED_EDGES = 16;
-const MAX_PANORAMA_PAPER_NODES = 80;
-const MIN_ASSOCIATION_RATE = 0.02;
+const MAX_PANORAMA_PAPER_NODES = 140;
+const MAX_PANORAMA_RELATED_EDGES = 320;
+const MIN_ASSOCIATION_RATE = 0.1;
+const MIN_GRAPH_PAPER_NODES = 48;
+const MAX_DOMAIN_CHILD_PAPERS_PER_DOMAIN = 18;
+const MIN_DOMAIN_CHILD_PAPERS_PER_DOMAIN = 8;
 
 export function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -173,6 +177,14 @@ function sortByRelevance(left, right) {
   return (right.score || 0) - (left.score || 0);
 }
 
+function pickPaperNodesByRelevance(papers, maxNodes) {
+  const normalizedMax = Math.max(1, Math.floor(safeNumber(maxNodes, MIN_GRAPH_PAPER_NODES)));
+  const targetCount = Math.max(MIN_GRAPH_PAPER_NODES, normalizedMax);
+  return papers
+    .filter((paper) => paper.relevance >= MIN_ASSOCIATION_RATE)
+    .slice(0, targetCount);
+}
+
 function pickPaperPeerEdges(rawEdges, selectedPaperIds) {
   return (rawEdges || [])
     .filter((edge) => edge?.relation === 'related')
@@ -186,7 +198,7 @@ function pickPaperPeerEdges(rawEdges, selectedPaperIds) {
       relevance: normalizeRate(edge?.weight),
       meta: edge?.meta || {}
     }))
-    .filter((edge) => edge.relevance > MIN_ASSOCIATION_RATE)
+    .filter((edge) => edge.relevance >= MIN_ASSOCIATION_RATE)
     .sort((left, right) => right.relevance - left.relevance)
     .slice(0, MAX_PAPER_RELATED_EDGES);
 }
@@ -197,9 +209,7 @@ function buildPaperGraph(nodesRaw, edgesRaw, query, summary = '') {
     .map((node) => normalizePaperNode(node, query))
     .sort(sortByRelevance);
 
-  const selectedPapers = papers
-    .filter((paper) => paper.relevance > MIN_ASSOCIATION_RATE)
-    .slice(0, MAX_PAPER_NODES);
+  const selectedPapers = pickPaperNodesByRelevance(papers, MAX_PAPER_NODES);
   const centerNode = buildQueryNode(query);
   const selectedPaperIds = new Set(selectedPapers.map((paper) => paper.id));
 
@@ -338,6 +348,7 @@ function buildDomainGraph(nodesRaw, edgesRaw, query, summary = '') {
       return {
         ...domain,
         relevance,
+        relatedPapers,
         relatedPaperIds: paperIds,
         meta: {
           ...domain.meta,
@@ -353,7 +364,40 @@ function buildDomainGraph(nodesRaw, edgesRaw, query, summary = '') {
     });
 
   const selectedDomains = rankedDomains.slice(0, MAX_DOMAIN_NODES);
-  const filteredDomains = selectedDomains.filter((domain) => domain.relevance > MIN_ASSOCIATION_RATE);
+  const filteredDomains = selectedDomains.filter((domain) => domain.relevance >= MIN_ASSOCIATION_RATE);
+  const selectedPaperMap = new Map();
+  const domainPaperEdges = [];
+  const perDomainPaperLimit = clamp(
+    Math.ceil(MAX_PANORAMA_PAPER_NODES / Math.max(1, filteredDomains.length || 1) * 0.4),
+    MIN_DOMAIN_CHILD_PAPERS_PER_DOMAIN,
+    MAX_DOMAIN_CHILD_PAPERS_PER_DOMAIN
+  );
+
+  filteredDomains.forEach((domain) => {
+    const domainPapers = (domain.relatedPapers || [])
+      .filter((paper) => paper.relevance >= MIN_ASSOCIATION_RATE)
+      .slice(0, perDomainPaperLimit);
+    domainPapers.forEach((paper) => {
+      if (!selectedPaperMap.has(paper.id)) {
+        selectedPaperMap.set(paper.id, paper);
+      }
+      domainPaperEdges.push({
+        id: `domain-paper-${domain.id}-${paper.id}`,
+        source: domain.id,
+        target: paper.id,
+        relation: 'belongs_to',
+        kind: 'center',
+        relevance: clamp(domain.relevance * 0.45 + paper.relevance * 0.55, 0, 1),
+        meta: {
+          relation_label: '领域包含论文'
+        }
+      });
+    });
+  });
+
+  const selectedPapers = [...selectedPaperMap.values()]
+    .sort(sortByRelevance);
+  const selectedPaperIds = new Set(selectedPapers.map((paper) => paper.id));
   const centerNode = buildQueryNode(query);
 
   const centerEdges = filteredDomains.map((domain) => ({
@@ -369,20 +413,21 @@ function buildDomainGraph(nodesRaw, edgesRaw, query, summary = '') {
   }));
 
   const peerEdges = buildDomainPeerEdges(filteredDomains);
-  const nodes = [centerNode, ...filteredDomains];
-  const edges = [...centerEdges, ...peerEdges];
+  const paperPeerEdges = pickPaperPeerEdges(edgesRaw, selectedPaperIds);
+  const nodes = [centerNode, ...filteredDomains, ...selectedPapers];
+  const edges = [...centerEdges, ...domainPaperEdges, ...peerEdges, ...paperPeerEdges];
 
   return {
     key: 'domain',
-    title: '领域知识图谱',
-    description: '以检索输入为中心，边越深表示领域关联度越高，节点距离越近。',
+    title: '领域分层知识图谱',
+    description: '展示 5 个扩展领域父节点及其论文子节点，边越深表示关联越强。',
     summary: String(summary || '').trim(),
     centerNodeId: QUERY_NODE_ID,
     nodes,
     edges,
     counts: {
       seed: 1,
-      paper: 0,
+      paper: selectedPapers.length,
       domain: filteredDomains.length,
       edges: edges.length
     }
@@ -393,14 +438,13 @@ function buildPanoramaGraph(nodesRaw, edgesRaw, query, summary = '') {
   const papers = nodesRaw
     .filter((node) => node?.type === 'paper')
     .map((node) => normalizePaperNode(node, query))
-    .filter((paper) => paper.relevance > MIN_ASSOCIATION_RATE)
-    .sort(sortByRelevance)
-    .slice(0, MAX_PANORAMA_PAPER_NODES);
+    .sort(sortByRelevance);
+  const selectedPapers = pickPaperNodesByRelevance(papers, MAX_PANORAMA_PAPER_NODES);
 
   const centerNode = buildQueryNode(query);
-  const paperIds = new Set(papers.map((paper) => String(paper.id || '')));
+  const paperIds = new Set(selectedPapers.map((paper) => String(paper.id || '')));
 
-  const centerEdges = papers.map((paper) => ({
+  const centerEdges = selectedPapers.map((paper) => ({
     id: `panorama-seed-${paper.id}`,
     source: QUERY_NODE_ID,
     target: paper.id,
@@ -424,10 +468,11 @@ function buildPanoramaGraph(nodesRaw, edgesRaw, query, summary = '') {
       relevance: normalizeRate(edge?.weight),
       meta: edge?.meta || {}
     }))
-    .filter((edge) => edge.source && edge.target && edge.relevance > MIN_ASSOCIATION_RATE)
-    .sort((left, right) => right.relevance - left.relevance);
+    .filter((edge) => edge.source && edge.target && edge.relevance >= MIN_ASSOCIATION_RATE)
+    .sort((left, right) => right.relevance - left.relevance)
+    .slice(0, MAX_PANORAMA_RELATED_EDGES);
 
-  const nodes = [centerNode, ...papers];
+  const nodes = [centerNode, ...selectedPapers];
   const edges = [...centerEdges, ...peerEdges];
 
   return {
@@ -440,7 +485,7 @@ function buildPanoramaGraph(nodesRaw, edgesRaw, query, summary = '') {
     edges,
     counts: {
       seed: 1,
-      paper: papers.length,
+      paper: selectedPapers.length,
       domain: 0,
       edges: edges.length
     }

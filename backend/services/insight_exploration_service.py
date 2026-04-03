@@ -66,15 +66,15 @@ _MAX_EXPANSION_PAPERS = 24
 _MAX_EXPANSION_QUERIES_PER_ROUND = 2
 _ALLOWED_AGENT_MODES = {"legacy", "orchestrated"}
 _DEFAULT_ARTIFACT_PDF_TIMEOUT_SECONDS = 15.0
-_REPORT_MIN_CHARS_ZH = 800
-_REPORT_TARGET_CHARS_ZH = 1200
+_REPORT_MIN_CHARS_ZH = 2600
+_REPORT_TARGET_CHARS_ZH = 3800
 _REPORT_MIN_CHARS_EN = 7000
 _REPORT_TARGET_CHARS_EN = 9000
 _REPORT_EXPANSION_MAX_ROUNDS = 3
 _REPORT_BASE_MAX_TOKENS = 3200
-_REPORT_EXPANSION_MAX_TOKENS = 2400
-_REPORT_DRAFT_MAX_TOKENS = 1400
-_REPORT_REFINE_MAX_TOKENS = 2200
+_REPORT_EXPANSION_MAX_TOKENS = 2800
+_REPORT_DRAFT_MAX_TOKENS = 2600
+_REPORT_REFINE_MAX_TOKENS = 2800
 _ROUND_EARLY_STOP_SIGNAL_THRESHOLD = 2
 _ROUND_EARLY_STOP_STREAK = 2
 _QUICK_MODE_MAX_SUBTASKS_PER_ROUND = 8
@@ -2105,35 +2105,35 @@ class InsightExplorationService:
 
         if language == "zh":
             user_prompt = (
-                "你是一位熟悉学术圈的学长，帮师弟梳理一个领域的文献全貌。\n"
-                "语气直接、口语化，像在对话，不要写成论文。\n\n"
-                "基于下方的论文数据，生成一份 Markdown 报告，严格按以下结构：\n\n"
-                "---\n\n"
-                f"# {query}：文献地图\n\n"
-                "## 你应该先读这几篇（按顺序）\n\n"
-                "列出 3-5 篇，每篇写：\n"
-                "- 标题（年份）\n"
-                "- 一句话说为什么先读这篇，不超过 30 字\n"
-                "- 读完之后你会得到什么\n\n"
-                "## 可以暂时跳过的\n\n"
-                "列出 2-3 篇，说明为什么可以跳过（比如被后来的工作取代了，或者和你的方向关系不大）\n\n"
-                "## 你可能不知道但很重要\n\n"
-                "从隐藏宝石论文中选 1-2 篇，每篇写：\n"
-                "- 标题（年份）\n"
-                "- 为什么重要但容易被忽视\n"
-                "- 一句话说它和领域主流的关系\n\n"
-                "## 这个领域现在最活跃的争议\n\n"
-                "2-3 个真实存在的学术分歧，每个用一句话说清楚两边的立场\n\n"
-                "## 如果你只有一周时间\n\n"
-                "给出一个具体的阅读顺序建议，3-5 篇，说明每天读什么\n\n"
-                "---\n\n"
+                "请基于证据生成一份“深度研究探索报告”（Markdown）。\n"
+                "写作风格要求：严谨、可核验、可执行，不写口水话，不写流程描述。\n\n"
+                "必须严格使用以下标题结构，不得增删改标题：\n"
+                f"# 研究洞察报告：{query}\n"
+                "## 摘要\n"
+                "## 1. 问题定义与评估口径\n"
+                "## 2. 研究脉络与关键里程碑\n"
+                "## 3. 方法谱系与机制拆解\n"
+                "## 4. 核心论文深读与证据矩阵\n"
+                "## 5. 争议点、反例与可证伪假设\n"
+                "## 6. 应用落地与产业化成熟度\n"
+                "## 7. 工程约束、算力与成本边界\n"
+                "## 8. 创新机会与研究议程\n"
+                "## 9. 风险、伦理与治理\n"
+                "## 10. 结论与执行路线图\n"
+                "## 参考文献\n\n"
                 "硬性约束：\n"
-                "1) 只使用给定 references 中的论文，不编造\n"
-                "2) 每篇论文推荐必须带引用编号 [R*]\n"
-                "3) 总字数 800-1200 字，不能更长\n"
-                "4) 禁止出现\"综上所述\"、\"本报告\"、\"研究表明\"等学术套话\n"
-                "5) 禁止出现公式、证据矩阵、方法谱系等学术结构\n"
-                "6) 如果证据不足，直接说\"这块文献不够，建议补充检索\"\n\n"
+                "1) 只能引用给定 references，不得编造论文、数据、结论；\n"
+                "2) 每个关键判断都必须附 [R*] 引用（可多引，如 [R3][R8]）；\n"
+                "3) 正文（不含参考文献）至少 2600 字，建议约 3800 字；\n"
+                "4) 每个一级章节都要有实质内容，通常不少于 220 字；\n"
+                "5) 禁止出现“工作流/智能体/轮次/工具调用”等过程信息；\n"
+                "6) 证据不足时必须明确写：\"当前证据不足以支持该结论\"；\n"
+                "7) 第 4 节必须包含一个 Markdown 表格，列名固定为：结论 | 证据 | 局限；\n"
+                "8) 第 10 节必须给出分阶段执行路线图（短期/中期/长期）与可衡量指标。\n\n"
+                "质量要求：\n"
+                "- 不能只做罗列，要解释“为什么成立、在什么条件下成立、何时失效”；\n"
+                "- 至少给出 3 组互相冲突或不一致的证据并分析原因；\n"
+                "- 工程与业务分析需覆盖性能、成本、可维护性、部署复杂度四个维度。\n\n"
                 f"证据上下文(JSON)：{context_json}"
             )
         else:
@@ -2170,12 +2170,13 @@ class InsightExplorationService:
         try:
             if language == "zh":
                 system_content = (
-                    "你是文献导读助手。严格遵守用户给定的 Markdown 结构与硬性约束输出，不要添加额外章节。"
+                    "你是资深科研分析写作专家。"
+                    "必须严格遵守用户给定的 Markdown 结构与硬性约束，输出证据驱动、可执行、可审计的深度报告。"
                 )
             else:
                 system_content = (
                     "You are a senior research report writer. "
-                    "Deliver precise, evidence-constrained, publication-style synthesis."
+                    "Deliver deep, precise, evidence-constrained, publication-style synthesis."
                 )
             messages = [
                 {
@@ -2343,13 +2344,16 @@ class InsightExplorationService:
 
         if language == "zh":
             prompt = (
-                "你将收到一份报告草稿，请在不改变核心结论的前提下做一次增强版修订。\n"
+                "你将收到一份研究报告草稿，请在“不改变核心结论方向”的前提下进行深度增强修订。\n"
                 "要求：\n"
                 "1) 输出完整 Markdown（不是增量）；\n"
-                "2) 只使用给定 references，不得编造；\n"
-                "3) 每个关键判断附 [R*] 引用；\n"
-                "4) 如果证据不足必须明确标注；\n"
-                "5) 目标正文长度尽量接近目标字数。\n"
+                "2) 仅使用给定 references，不得编造；\n"
+                "3) 每个关键判断必须附 [R*] 引用；\n"
+                "4) 必须补充：机制解释、证据冲突、边界条件、反例或失败场景；\n"
+                "5) 第 4 节必须包含“结论|证据|局限”的 Markdown 表格；\n"
+                "6) 第 10 节必须给出短期/中期/长期执行路线与量化指标；\n"
+                "7) 证据不足时明确写“当前证据不足以支持该结论”；\n"
+                "8) 保持标题结构，不要删节章节。\n"
                 f"当前正文约 {current_chars} 字，最低目标 {min_chars} 字，建议目标 {target_chars} 字。\n\n"
                 f"草稿：\n{safe_draft}\n\n"
                 f"证据上下文(JSON)：{context_json}"
@@ -2430,8 +2434,9 @@ class InsightExplorationService:
                 "2) 不要输出新的总标题（# ...）与“参考文献”章节；\n"
                 "3) 每个关键判断必须带 [R*] 引用；\n"
                 "4) 只能使用给定 references，禁止虚构；\n"
-                "5) 新增内容应覆盖：机制细节、证据分歧、失败边界、工程约束、实验设计；\n"
-                "6) 本次新增至少 2500 字，且新增至少 2 个二级标题。\n"
+                "5) 新增内容必须覆盖：机制细节、证据分歧、失败边界、工程约束、实验设计；\n"
+                "6) 必须新增至少 2 个二级标题，并包含至少 1 个表格或结构化清单；\n"
+                "7) 本次新增至少 2500 字，且不得出现空泛总结。\n"
                 f"当前正文约 {current_chars} 字，目标正文约 {target_chars} 字；本轮为第 {round_index} 次扩写。\n"
                 f"主题：{query}\n"
                 f"已有二级标题：{json.dumps(heading_snapshot, ensure_ascii=False)}\n"

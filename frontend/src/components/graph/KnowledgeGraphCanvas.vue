@@ -136,6 +136,7 @@
                 v-for="keyword in paper.keywords"
                 :key="`${paper.id}-${keyword}`"
                 class="direction-paper-list-item-tag"
+                :class="resolveGraphTagToneClass(keyword, paper.id)"
               >
                 {{ keyword }}
               </span>
@@ -191,7 +192,12 @@
       <section class="paper-node-middle">
         <p class="paper-node-abstract">{{ pinnedNodeDetail.abstractSnippet }}</p>
         <div v-if="pinnedNodeDetail.keywords.length" class="paper-node-keywords">
-          <span v-for="keyword in pinnedNodeDetail.keywords" :key="keyword" class="paper-node-keyword-chip">
+          <span
+            v-for="keyword in pinnedNodeDetail.keywords"
+            :key="keyword"
+            class="paper-node-keyword-chip"
+            :class="resolveGraphTagToneClass(keyword, pinnedNodeDetail.id)"
+          >
             {{ keyword }}
           </span>
         </div>
@@ -303,7 +309,12 @@
         <div class="paper-node-domain-section">
           <p class="paper-node-domain-title">代表方法</p>
           <div v-if="pinnedNodeDetail.domainMethods.length" class="paper-node-domain-tags">
-            <span v-for="method in pinnedNodeDetail.domainMethods" :key="method" class="paper-node-domain-tag mono">
+            <span
+              v-for="method in pinnedNodeDetail.domainMethods"
+              :key="method"
+              class="paper-node-domain-tag mono"
+              :class="resolveGraphTagToneClass(method, pinnedNodeDetail.id)"
+            >
               {{ method }}
             </span>
           </div>
@@ -374,6 +385,94 @@
         <p v-if="bookmarkErrorMessage" class="paper-node-action-error mono">{{ bookmarkErrorMessage }}</p>
       </footer>
     </article>
+
+    <article
+      v-if="pinnedEdgeDetail"
+      ref="cardOverlayRef"
+      class="knowledge-edge-card-overlay"
+      :style="pinnedCardStyle"
+    >
+      <header class="knowledge-edge-card-head">
+        <div class="knowledge-edge-card-head-main">
+          <p class="knowledge-edge-card-title mono">{{ pinnedEdgeDetail.isPaperPair ? '论文关系' : '节点关系' }}</p>
+          <p class="knowledge-edge-card-subtitle">{{ pinnedEdgeDetail.summaryText }}</p>
+        </div>
+        <button
+          class="knowledge-node-card-close"
+          type="button"
+          aria-label="关闭关系卡片"
+          title="关闭"
+          @click="closePinnedCard"
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M4 4l8 8M12 4l-8 8" />
+          </svg>
+        </button>
+      </header>
+
+      <section class="knowledge-edge-card-bridge">
+        <a
+          v-if="pinnedEdgeDetail.source.url"
+          class="knowledge-edge-node-link"
+          :href="pinnedEdgeDetail.source.url"
+          target="_blank"
+          rel="noreferrer noopener"
+        >
+          {{ pinnedEdgeDetail.source.name }}
+        </a>
+        <p v-else class="knowledge-edge-node-name">{{ pinnedEdgeDetail.source.name }}</p>
+        <span class="knowledge-edge-node-arrow" aria-hidden="true">↔</span>
+        <a
+          v-if="pinnedEdgeDetail.target.url"
+          class="knowledge-edge-node-link"
+          :href="pinnedEdgeDetail.target.url"
+          target="_blank"
+          rel="noreferrer noopener"
+        >
+          {{ pinnedEdgeDetail.target.name }}
+        </a>
+        <p v-else class="knowledge-edge-node-name">{{ pinnedEdgeDetail.target.name }}</p>
+      </section>
+
+      <section class="knowledge-edge-card-metrics">
+        <span class="knowledge-edge-metric-chip mono">{{ pinnedEdgeDetail.relationText }}</span>
+        <span class="knowledge-edge-metric-chip mono">关联强度 {{ pinnedEdgeDetail.strengthPercentText }}</span>
+      </section>
+
+      <div class="knowledge-edge-strength-track" aria-hidden="true">
+        <span class="knowledge-edge-strength-fill" :style="{ width: pinnedEdgeDetail.strengthBarWidth }"></span>
+      </div>
+
+      <section v-if="pinnedEdgeDetail.sharedEntities.length" class="knowledge-edge-card-entities">
+        <p class="knowledge-edge-section-title mono">共享主题</p>
+        <div class="knowledge-edge-entity-chips">
+          <span
+            v-for="entity in pinnedEdgeDetail.sharedEntities"
+            :key="entity"
+            class="knowledge-edge-entity-chip mono"
+          >
+            {{ entity }}
+          </span>
+        </div>
+      </section>
+
+      <section class="knowledge-edge-card-papers">
+        <article class="knowledge-edge-paper-item">
+          <p class="knowledge-edge-paper-label mono">{{ pinnedEdgeDetail.isPaperPair ? '论文 A' : '节点 A' }}</p>
+          <p class="knowledge-edge-paper-name">{{ pinnedEdgeDetail.source.name }}</p>
+          <p class="knowledge-edge-paper-meta mono">
+            {{ pinnedEdgeDetail.source.yearText }} · {{ pinnedEdgeDetail.source.citationText }}
+          </p>
+        </article>
+        <article class="knowledge-edge-paper-item">
+          <p class="knowledge-edge-paper-label mono">{{ pinnedEdgeDetail.isPaperPair ? '论文 B' : '节点 B' }}</p>
+          <p class="knowledge-edge-paper-name">{{ pinnedEdgeDetail.target.name }}</p>
+          <p class="knowledge-edge-paper-meta mono">
+            {{ pinnedEdgeDetail.target.yearText }} · {{ pinnedEdgeDetail.target.citationText }}
+          </p>
+        </article>
+      </section>
+    </article>
   </div>
 </template>
 
@@ -381,8 +480,11 @@
 import { Graph } from '@antv/g6';
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 
+import { buildKnowledgeEdgeDetail } from './knowledgeEdgeDetail';
+import { buildBalancedForceLayout } from './knowledgeGraphLayout';
 import { buildKnowledgeNodeDetail } from './knowledgeNodeDetail';
 import { clamp, normalizeRate, shortLabel } from './knowledgeGraphModel';
+import { buildDomainEdgeTopology, resolveDomainNodeIds } from './knowledgeDomainTopology';
 import { useAuthStore } from '../../stores/authStore';
 import { useCollectionStore } from '../../stores/collectionStore';
 
@@ -400,6 +502,7 @@ const props = defineProps({
 const graphBodyRef = ref(null);
 const graphContainerRef = ref(null);
 const pinnedNode = ref(null);
+const pinnedEdge = ref(null);
 const pinnedCardPoint = ref(null);
 const cardOverlayRef = ref(null);
 const pinnedCardSize = ref({ width: 460, height: 300 });
@@ -414,6 +517,8 @@ let graphInstance = null;
 let resizeObserver = null;
 let resizeRaf = 0;
 let nodeClickHandler = null;
+let edgeClickHandler = null;
+let canvasClickHandler = null;
 let lastGraphSignature = '';
 const bookmarkActionLoading = ref(false);
 const bookmarkErrorMessage = ref('');
@@ -459,6 +564,19 @@ const PAPER_PALETTE = [
   { fill: '#f0f6f2', stroke: '#5f8d71' }
 ];
 const GRAPH_ZOOM_RANGE = [0.35, 2.2];
+const GRAPH_TAG_TONE_CLASSES = Object.freeze([
+  'is-tone-accent',
+  'is-tone-success',
+  'is-tone-info',
+  'is-tone-neutral',
+]);
+const GRAPH_LABEL_COLORS = Object.freeze({
+  text: '#000000',
+  muted: '#666666',
+  accent: '#ff5722',
+  success: '#4caf50',
+  info: '#2f6fd6'
+});
 
 function hashText(value) {
   const input = String(value || '');
@@ -468,6 +586,14 @@ function hashText(value) {
     hash |= 0;
   }
   return Math.abs(hash);
+}
+
+function resolveGraphTagToneClass(rawValue, scope = '') {
+  const value = String(rawValue || '').trim().toLowerCase();
+  if (!value) return 'is-tone-neutral';
+  const scoped = `${String(scope || '').trim().toLowerCase()}::${value}`;
+  const index = hashText(scoped) % GRAPH_TAG_TONE_CLASSES.length;
+  return GRAPH_TAG_TONE_CLASSES[index];
 }
 
 function parseHexColor(hex) {
@@ -514,14 +640,13 @@ function directionPalette(baseColor, heat) {
 }
 
 function buildColorContext(nodesRaw, edgesRaw) {
-  const nodeKindById = new Map();
+  const topology = buildDomainEdgeTopology(nodesRaw, edgesRaw);
   const domainNodes = [];
 
   nodesRaw.forEach((node) => {
     const kind = node?.kind || node?.type || '';
     const id = String(node?.id || '');
     if (!id) return;
-    nodeKindById.set(id, kind);
     if (kind === 'domain') domainNodes.push(node);
   });
 
@@ -534,16 +659,10 @@ function buildColorContext(nodesRaw, edgesRaw) {
     domainPaletteById.set(String(node.id), directionPalette(baseColor, heat));
   });
 
-  const paperDomainById = new Map();
-  edgesRaw.forEach((edge) => {
-    const source = String(edge?.source || '');
-    const target = String(edge?.target || '');
-    if (!source || !target) return;
-    if (nodeKindById.get(source) !== 'domain' || nodeKindById.get(target) !== 'paper') return;
-    paperDomainById.set(target, source);
-  });
-
-  return { domainPaletteById, paperDomainById };
+  return {
+    ...topology,
+    domainPaletteById
+  };
 }
 
 function parsePaperTier(node) {
@@ -573,11 +692,7 @@ function parseNodeSizeHint(node) {
 function selectedPaperNodeIdsByDirection(colorContext, directionId) {
   const targetDirectionId = String(directionId || '').trim();
   if (!targetDirectionId) return new Set();
-  return new Set(
-    [...colorContext.paperDomainById.entries()]
-      .filter(([, domainId]) => domainId === targetDirectionId)
-      .map(([paperId]) => paperId)
-  );
+  return new Set(colorContext.domainPaperIdsById?.get(targetDirectionId) || []);
 }
 
 function resolveNodePalette(node, colorContext) {
@@ -595,6 +710,18 @@ function resolveNodePalette(node, colorContext) {
     return PAPER_PALETTE[paletteIndex];
   }
   return NODE_STYLE[kind] || NODE_STYLE.domain;
+}
+
+function resolveNodeLabelFill(kind, tier, palette, isSelectedNode) {
+  if (isSelectedNode) return GRAPH_LABEL_COLORS.text;
+  if (kind === 'seed') return GRAPH_LABEL_COLORS.text;
+  if (kind === 'domain') return String(palette?.stroke || GRAPH_LABEL_COLORS.text);
+  if (kind === 'paper') {
+    if (tier <= 1) return GRAPH_LABEL_COLORS.accent;
+    if (tier === 2) return GRAPH_LABEL_COLORS.info;
+    return GRAPH_LABEL_COLORS.muted;
+  }
+  return GRAPH_LABEL_COLORS.success;
 }
 
 function edgeStroke(relevance, kind) {
@@ -713,8 +840,8 @@ function toG6Data(graphPayload) {
   const colorContext = buildColorContext(nodesRaw, edgesRaw);
   const selectedDomainId = String(selectedDirectionId.value || '').trim();
   const hasSelection = Boolean(selectedDomainId) && selectedDirectionMode.value !== DIRECTION_MODE.NONE;
-  const selectedPaperNodeIds = hasSelection
-    ? selectedPaperNodeIdsByDirection(colorContext, selectedDomainId)
+  const selectedDomainNodeIds = hasSelection
+    ? resolveDomainNodeIds(colorContext, selectedDomainId, { includeEntities: true })
     : new Set();
   const pinnedNodeId = String(pinnedNode.value?.id || '').trim();
 
@@ -724,10 +851,7 @@ function toG6Data(graphPayload) {
     const size = nodeSize(node, totalNodes);
     const nodeId = String(node.id || '');
     const tier = kind === 'paper' ? resolvePaperTier(node) : 3;
-    const isSelectedNode = (
-      (kind === 'domain' && nodeId === selectedDomainId)
-      || (kind === 'paper' && selectedPaperNodeIds.has(nodeId))
-    );
+    const isSelectedNode = hasSelection && selectedDomainNodeIds.has(nodeId);
     const isPinnedNode = pinnedNodeId && pinnedNodeId === nodeId;
     const isDimmedNode = hasSelection && kind !== 'seed' && !isSelectedNode;
     const nodeOpacity = (
@@ -739,6 +863,7 @@ function toG6Data(graphPayload) {
     const labelText = showLabel
       ? shortLabel(node.name || node.label, nodeLabelLimit(kind, totalNodes, tier))
       : '';
+    const labelFill = resolveNodeLabelFill(kind, tier, palette, isSelectedNode);
     const lineWidth = (
       isSelectedNode
         ? (kind === 'domain' ? 2.6 : 2.2)
@@ -769,7 +894,7 @@ function toG6Data(graphPayload) {
         labelOffsetY: kind === 'paper' ? 4 : 6,
         labelFontSize: kind === 'seed' ? 12 : (kind === 'domain' ? 10 : (tier === 1 ? 11 : 9)),
         labelFontWeight: kind === 'seed' ? 700 : (tier === 1 ? 600 : 500),
-        labelFill: '#2f2f2f',
+        labelFill,
         labelBackground: false,
         cursor: 'pointer',
         opacity: nodeOpacity
@@ -782,14 +907,12 @@ function toG6Data(graphPayload) {
     const relevance = normalizeRate(edge?.relevance ?? edge?.weight);
     const sourceId = String(edge?.source || '');
     const targetId = String(edge?.target || '');
-    const isSelectedEdge = hasSelection && (
-      sourceId === selectedDomainId
-      || targetId === selectedDomainId
-      || (sourceId === selectedDomainId && selectedPaperNodeIds.has(targetId))
-    );
+    const isSelectedEdge = hasSelection
+      && selectedDomainNodeIds.has(sourceId)
+      && selectedDomainNodeIds.has(targetId);
     const isDimmedEdge = hasSelection && !isSelectedEdge;
     return {
-      id: edge.id || `edge-${index}`,
+      id: resolveDisplayEdgeId(edge, index),
       source: sourceId,
       target: targetId,
       data: {
@@ -815,59 +938,14 @@ function toG6Data(graphPayload) {
 }
 
 function buildLayout(width, height, totalNodes, edgeCount) {
-  if (totalNodes <= 1) {
-    return {
-      type: 'd3-force',
-      animation: false,
-      preventOverlap: false,
-      center: [width / 2, height / 2],
-      alphaDecay: 1,
-      velocityDecay: 1,
-      iterations: 1,
-      manyBody: {
-        strength: 0,
-        distanceMax: 1
-      },
-      link: {
-        distance: 160,
-        strength: 0
-      },
-      collide: {
-        strength: 0,
-        iterations: 1,
-        radius: () => 0
-      }
-    };
-  }
-  const crowdFactor = clamp(edgeCount / Math.max(1, totalNodes), 1.2, 6.2);
-  return {
-    type: 'd3-force',
-    animation: true,
-    preventOverlap: true,
-    center: [width / 2, height / 2],
-    alphaDecay: 0.07,
-    velocityDecay: 0.44,
-    iterations: 280,
-    manyBody: {
-      strength: -700 - crowdFactor * 65,
-      distanceMax: 1300
-    },
-    link: {
-      distance: (edge) => edgeDistance(edge?.data?.relevance, edge?.data?.kind),
-      strength: (edge) => {
-        const normalized = normalizeRate(edge?.data?.relevance);
-        if (edge?.data?.kind === 'center') {
-          return clamp(0.52 + normalized * 0.34, 0.52, 0.9);
-        }
-        return clamp(0.18 + normalized * 0.28, 0.18, 0.5);
-      }
-    },
-    collide: {
-      strength: 0.92,
-      iterations: 6,
-      radius: (node) => Number(node?.data?.resolvedSize || 11) / 2 + 22
-    }
-  };
+  return buildBalancedForceLayout({
+    nodesRaw: props.graph?.nodes || [],
+    edgesRaw: props.graph?.edges || [],
+    width,
+    height,
+    totalNodes,
+    edgeCount
+  });
 }
 
 function graphOptions(width, height) {
@@ -943,6 +1021,37 @@ function resolveEventNodeId(event) {
   return '';
 }
 
+function resolveDisplayEdgeId(edge, index) {
+  const rawId = String(edge?.id || '').trim();
+  if (rawId) return rawId;
+  return `edge-${Math.max(0, Number(index) || 0)}`;
+}
+
+function resolveEventEdgeId(event) {
+  const candidates = [
+    event?.target?.id,
+    event?.target?.config?.id,
+    event?.target?.attributes?.id,
+    event?.item?.id,
+    event?.itemID,
+    event?.id,
+    event?.data?.id
+  ];
+  const knownIds = new Set(
+    (props.graph?.edges || []).map((edge, index) => resolveDisplayEdgeId(edge, index))
+  );
+
+  for (const candidate of candidates) {
+    const value = String(candidate || '').trim();
+    if (!value) continue;
+    if (knownIds.has(value)) return value;
+    for (const knownId of knownIds) {
+      if (value.includes(knownId)) return knownId;
+    }
+  }
+  return '';
+}
+
 function resolveEventPoint(event) {
   const rect = graphContainerRef.value?.getBoundingClientRect();
   const clientX = Number(event?.client?.x ?? event?.originalEvent?.clientX ?? event?.srcEvent?.clientX ?? NaN);
@@ -986,7 +1095,11 @@ function bindNodeClick() {
       closePinnedCard();
       return;
     }
+    if ((node?.kind || node?.type) === 'domain') {
+      void toggleDirectionFocus(nodeId);
+    }
 
+    closePinnedEdgeCard();
     pinnedNode.value = node;
     let point = resolveEventPoint(event);
     if (!point && graphInstance?.getElementPosition) {
@@ -1010,6 +1123,58 @@ function unbindNodeClick() {
   nodeClickHandler = null;
 }
 
+function bindEdgeClick() {
+  if (!graphInstance || edgeClickHandler) return;
+
+  edgeClickHandler = (event) => {
+    const edgeId = resolveEventEdgeId(event);
+    if (!edgeId) return;
+    const edgeIndex = (props.graph?.edges || []).findIndex(
+      (item, index) => resolveDisplayEdgeId(item, index) === edgeId
+    );
+    if (edgeIndex < 0) return;
+    const edge = (props.graph?.edges || [])[edgeIndex];
+    if (!edge) return;
+    const nextPinnedId = String(pinnedEdge.value?._displayId || '').trim();
+    if (nextPinnedId && nextPinnedId === edgeId) {
+      closePinnedEdgeCard();
+      return;
+    }
+
+    closePinnedNodeCard();
+    pinnedEdge.value = {
+      ...edge,
+      _displayId: edgeId
+    };
+  };
+
+  graphInstance.on('edge:click', edgeClickHandler);
+  graphInstance.on('edge:pointertap', edgeClickHandler);
+}
+
+function unbindEdgeClick() {
+  if (!graphInstance || !edgeClickHandler) return;
+  graphInstance.off('edge:click', edgeClickHandler);
+  graphInstance.off('edge:pointertap', edgeClickHandler);
+  edgeClickHandler = null;
+}
+
+function bindCanvasClick() {
+  if (!graphInstance || canvasClickHandler) return;
+  canvasClickHandler = () => {
+    closePinnedCard();
+  };
+  graphInstance.on('canvas:click', canvasClickHandler);
+  graphInstance.on('canvas:pointertap', canvasClickHandler);
+}
+
+function unbindCanvasClick() {
+  if (!graphInstance || !canvasClickHandler) return;
+  graphInstance.off('canvas:click', canvasClickHandler);
+  graphInstance.off('canvas:pointertap', canvasClickHandler);
+  canvasClickHandler = null;
+}
+
 async function initGraph() {
   if (!graphContainerRef.value || graphInstance) return;
   const { width, height } = getContainerSize();
@@ -1031,22 +1196,30 @@ async function initGraph() {
   }
   lastGraphSignature = graphPayloadSignature(props.graph);
   bindNodeClick();
+  bindEdgeClick();
+  bindCanvasClick();
 }
 
-async function updateGraphData() {
+async function updateGraphData({ preserveViewport = false } = {}) {
   if (!graphInstance) {
     await initGraph();
     return;
   }
   const { width, height } = getContainerSize();
   const singleSeed = isSingleSeedGraph(props.graph);
-  const viewport = singleSeed ? null : getViewportSnapshot();
+  const viewport = (!singleSeed && preserveViewport) ? getViewportSnapshot() : null;
   graphInstance.setOptions(graphOptions(width, height));
   await graphInstance.render();
   if (singleSeed && graphInstance?.zoomTo) {
     await graphInstance.zoomTo(1, { duration: 0 });
-  } else {
+  } else if (viewport) {
     await restoreViewport(viewport);
+  } else {
+    try {
+      await graphInstance.fitView?.();
+    } catch {
+      // no-op
+    }
   }
   lastGraphSignature = graphPayloadSignature(props.graph);
 }
@@ -1054,6 +1227,8 @@ async function updateGraphData() {
 async function recreateGraph({ fitView = false } = {}) {
   if (graphInstance) {
     unbindNodeClick();
+    unbindEdgeClick();
+    unbindCanvasClick();
     graphInstance.destroy();
     graphInstance = null;
   }
@@ -1142,9 +1317,18 @@ function setupResizeObserver() {
   resizeObserver.observe(graphContainerRef.value);
 }
 
-function closePinnedCard() {
+function closePinnedNodeCard() {
   pinnedNode.value = null;
   pinnedCardPoint.value = null;
+}
+
+function closePinnedEdgeCard() {
+  pinnedEdge.value = null;
+}
+
+function closePinnedCard() {
+  closePinnedNodeCard();
+  closePinnedEdgeCard();
 }
 
 function exportCitation() {
@@ -1292,11 +1476,11 @@ function resolveDirectionFocusNodeIds(directionId) {
   if (!knownNodeIds.has(targetId)) return [];
 
   const colorContext = buildColorContext(nodesRaw, edgesRaw);
-  const relatedPaperIds = selectedPaperNodeIdsByDirection(colorContext, targetId);
-  const focusIds = [targetId];
-  for (const paperId of relatedPaperIds) {
-    if (!knownNodeIds.has(paperId)) continue;
-    focusIds.push(paperId);
+  const relatedNodeIds = resolveDomainNodeIds(colorContext, targetId, { includeEntities: true });
+  const focusIds = [];
+  for (const nodeId of relatedNodeIds) {
+    if (!knownNodeIds.has(nodeId)) continue;
+    focusIds.push(nodeId);
   }
   return focusIds;
 }
@@ -1417,6 +1601,7 @@ async function focusPaperFromList(paperId) {
     String(node?.id || '') === targetPaperId && (node?.kind || node?.type) === 'paper'
   ));
   if (!targetNode) return;
+  closePinnedEdgeCard();
   pinnedNode.value = targetNode;
   pinnedCardPoint.value = null;
   await focusNodeById(targetPaperId, [targetPaperId]);
@@ -1502,6 +1687,16 @@ const directionPaperListItems = computed(() => {
     }));
 });
 
+const graphNodeById = computed(() => {
+  const map = new Map();
+  for (const node of (props.graph?.nodes || [])) {
+    const nodeId = String(node?.id || '').trim();
+    if (!nodeId) continue;
+    map.set(nodeId, node);
+  }
+  return map;
+});
+
 const pinnedNodeDetail = computed(() => {
   const detail = buildKnowledgeNodeDetail(pinnedNode.value);
   if (!detail) return null;
@@ -1513,6 +1708,8 @@ const pinnedNodeDetail = computed(() => {
     isBookmarkSyncing: paperId ? isPaperSyncing(paperId) : false
   };
 });
+
+const pinnedEdgeDetail = computed(() => buildKnowledgeEdgeDetail(pinnedEdge.value, graphNodeById.value));
 
 const pinnedCardStyle = computed(() => {
   const width = graphContainerRef.value?.clientWidth || 920;
@@ -1563,7 +1760,25 @@ watch(
       pinnedNode.value = latest || null;
       if (!latest) pinnedCardPoint.value = null;
     }
-    await updateGraphData();
+    if (pinnedEdge.value) {
+      const pinnedDisplayId = String(pinnedEdge.value?._displayId || '').trim();
+      if (!pinnedDisplayId) {
+        pinnedEdge.value = null;
+      } else {
+        const edgeIndex = (props.graph?.edges || []).findIndex(
+          (item, index) => resolveDisplayEdgeId(item, index) === pinnedDisplayId
+        );
+        if (edgeIndex < 0) {
+          pinnedEdge.value = null;
+        } else {
+          const latestEdge = (props.graph?.edges || [])[edgeIndex];
+          pinnedEdge.value = latestEdge
+            ? { ...latestEdge, _displayId: pinnedDisplayId }
+            : null;
+        }
+      }
+    }
+    await updateGraphData({ preserveViewport: false });
   },
   { deep: true }
 );
@@ -1571,15 +1786,15 @@ watch(
 watch(
   [selectedDirectionId, selectedDirectionMode],
   async () => {
-    await updateGraphData();
+    await updateGraphData({ preserveViewport: true });
   }
 );
 
 watch(
-  () => pinnedNodeDetail.value?.id,
-  async (nodeId) => {
+  () => [pinnedNodeDetail.value?.id, pinnedEdgeDetail.value?.id],
+  async ([nodeId, edgeId]) => {
     bookmarkErrorMessage.value = '';
-    if (!nodeId) return;
+    if (!nodeId && !edgeId) return;
     await nextTick();
     const overlay = cardOverlayRef.value;
     if (!overlay) return;
@@ -1621,6 +1836,8 @@ onBeforeUnmount(() => {
   }
   if (graphInstance) {
     unbindNodeClick();
+    unbindEdgeClick();
+    unbindCanvasClick();
     graphInstance.destroy();
     graphInstance = null;
   }
@@ -1631,6 +1848,7 @@ onBeforeUnmount(() => {
     layout.classList.remove('is-graph-fullscreen');
   }
   pinnedNode.value = null;
+  pinnedEdge.value = null;
   pinnedCardPoint.value = null;
   isGraphDragging.value = false;
   isFullscreen.value = false;

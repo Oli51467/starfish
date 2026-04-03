@@ -102,6 +102,95 @@ class DomainAuthorityQueryTests(unittest.TestCase):
         adjusted_ids = [str(item.get("paper_id") or "") for item in adjusted]
         self.assertIn("paper:aiayn", adjusted_ids)
 
+    def test_classic_anchor_is_inserted_when_ranked_contains_relevant_classic(self) -> None:
+        service = GraphRAGService()
+        ranked = [
+            (
+                0.97,
+                0.0,
+                {
+                    "paper_id": "paper:recent-survey",
+                    "title": "Recent Survey on Transformer Attention",
+                    "abstract": "survey",
+                    "citation_count": 320,
+                    "year": 2024,
+                },
+            ),
+            (
+                0.82,
+                0.0,
+                {
+                    "paper_id": "paper:classic-aiayn",
+                    "title": "Attention Is All You Need",
+                    "abstract": "transformer self-attention architecture",
+                    "citation_count": 18000,
+                    "year": 2017,
+                },
+            ),
+            (
+                0.8,
+                0.0,
+                {
+                    "paper_id": "paper:off-topic",
+                    "title": "Battery degradation benchmark for electric vehicles",
+                    "abstract": "battery chemistry and charging systems",
+                    "citation_count": 40000,
+                    "year": 2018,
+                },
+            ),
+        ]
+        selected = [
+            {
+                "paper_id": "paper:recent-survey",
+                "title": "Recent Survey on Transformer Attention",
+                "abstract": "survey",
+                "citation_count": 320,
+                "year": 2024,
+            }
+        ]
+        adjusted = service._ensure_domain_classic_anchor_selected(
+            query="attention mechanism",
+            ranked=ranked,
+            selected=selected,
+            max_papers=5,
+        )
+        adjusted_ids = {str(item.get("paper_id") or "") for item in adjusted}
+        self.assertIn("paper:classic-aiayn", adjusted_ids)
+        self.assertNotIn("paper:off-topic", adjusted_ids)
+
+    def test_year_filter_preserves_relevant_classic_candidates(self) -> None:
+        service = GraphRAGService()
+        current_year = datetime.now(timezone.utc).year
+        in_range_papers = [
+            {
+                "paper_id": "paper:recent-1",
+                "title": "Recent Attention Benchmark",
+                "abstract": "recent benchmark",
+                "year": current_year,
+                "citation_count": 220,
+            }
+        ]
+        original_papers = [
+            *in_range_papers,
+            {
+                "paper_id": "paper:classic-aiayn",
+                "title": "Attention Is All You Need",
+                "abstract": "transformer self-attention model",
+                "year": 2017,
+                "citation_count": 18000,
+            },
+        ]
+        merged, preserved_count = service._preserve_domain_classic_candidates_after_year_filter(
+            query="attention mechanism",
+            in_range_papers=in_range_papers,
+            original_papers=original_papers,
+            max_extra=4,
+        )
+        merged_ids = {str(item.get("paper_id") or "") for item in merged}
+        self.assertIn("paper:recent-1", merged_ids)
+        self.assertIn("paper:classic-aiayn", merged_ids)
+        self.assertGreaterEqual(preserved_count, 1)
+
     def test_backfill_selected_citation_count_from_openalex_for_arxiv(self) -> None:
         service = GraphRAGService()
         service.openalex.fetch_paper_by_arxiv_id = lambda *_args, **_kwargs: {  # type: ignore[method-assign]

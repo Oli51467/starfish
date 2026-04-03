@@ -43,6 +43,11 @@ from services.node_scorer import (
     compute_internal_citations_from_papers,
     score_paper_nodes,
 )
+from services.graph_domain_taxonomy import (
+    GraphDomainSpec,
+    assign_papers_to_graph_domains,
+    build_graph_domain_specs,
+)
 from services.retrieval.multi_source_retriever import MultiSourceRetriever
 
 logger = logging.getLogger(__name__)
@@ -86,6 +91,7 @@ class GraphRAGService:
         flags=re.IGNORECASE,
     )
     _DOI_PATTERN = re.compile(r"10\.\d{4,9}/\S+", flags=re.IGNORECASE)
+    _CJK_TEXT_PATTERN = re.compile(r"[\u3400-\u9fff]")
     _DOMAIN_AUTHORITY_WEIGHTS = {
         "relevance": 0.46,
         "citation": 0.34,
@@ -96,6 +102,12 @@ class GraphRAGService:
     _DOMAIN_SEED_YEAR_TOLERANCE = 3
     _DOMAIN_FORCE_SEED_MIN = 2
     _DOMAIN_FORCE_SEED_MAX = 3
+    _DOMAIN_CLASSIC_ANCHOR_MIN = 2
+    _DOMAIN_CLASSIC_ANCHOR_MAX = 8
+    _MIN_PAPER_RELEVANCE = 0.10
+    _MIN_GRAPH_PAPER_NODES = 48
+    _MAX_GRAPH_PAPER_NODES = 96
+    _TARGET_GRAPH_DOMAINS = 5
 
     def __init__(self, neo4j_repo: Neo4jRepository | None = None) -> None:
         self.semantic = SemanticScholarClient()
@@ -134,10 +146,21 @@ class GraphRAGService:
 
     def build_knowledge_graph(self, request: KnowledgeGraphBuildRequest) -> KnowledgeGraphResponse:
         graph_id = f"kg-{uuid4().hex[:12]}"
+        normalized_input_type = str(request.research_type or "").strip().lower()
+        retrieve_input_type = (
+            normalized_input_type
+            if normalized_input_type in {"arxiv_id", "doi", "domain"}
+            else "domain"
+        )
         if request.prefetched_papers:
             papers = [paper.model_dump() for paper in request.prefetched_papers]
         else:
-            retrieval_payload = self._retrieve_papers_with_trace(request.query, request.max_papers)
+            retrieval_payload = self._retrieve_papers_with_trace(
+                query=request.query,
+                max_papers=request.max_papers,
+                input_type=retrieve_input_type,
+                paper_range_years=request.paper_range_years,
+            )
             papers = retrieval_payload["selected_papers"]
 
         build_start = perf_counter()
@@ -145,6 +168,7 @@ class GraphRAGService:
             papers=papers,
             max_entities_per_paper=request.max_entities_per_paper,
             query=request.query,
+            paper_range_years=request.paper_range_years,
         )
         build_elapsed = perf_counter() - build_start
 
@@ -263,6 +287,13 @@ class GraphRAGService:
             generated_at=datetime.now(timezone.utc),
         )
 
+    def expand_graph_domains(self, query: str, target_domains: int = 5) -> list[str]:
+        specs = build_graph_domain_specs(
+            query=query,
+            target_domains=max(1, min(8, int(target_domains or self._TARGET_GRAPH_DOMAINS))),
+        )
+        return [spec.name for spec in specs if str(spec.name or "").strip()]
+
     def _retrieve_papers(
         self,
         query: str,
@@ -290,13 +321,14 @@ class GraphRAGService:
     ) -> dict[str, Any]:
         normalized_input_type = str(input_type or "domain").strip().lower()
         if normalized_input_type in {"arxiv_id", "doi"}:
-            return self._retrieve_papers_from_seed_input_with_trace(
+            payload = self._retrieve_papers_from_seed_input_with_trace(
                 input_type=normalized_input_type,
                 input_value=query,
                 max_papers=max_papers,
                 quick_mode=quick_mode,
                 paper_range_years=paper_range_years,
             )
+            return self._apply_english_paper_policy(payload=payload)
         normalized_query_payload = self._normalize_domain_query(query)
         normalized_query = str(normalized_query_payload.get("canonical_query") or query).strip() or str(query or "").strip()
         preferred_provider = self._resolve_preferred_provider(quick_mode=quick_mode)
@@ -308,10 +340,74 @@ class GraphRAGService:
             domain_authority_mode=normalized_input_type == "domain",
         )
         payload["query"] = normalized_query
-        return self._with_normalized_domain_query_trace(
+        normalized_payload = self._with_normalized_domain_query_trace(
             payload=payload,
             normalized_query_payload=normalized_query_payload,
         )
+        return self._apply_english_paper_policy(payload=normalized_payload)
+
+    def _apply_english_paper_policy(self, *, payload: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return payload
+
+        selected_papers = list(payload.get("selected_papers") or [])
+        filtered_papers, removed_count = self._filter_english_papers(selected_papers)
+        if removed_count <= 0 and len(filtered_papers) == len(selected_papers):
+            return payload
+
+        updated = dict(payload)
+        updated["selected_papers"] = filtered_papers
+        if "selected_count" in updated:
+            updated["selected_count"] = len(filtered_papers)
+        steps = list(updated.get("steps") or [])
+        if steps:
+            for index in range(len(steps) - 1, -1, -1):
+                step = dict(steps[index] or {})
+                if str(step.get("phase") or "").strip().lower() != "filter":
+                    continue
+                step["count"] = len(filtered_papers)
+                if removed_count > 0:
+                    detail = str(step.get("detail") or "").strip()
+                    english_hint = f" 英文论文过滤移除 {removed_count} 条。"
+                    if detail:
+                        if english_hint.strip() not in detail:
+                            step["detail"] = f"{detail}{english_hint}"
+                    else:
+                        step["detail"] = f"英文论文过滤后保留 {len(filtered_papers)} 条。"
+                steps[index] = step
+                break
+        updated["steps"] = steps
+        return updated
+
+    def _filter_english_papers(self, papers: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+        filtered: list[dict[str, Any]] = []
+        removed = 0
+        for paper in papers or []:
+            normalized = self._normalize_retrieved_paper(paper)
+            if not self._is_english_paper(normalized):
+                removed += 1
+                continue
+            filtered.append(normalized)
+        return filtered, removed
+
+    def _is_english_paper(self, paper: dict[str, Any]) -> bool:
+        title = re.sub(r"\s+", " ", str(paper.get("title") or "").strip())
+        if not title:
+            return False
+        abstract = str(paper.get("abstract") or "").strip()
+        language_hint = str(paper.get("language") or paper.get("lang") or "").strip().lower()
+        if language_hint:
+            safe_language_hint = language_hint.replace("_", "-")
+            if safe_language_hint not in {"en", "eng", "english"} and not safe_language_hint.startswith("en-"):
+                return False
+
+        if self._CJK_TEXT_PATTERN.search(title):
+            return False
+        if abstract and self._CJK_TEXT_PATTERN.search(abstract):
+            return False
+        if not re.search(r"[A-Za-z]", title):
+            return False
+        return True
 
     def _normalize_domain_query(self, query: str) -> dict[str, Any]:
         safe_query = re.sub(r"\s+", " ", str(query or "").strip())
@@ -762,7 +858,11 @@ class GraphRAGService:
     ) -> dict[str, Any]:
         safe_query = query.strip()
         safe_max = max(1, max_papers)
-        candidate_limit = min(180, max(safe_max + 20, safe_max * 6)) if domain_authority_mode else min(120, max(safe_max + 20, safe_max * 6))
+        candidate_limit = (
+            min(260, max(safe_max + 32, safe_max * 7))
+            if domain_authority_mode
+            else min(160, max(safe_max + 20, safe_max * 6))
+        )
         normalized_range = self._normalize_paper_range_years(paper_range_years)
         primary_provider = self._normalize_search_provider(preferred_provider)
         domain_pipeline_fallback_reason = ""
@@ -926,11 +1026,19 @@ class GraphRAGService:
             provider_used = "mock"
             candidate_papers = self._fallback_papers(query=safe_query, max_papers=candidate_limit)
 
+        raw_candidate_papers = list(candidate_papers)
         candidate_papers, range_filter_stats = self._apply_paper_year_range(
             candidate_papers,
             paper_range_years=normalized_range,
         )
+        preserved_classic_count = 0
         if domain_authority_mode and normalized_range is not None:
+            candidate_papers, preserved_classic_count = self._preserve_domain_classic_candidates_after_year_filter(
+                query=safe_query,
+                in_range_papers=candidate_papers,
+                original_papers=raw_candidate_papers,
+                max_extra=max(2, min(12, safe_max // 8 + 2)),
+            )
             candidate_papers = self._ensure_recent_year_coverage_candidates(
                 query=safe_query,
                 papers=candidate_papers,
@@ -938,6 +1046,11 @@ class GraphRAGService:
                 preferred_provider=primary_provider,
             )
         range_hint = self._build_year_range_hint(normalized_range, range_filter_stats)
+        classic_hint = (
+            f" 并保留跨时间经典论文 {preserved_classic_count} 篇。"
+            if preserved_classic_count > 0
+            else ""
+        )
         retrieve_status = "done" if provider_used != "mock" else "fallback"
         retrieve_elapsed = float(search_result.get("elapsed_seconds") or 0.0)
         used_fallback = bool(search_result.get("used_fallback", False))
@@ -951,7 +1064,7 @@ class GraphRAGService:
             )
             retrieve_detail = (
                 f"外部检索失败，已降级为 mock 数据（{len(candidate_papers)} 条候选）。"
-                f"{range_hint}{fallback_hint}"
+                f"{range_hint}{classic_hint}{fallback_hint}"
             )
         else:
             variant_hint = (
@@ -967,15 +1080,15 @@ class GraphRAGService:
             if len(providers_used) > 1:
                 retrieve_detail = (
                     f"并行检索已完成，多个学术索引共返回 {len(candidate_papers)} 条候选论文。"
-                    f"{variant_hint}{range_hint}{fallback_hint}"
+                    f"{variant_hint}{range_hint}{classic_hint}{fallback_hint}"
                 )
             elif used_fallback and provider_used != primary_provider:
                 retrieve_detail = (
                     f"主检索通道暂不可用，"
-                    f"已自动切换备用通道，返回 {len(candidate_papers)} 条候选论文。{variant_hint}{range_hint}{fallback_hint}"
+                    f"已自动切换备用通道，返回 {len(candidate_papers)} 条候选论文。{variant_hint}{range_hint}{classic_hint}{fallback_hint}"
                 )
             else:
-                retrieve_detail = f"检索通道返回 {len(candidate_papers)} 条候选论文。{variant_hint}{range_hint}{fallback_hint}"
+                retrieve_detail = f"检索通道返回 {len(candidate_papers)} 条候选论文。{variant_hint}{range_hint}{classic_hint}{fallback_hint}"
 
         trace_provider = "+".join(providers_used) if providers_used else provider_used
         steps.append(
@@ -1039,12 +1152,13 @@ class GraphRAGService:
         paper_range_years: int | None,
         preferred_provider: str,
     ) -> list[dict[str, Any]]:
+        year_window = self._resolve_paper_year_window(paper_range_years)
         normalized_range = self._normalize_paper_range_years(paper_range_years)
-        if normalized_range is None or normalized_range <= 1:
+        if year_window is None or normalized_range is None or normalized_range <= 1:
             return papers
 
-        current_year = datetime.now(timezone.utc).year
-        target_years = list(range(max(1, current_year - normalized_range), current_year + 1))
+        from_year, current_year = year_window
+        target_years = list(range(from_year, current_year + 1))
         merged = self._merge_candidate_lists(
             primary=[],
             secondary=list(papers or []),
@@ -1101,6 +1215,85 @@ class GraphRAGService:
 
         return merged
 
+    def _preserve_domain_classic_candidates_after_year_filter(
+        self,
+        *,
+        query: str,
+        in_range_papers: list[dict[str, Any]],
+        original_papers: list[dict[str, Any]],
+        max_extra: int = 6,
+    ) -> tuple[list[dict[str, Any]], int]:
+        safe_max_extra = max(0, min(24, int(max_extra)))
+        if safe_max_extra <= 0:
+            return list(in_range_papers or []), 0
+
+        merged = self._merge_candidate_lists(
+            primary=[],
+            secondary=list(in_range_papers or []),
+            limit=max(260, len(in_range_papers or []) + safe_max_extra + 24),
+        )
+        if not original_papers:
+            return merged, 0
+
+        existing_keys = {
+            self._domain_candidate_primary_key(item)
+            for item in merged
+            if self._domain_candidate_primary_key(item)
+        }
+        ranked_classics: list[tuple[float, int, int, dict[str, Any]]] = []
+        for item in original_papers:
+            normalized = self._normalize_retrieved_paper(item)
+            key = self._domain_candidate_primary_key(normalized)
+            title = str(normalized.get("title") or "").strip()
+            if not key or not title or key in existing_keys:
+                continue
+            citation_count = self._safe_int(normalized.get("citation_count"))
+            representative_score = self._domain_representative_signal(normalized)
+            relevance_score = self._compute_relevance(
+                query=query,
+                title=title,
+                abstract=str(normalized.get("abstract") or ""),
+            )
+            title_overlap = self._title_token_overlap(query, title)
+            topical_signal = max(relevance_score, title_overlap)
+            # Keep relevance guardrails, but allow classic anchors outside the year range.
+            if topical_signal < 0.1:
+                continue
+            if citation_count < 120 and representative_score < 0.62:
+                continue
+            citation_signal = min(1.0, math.log1p(citation_count) / 9.0)
+            classic_score = citation_signal * 0.56 + representative_score * 0.29 + topical_signal * 0.15
+            ranked_classics.append(
+                (
+                    classic_score,
+                    citation_count,
+                    self._safe_int(normalized.get("year")),
+                    normalized,
+                )
+            )
+
+        ranked_classics.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+        classics_to_add: list[dict[str, Any]] = []
+        seen_keys: set[str] = set()
+        for _score, _citation, _year, candidate in ranked_classics:
+            key = self._domain_candidate_primary_key(candidate)
+            if not key or key in seen_keys:
+                continue
+            seen_keys.add(key)
+            classics_to_add.append(candidate)
+            if len(classics_to_add) >= safe_max_extra:
+                break
+
+        if not classics_to_add:
+            return merged, 0
+
+        merged = self._merge_candidate_lists(
+            primary=merged,
+            secondary=classics_to_add,
+            limit=max(280, len(merged) + len(classics_to_add) + 24),
+        )
+        return merged, len(classics_to_add)
+
     def _search_domain_authority_candidates(
         self,
         *,
@@ -1109,10 +1302,10 @@ class GraphRAGService:
         preferred_provider: str,
     ) -> dict[str, Any]:
         safe_query = str(query or "").strip()
-        safe_limit = max(1, min(limit, 180))
+        safe_limit = max(1, min(limit, 260))
         query_variants = self._build_domain_authority_queries(safe_query)
-        per_query_limit = max(18, min(60, max(24, safe_limit // max(1, len(query_variants)))))
-        merge_limit = min(240, safe_limit + max(24, per_query_limit))
+        per_query_limit = max(24, min(80, max(32, safe_limit // max(1, len(query_variants)))))
+        merge_limit = min(320, safe_limit + max(32, per_query_limit))
 
         merged_candidates: list[dict[str, Any]] = []
         merged_stats: list[dict[str, Any]] = []
@@ -1313,7 +1506,7 @@ class GraphRAGService:
                 preferred_provider=preferred_provider,
                 paper_range_years=paper_range_years,
                 max_expand_per_seed=10,
-                candidate_cap=min(200, max(200, candidate_limit)),
+                candidate_cap=min(320, max(220, candidate_limit)),
             )
             candidate_pool = list(stage_c_payload.get("candidate_pool") or [])
             if not candidate_pool:
@@ -1423,10 +1616,10 @@ class GraphRAGService:
 
         safe_max_seeds = max(10, min(max_seeds, 50))
         normalized_range = self._normalize_paper_range_years(paper_range_years)
-        current_year = datetime.now(timezone.utc).year
+        year_window = self._resolve_paper_year_window(normalized_range)
         year_hint = ""
-        if normalized_range is not None:
-            from_year = max(1, current_year - normalized_range)
+        if year_window is not None:
+            from_year, current_year = year_window
             year_hint = (
                 f"Prioritize papers published in [{from_year}, {current_year}]. "
                 "If uncertain about year, omit year."
@@ -1634,7 +1827,7 @@ class GraphRAGService:
         candidate_cap: int = 200,
     ) -> dict[str, Any]:
         safe_expand_limit = max(1, min(10, max_expand_per_seed))
-        safe_cap = max(1, min(200, candidate_cap))
+        safe_cap = max(1, min(320, candidate_cap))
         providers_used: list[str] = []
         source_stats: list[dict[str, Any]] = []
         total_elapsed = 0.0
@@ -1874,6 +2067,12 @@ class GraphRAGService:
                 selected=selected,
                 max_papers=max(1, max_papers),
             )
+            selected = self._ensure_domain_classic_anchor_selected(
+                query=query,
+                ranked=ranked,
+                selected=selected,
+                max_papers=max(1, max_papers),
+            )
             return {
                 "success": True,
                 "selected_papers": selected,
@@ -2096,13 +2295,12 @@ class GraphRAGService:
         return challenger_rank > current_rank
 
     def _is_year_in_paper_range(self, *, year: int, paper_range_years: int | None) -> bool:
-        normalized_range = self._normalize_paper_range_years(paper_range_years)
-        if normalized_range is None:
+        year_window = self._resolve_paper_year_window(paper_range_years)
+        if year_window is None:
             return True
         if year <= 0:
             return False
-        current_year = datetime.now(timezone.utc).year
-        from_year = max(1, current_year - normalized_range)
+        from_year, current_year = year_window
         return from_year <= year <= current_year
 
     def _domain_authority_weighted_score(
@@ -2177,6 +2375,9 @@ class GraphRAGService:
             safe_query,
             f"{safe_query} seminal paper",
             f"{safe_query} landmark paper",
+            f"{safe_query} foundational paper",
+            f"{safe_query} classic paper",
+            f"{safe_query} highly cited survey",
         ]
         if (
             bool(re.search(r"\b(attention|self[-\s]?attention|cross[-\s]?attention|multi[-\s]?head)\b", lower_query))
@@ -2201,8 +2402,8 @@ class GraphRAGService:
             heuristic_candidates = [
                 safe_query,
                 f"{safe_query} seminal paper",
-                "attention is all you need transformer",
                 "bert pre-training deep bidirectional transformers language understanding",
+                "language models are few-shot learners",
                 "few-shot learners language models",
                 "scaling laws neural language models",
                 "follow instructions with human feedback language models",
@@ -3050,6 +3251,15 @@ class GraphRAGService:
             return None
         return min(30, parsed)
 
+    @classmethod
+    def _resolve_paper_year_window(cls, paper_range_years: int | None) -> tuple[int, int] | None:
+        normalized_range = cls._normalize_paper_range_years(paper_range_years)
+        if normalized_range is None:
+            return None
+        current_year = datetime.now(timezone.utc).year
+        from_year = max(1, current_year - normalized_range + 1)
+        return from_year, current_year
+
     def _apply_paper_year_range(
         self,
         papers: list[dict[str, Any]],
@@ -3057,12 +3267,11 @@ class GraphRAGService:
         paper_range_years: int | None,
         preserve_paper_id: str = "",
     ) -> tuple[list[dict[str, Any]], dict[str, int | str | None]]:
-        normalized_range = self._normalize_paper_range_years(paper_range_years)
-        if normalized_range is None:
+        year_window = self._resolve_paper_year_window(paper_range_years)
+        if year_window is None:
             return papers, {"applied": False, "removed": 0, "from_year": None}
 
-        current_year = datetime.now(timezone.utc).year
-        from_year = max(1, current_year - normalized_range)
+        from_year, current_year = year_window
         preserve_key = self._paper_key(preserve_paper_id)
         filtered: list[dict[str, Any]] = []
         removed = 0
@@ -3071,7 +3280,7 @@ class GraphRAGService:
             normalized = self._normalize_retrieved_paper(paper)
             paper_key = self._paper_key(str(normalized.get("paper_id") or ""))
             year = self._safe_int(normalized.get("year"))
-            in_range = year > 0 and year >= from_year
+            in_range = year > 0 and from_year <= year <= current_year
             if in_range or (preserve_key and paper_key == preserve_key):
                 filtered.append(normalized)
             else:
@@ -3226,6 +3435,12 @@ class GraphRAGService:
                 selected=selected,
                 max_papers=max_papers,
             )
+            selected = self._ensure_domain_classic_anchor_selected(
+                query=query,
+                ranked=ranked,
+                selected=selected,
+                max_papers=max_papers,
+            )
         else:
             selected = [item for _score, _representative, item in ranked[:max_papers]]
         stats = {
@@ -3300,6 +3515,154 @@ class GraphRAGService:
                 break
         return deduped
 
+    def _ensure_domain_classic_anchor_selected(
+        self,
+        *,
+        query: str,
+        ranked: list[tuple[float, float, dict[str, Any]]],
+        selected: list[dict[str, Any]],
+        max_papers: int,
+    ) -> list[dict[str, Any]]:
+        if max_papers <= 0 or not ranked:
+            return []
+        if not selected:
+            return [item for _score, _representative, item in ranked[:max_papers]]
+
+        classic_keywords = (
+            "survey",
+            "review",
+            "benchmark",
+            "foundation",
+            "foundations",
+            "foundational",
+            "seminal",
+            "landmark",
+            "classic",
+            "taxonomy",
+            "overview",
+            "tutorial",
+        )
+        target_anchor_total = max(1, min(int(self._DOMAIN_CLASSIC_ANCHOR_MAX), max_papers // 16 + 1))
+        if max_papers >= 5:
+            target_anchor_total = max(target_anchor_total, int(self._DOMAIN_CLASSIC_ANCHOR_MIN))
+        target_anchor_total = min(target_anchor_total, max_papers)
+
+        def _is_classic_candidate(paper: dict[str, Any]) -> tuple[bool, float]:
+            title = str(paper.get("title") or "").strip()
+            if not title:
+                return False, 0.0
+            if self._is_attention_anchor_title(title) and not self._is_attention_topic_query(query):
+                return False, 0.0
+            citation_count = self._safe_int(paper.get("citation_count"))
+            representative = self._domain_representative_signal(paper)
+            relevance = self._compute_relevance(
+                query=query,
+                title=title,
+                abstract=str(paper.get("abstract") or ""),
+            )
+            title_overlap = self._title_token_overlap(query, title)
+            topical_signal = max(relevance, title_overlap)
+            title_lower = title.lower()
+            keyword_hit = any(token in title_lower for token in classic_keywords)
+            if topical_signal < 0.06:
+                return False, topical_signal
+            if topical_signal < 0.1 and not keyword_hit and citation_count < 5000 and representative < 0.78:
+                return False, topical_signal
+            if citation_count < 140 and representative < 0.6 and not keyword_hit:
+                return False, topical_signal
+            return True, topical_signal
+
+        existing_classic = 0
+        for item in selected:
+            qualifies, _ = _is_classic_candidate(item)
+            if qualifies:
+                existing_classic += 1
+        if existing_classic >= target_anchor_total:
+            return selected[:max_papers]
+
+        selected_primary_keys = {
+            self._domain_candidate_primary_key(item)
+            for item in selected
+            if self._domain_candidate_primary_key(item)
+        }
+        selected_title_keys = {
+            self._normalized_title_key(str(item.get("title") or ""))
+            for item in selected
+            if self._normalized_title_key(str(item.get("title") or ""))
+        }
+
+        ranked_classics: list[tuple[float, int, int, dict[str, Any]]] = []
+        for _score, _representative, paper in ranked:
+            primary_key = self._domain_candidate_primary_key(paper)
+            title_key = self._normalized_title_key(str(paper.get("title") or ""))
+            if primary_key and primary_key in selected_primary_keys:
+                continue
+            if title_key and title_key in selected_title_keys:
+                continue
+            qualifies, topical_signal = _is_classic_candidate(paper)
+            if not qualifies:
+                continue
+            citation_count = self._safe_int(paper.get("citation_count"))
+            representative_signal = self._domain_representative_signal(paper)
+            citation_signal = min(1.0, math.log1p(citation_count) / 9.0)
+            title_lower = str(paper.get("title") or "").lower()
+            keyword_bonus = 0.08 if any(token in title_lower for token in classic_keywords) else 0.0
+            classic_score = (
+                citation_signal * 0.52
+                + representative_signal * 0.28
+                + topical_signal * 0.20
+                + keyword_bonus
+            )
+            ranked_classics.append(
+                (
+                    classic_score,
+                    citation_count,
+                    self._safe_int(paper.get("year")),
+                    paper,
+                )
+            )
+
+        if not ranked_classics:
+            return selected[:max_papers]
+
+        ranked_classics.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+        needed = max(0, target_anchor_total - existing_classic)
+        anchors_to_add: list[dict[str, Any]] = []
+        seen_new_keys: set[str] = set()
+        for _score, _citation, _year, paper in ranked_classics:
+            primary_key = self._domain_candidate_primary_key(paper)
+            title_key = self._normalized_title_key(str(paper.get("title") or ""))
+            unique_key = primary_key or f"title:{title_key}"
+            if not unique_key or unique_key in seen_new_keys:
+                continue
+            seen_new_keys.add(unique_key)
+            anchors_to_add.append(paper)
+            if len(anchors_to_add) >= needed:
+                break
+
+        if not anchors_to_add:
+            return selected[:max_papers]
+
+        merged = [*anchors_to_add, *selected]
+        deduped: list[dict[str, Any]] = []
+        seen_primary: set[str] = set()
+        seen_titles: set[str] = set()
+        for item in merged:
+            primary_key = self._domain_candidate_primary_key(item)
+            title_key = self._normalized_title_key(str(item.get("title") or ""))
+            if primary_key and primary_key in seen_primary:
+                continue
+            if title_key and title_key in seen_titles:
+                continue
+            if primary_key:
+                seen_primary.add(primary_key)
+            if title_key:
+                seen_titles.add(title_key)
+            deduped.append(item)
+            if len(deduped) >= max_papers:
+                break
+        return deduped
+
     def _select_ranked_with_year_coverage(
         self,
         *,
@@ -3309,12 +3672,13 @@ class GraphRAGService:
     ) -> list[dict[str, Any]]:
         if max_papers <= 0:
             return []
+        year_window = self._resolve_paper_year_window(paper_range_years)
         normalized_range = self._normalize_paper_range_years(paper_range_years)
-        if normalized_range is None or normalized_range <= 1:
+        if year_window is None or normalized_range is None or normalized_range <= 1:
             return [item for _score, _representative, item in ranked[:max_papers]]
 
-        current_year = datetime.now(timezone.utc).year
-        target_years = list(range(max(1, current_year - normalized_range), current_year + 1))
+        from_year, current_year = year_window
+        target_years = list(range(from_year, current_year + 1))
         selected: list[dict[str, Any]] = []
         selected_ids: set[str] = set()
 
@@ -3472,6 +3836,7 @@ class GraphRAGService:
         year = self._safe_int(paper.get("year"))
         month = self._safe_int(paper.get("month"))
         url_value = str(paper.get("url") or "").strip()
+        language_value = str(paper.get("language") or paper.get("lang") or "").strip()
         reference_ids = [
             str(item).strip()
             for item in (paper.get("reference_ids") or [])
@@ -3494,6 +3859,7 @@ class GraphRAGService:
             "fields_of_study": list(dict.fromkeys(fields[:5])),
             "authors": authors[:8],
             "url": url_value or None,
+            "language": language_value,
             "reference_ids": list(dict.fromkeys(reference_ids[:120])),
             "citation_ids": list(dict.fromkeys(citation_ids[:120])),
             "seed_relation": str(paper.get("seed_relation") or "").strip().lower(),
@@ -3544,7 +3910,7 @@ class GraphRAGService:
         tokens = re.findall(r"[A-Za-z0-9]+", base)
         primary = " ".join(tokens[:4]) if tokens else base
         papers: list[dict[str, Any]] = []
-        for idx in range(1, min(max_papers, 24) + 1):
+        for idx in range(1, min(max_papers, 36) + 1):
             papers.append(
                 {
                     "paper_id": f"fallback-{idx}",
@@ -3566,11 +3932,336 @@ class GraphRAGService:
             )
         return papers
 
+    @staticmethod
+    def _paper_selection_rank_key(candidate: dict[str, Any]) -> tuple[float, int, float, int, str]:
+        return (
+            -float(candidate.get("raw_relevance", 0.0)),
+            int(candidate.get("tier", 3)),
+            -float(candidate.get("importance_score", 0.0)),
+            -int(candidate.get("citation_count", 0)),
+            str(candidate.get("paper_id") or ""),
+        )
+
+    def _select_papers_for_graph(
+        self,
+        *,
+        paper_records: list[dict[str, Any]],
+        score_payload_by_id: dict[str, dict[str, float]],
+        scored_by_id: dict[str, dict[str, Any]],
+        seed_paper_id: str,
+        paper_primary_domain: dict[str, str] | None = None,
+        paper_domains_by_id: dict[str, set[str]] | None = None,
+        domain_order: list[str] | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, float], dict[str, int]]:
+        candidates: list[dict[str, Any]] = []
+        quota_domain_target = max(1, min(8, int(self._TARGET_GRAPH_DOMAINS or 5)))
+        normalized_domain_order = [
+            str(item or "").strip()
+            for item in (domain_order or [])
+            if str(item or "").strip()
+        ][:quota_domain_target]
+        normalized_domain_position = {
+            domain_name: index
+            for index, domain_name in enumerate(normalized_domain_order)
+        }
+        primary_domain_by_id = {
+            str(key or "").strip(): str(value or "").strip()
+            for key, value in (paper_primary_domain or {}).items()
+            if str(key or "").strip() and str(value or "").strip()
+        }
+        domain_membership_by_id = {
+            str(key or "").strip(): sorted(
+                {
+                    str(item or "").strip()
+                    for item in (value or set())
+                    if str(item or "").strip()
+                },
+                key=lambda domain_name: normalized_domain_position.get(domain_name, len(normalized_domain_order) + 1),
+            )
+            for key, value in (paper_domains_by_id or {}).items()
+            if str(key or "").strip()
+        }
+        for record in paper_records:
+            paper_id = str(record.get("paper_id") or "").strip()
+            if not paper_id:
+                continue
+            score_payload = score_payload_by_id.get(paper_id) or {}
+            scored = scored_by_id.get(paper_id) or {}
+
+            raw_relevance = max(0.0, min(1.0, self._safe_float(score_payload.get("relevance", 0.0))))
+            raw_tier = self._safe_int(scored.get("tier", 3))
+            tier = raw_tier if raw_tier in (1, 2, 3) else 3
+            importance_score = max(0.0, min(100.0, self._safe_float(scored.get("importance_score", 0.0))))
+            primary_domain = str(primary_domain_by_id.get(paper_id, record.get("primary_domain", "")) or "").strip()
+            candidate_domains = list(domain_membership_by_id.get(paper_id) or [])
+            if not candidate_domains and primary_domain:
+                candidate_domains = [primary_domain]
+            if primary_domain and primary_domain not in candidate_domains:
+                candidate_domains.insert(0, primary_domain)
+
+            candidates.append(
+                {
+                    "paper_id": paper_id,
+                    "record": record,
+                    "raw_relevance": raw_relevance,
+                    "tier": tier,
+                    "importance_score": importance_score,
+                    "citation_count": self._safe_int(record.get("citation_count", 0)),
+                    "primary_domain": primary_domain,
+                    "domains": candidate_domains,
+                }
+            )
+
+        if not candidates:
+            return [], {}, {"candidate_count": 0, "selected_count": 0, "eligible_count": 0, "promoted_count": 0}
+
+        seed_candidate: dict[str, Any] | None = None
+        non_seed_candidates: list[dict[str, Any]] = []
+        for candidate in candidates:
+            if candidate["paper_id"] == seed_paper_id and seed_candidate is None:
+                seed_candidate = candidate
+            else:
+                non_seed_candidates.append(candidate)
+
+        quota_domain_order = list(normalized_domain_order)
+        domain_frequency: Counter[str] = Counter(
+            str(item.get("primary_domain") or "").strip()
+            for item in non_seed_candidates
+            if str(item.get("primary_domain") or "").strip()
+        )
+        for domain_name, _count in domain_frequency.most_common(quota_domain_target * 2):
+            if domain_name in quota_domain_order:
+                continue
+            quota_domain_order.append(domain_name)
+            if len(quota_domain_order) >= quota_domain_target:
+                break
+        quota_domain_position = {
+            domain_name: index
+            for index, domain_name in enumerate(quota_domain_order)
+        }
+
+        eligible_candidates = [
+            item for item in non_seed_candidates if float(item.get("raw_relevance", 0.0)) >= self._MIN_PAPER_RELEVANCE
+        ]
+        fallback_candidates = [
+            item for item in non_seed_candidates if float(item.get("raw_relevance", 0.0)) < self._MIN_PAPER_RELEVANCE
+        ]
+        eligible_candidates.sort(key=self._paper_selection_rank_key)
+        fallback_candidates.sort(key=self._paper_selection_rank_key)
+
+        def _interleave_by_domain(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            if not quota_domain_order or not items:
+                return list(items)
+            grouped: dict[str, list[dict[str, Any]]] = {
+                domain: []
+                for domain in quota_domain_order
+            }
+            ungrouped: list[dict[str, Any]] = []
+            for item in items:
+                domain = str(item.get("primary_domain") or "").strip()
+                if domain and domain in grouped:
+                    grouped[domain].append(item)
+                else:
+                    ungrouped.append(item)
+            interleaved: list[dict[str, Any]] = []
+            while True:
+                progressed = False
+                for domain in quota_domain_order:
+                    bucket = grouped.get(domain) or []
+                    if not bucket:
+                        continue
+                    interleaved.append(bucket.pop(0))
+                    progressed = True
+                if not progressed:
+                    break
+            interleaved.extend(ungrouped)
+            return interleaved
+
+        eligible_candidates = _interleave_by_domain(eligible_candidates)
+        fallback_candidates = _interleave_by_domain(fallback_candidates)
+        eligible_pool_count = len(eligible_candidates)
+        fallback_pool_count = len(fallback_candidates)
+
+        selected_records: list[dict[str, Any]] = []
+        selected_ids: set[str] = set()
+        selected_primary_domain_counter: Counter[str] = Counter()
+        effective_relevance_by_id: dict[str, float] = {}
+        promoted_count = 0
+        fallback_selected_count = 0
+
+        def _resolve_candidate_primary_domain(candidate: dict[str, Any], preferred_domain: str = "") -> str:
+            preferred = str(preferred_domain or "").strip()
+            domains = [
+                str(item or "").strip()
+                for item in (candidate.get("domains") or [])
+                if str(item or "").strip()
+            ]
+            if preferred and preferred in domains:
+                return preferred
+            for domain in domains:
+                if domain in quota_domain_position:
+                    return domain
+            if domains:
+                return domains[0]
+            return str(candidate.get("primary_domain") or "").strip()
+
+        def _append_candidate(candidate: dict[str, Any], *, promote: bool = False, preferred_domain: str = "") -> None:
+            nonlocal promoted_count, fallback_selected_count
+            paper_id = str(candidate.get("paper_id") or "").strip()
+            if not paper_id or paper_id in selected_ids:
+                return
+            selected_ids.add(paper_id)
+            selected_records.append(dict(candidate.get("record") or {}))
+            resolved_domain = _resolve_candidate_primary_domain(candidate, preferred_domain=preferred_domain)
+            if resolved_domain:
+                selected_primary_domain_counter[resolved_domain] += 1
+            if paper_id == seed_paper_id:
+                effective_relevance_by_id[paper_id] = 1.0
+            else:
+                raw_relevance = max(0.0, min(1.0, self._safe_float(candidate.get("raw_relevance", 0.0))))
+                normalized_relevance = max(self._MIN_PAPER_RELEVANCE, raw_relevance)
+                effective_relevance_by_id[paper_id] = min(1.0, normalized_relevance)
+                if promote:
+                    promoted_count += 1
+                    fallback_selected_count += 1
+
+        def _pick_from_pool(pool: list[dict[str, Any]], *, domain: str = "") -> dict[str, Any] | None:
+            target_domain = str(domain or "").strip()
+            for index, candidate in enumerate(pool):
+                paper_id = str(candidate.get("paper_id") or "").strip()
+                if not paper_id or paper_id in selected_ids:
+                    continue
+                if target_domain:
+                    candidate_domains = [
+                        str(item or "").strip()
+                        for item in (candidate.get("domains") or [])
+                        if str(item or "").strip()
+                    ]
+                    if target_domain not in candidate_domains:
+                        continue
+                return pool.pop(index)
+            return None
+
+        if seed_candidate is not None:
+            _append_candidate(seed_candidate)
+
+        min_target_total = min(
+            len(candidates),
+            max(len(selected_records), self._MIN_GRAPH_PAPER_NODES),
+        )
+        max_target_total = min(
+            len(candidates),
+            max(min_target_total, self._MAX_GRAPH_PAPER_NODES),
+        )
+        target_total = max_target_total
+
+        def _fill_from_pools(*, domain: str = "", allow_fallback: bool = True) -> bool:
+            candidate = _pick_from_pool(eligible_candidates, domain=domain)
+            if candidate is not None:
+                _append_candidate(candidate, preferred_domain=domain)
+                return True
+            if not allow_fallback:
+                return False
+            candidate = _pick_from_pool(fallback_candidates, domain=domain)
+            if candidate is not None:
+                _append_candidate(candidate, promote=True, preferred_domain=domain)
+                return True
+            return False
+
+        if quota_domain_order:
+            domain_count = len(quota_domain_order)
+            non_seed_target = max(0, target_total - len(selected_records))
+            per_domain_floor = max(1, non_seed_target // max(1, domain_count))
+            per_domain_cap = max(
+                per_domain_floor + 2,
+                int(math.ceil(non_seed_target / max(1, domain_count) * 1.45)),
+            )
+
+            for domain_name in quota_domain_order:
+                while (
+                    len(selected_records) < target_total
+                    and selected_primary_domain_counter.get(domain_name, 0) < per_domain_floor
+                ):
+                    progressed = _fill_from_pools(domain=domain_name, allow_fallback=True)
+                    if not progressed:
+                        break
+
+            while len(selected_records) < target_total:
+                progressed = False
+                for domain_name in quota_domain_order:
+                    if selected_primary_domain_counter.get(domain_name, 0) >= per_domain_cap:
+                        continue
+                    if _fill_from_pools(domain=domain_name, allow_fallback=True):
+                        progressed = True
+                        if len(selected_records) >= target_total:
+                            break
+                if not progressed:
+                    break
+
+        while len(selected_records) < target_total and _fill_from_pools(allow_fallback=False):
+            pass
+        while len(selected_records) < target_total and _fill_from_pools(allow_fallback=True):
+            pass
+
+        return selected_records, effective_relevance_by_id, {
+            "candidate_count": len(candidates),
+            "selected_count": len(selected_records),
+            "eligible_count": eligible_pool_count + (1 if seed_candidate is not None else 0),
+            "promoted_count": promoted_count,
+            "fallback_selected_count": fallback_selected_count,
+            "fallback_pool_count": fallback_pool_count,
+            "target_total": target_total,
+            "min_target_total": min_target_total,
+            "max_target_total": max_target_total,
+            "quota_domains": quota_domain_order,
+        }
+
+    def _rebuild_graph_context_for_selected_papers(
+        self,
+        *,
+        selected_paper_ids: set[str],
+        paper_entities: dict[str, set[str]],
+        paper_domains: dict[str, set[str]],
+    ) -> tuple[
+        Counter[str],
+        Counter[str],
+        dict[str, set[str]],
+        dict[str, set[str]],
+        dict[str, set[str]],
+    ]:
+        filtered_paper_entities: dict[str, set[str]] = {}
+        filtered_paper_domains: dict[str, set[str]] = {}
+        filtered_entity_counter: Counter[str] = Counter()
+        filtered_domain_counter: Counter[str] = Counter()
+        filtered_domain_entities: dict[str, set[str]] = defaultdict(set)
+
+        for paper_id in sorted(selected_paper_ids):
+            entities = set(paper_entities.get(paper_id, set()))
+            domains = set(paper_domains.get(paper_id, set()))
+            if entities:
+                filtered_paper_entities[paper_id] = entities
+                for entity_name in entities:
+                    filtered_entity_counter[entity_name] += 1
+            if domains:
+                filtered_paper_domains[paper_id] = domains
+                for domain in domains:
+                    filtered_domain_counter[domain] += 1
+                    filtered_domain_entities[domain].update(entities)
+
+        return (
+            filtered_entity_counter,
+            filtered_domain_counter,
+            filtered_paper_entities,
+            filtered_paper_domains,
+            filtered_domain_entities,
+        )
+
     def _build_graph_components(
         self,
         papers: list[dict[str, Any]],
         max_entities_per_paper: int,
         query: str,
+        paper_range_years: int | None = None,
     ) -> tuple[
         list[KnowledgeGraphNode],
         list[KnowledgeGraphNode],
@@ -3578,17 +4269,44 @@ class GraphRAGService:
         list[KnowledgeGraphEdge],
         dict[str, Any],
     ]:
+        range_filtered_papers, range_filter_stats = self._apply_paper_year_range(
+            papers,
+            paper_range_years=paper_range_years,
+        )
+        range_filtered_papers, non_english_removed_count = self._filter_english_papers(range_filtered_papers)
         normalized_papers: list[dict[str, Any]] = []
-        for paper in papers:
+        seen_paper_ids: set[str] = set()
+        seen_paper_titles: set[str] = set()
+        for paper in range_filtered_papers:
             normalized = self._normalize_retrieved_paper(paper)
             paper_id = str(normalized.get("paper_id") or "").strip()
             title = str(normalized.get("title") or "").strip()
             if not paper_id or not title:
                 continue
+            paper_key = self._paper_key(paper_id)
+            title_key = self._normalized_title_key(title)
+            if paper_key and paper_key in seen_paper_ids:
+                continue
+            if title_key and title_key in seen_paper_titles:
+                continue
+            if paper_key:
+                seen_paper_ids.add(paper_key)
+            if title_key:
+                seen_paper_titles.add(title_key)
             normalized_papers.append(normalized)
 
         if not normalized_papers:
-            return [], [], [], [], {"summary": build_aha_summary(query, [])}
+            return [], [], [], [], {
+                "summary": build_aha_summary(query, []),
+                "paper_year_range": {
+                    "paper_range_years": self._normalize_paper_range_years(paper_range_years),
+                    **range_filter_stats,
+                },
+                "language_filter": {
+                    "policy": "english_only",
+                    "removed_non_english": non_english_removed_count,
+                },
+            }
 
         # Try enriching citation relations so "引用关系得分" can be computed from real graph links.
         self._attach_relation_ids(normalized_papers)
@@ -3600,12 +4318,10 @@ class GraphRAGService:
         seed_abstract = str(seed_paper.get("abstract") or "")
 
         citation_graph = self._build_citation_graph(normalized_papers)
-        entity_counter: Counter[str] = Counter()
         entity_type_map: dict[str, str] = {}
         paper_entities: dict[str, set[str]] = defaultdict(set)
         paper_domains: dict[str, set[str]] = defaultdict(set)
-        domain_counter: Counter[str] = Counter()
-        domain_entities: dict[str, set[str]] = defaultdict(set)
+        paper_primary_domain: dict[str, str] = {}
         max_citation_count = max(
             1,
             max((self._safe_int(paper.get("citation_count")) for paper in normalized_papers), default=1),
@@ -3636,16 +4352,9 @@ class GraphRAGService:
             )
             concept_names: set[str] = set()
             for entity_name, entity_type, _score in extracted_entities:
-                entity_counter[entity_name] += 1
                 entity_type_map[entity_name] = entity_type
                 paper_entities[paper_id].add(entity_name)
                 concept_names.add(entity_name)
-
-            domains = self._extract_domains(paper, query)
-            for domain in domains:
-                domain_counter[domain] += 1
-                paper_domains[paper_id].add(domain)
-                domain_entities[domain].update(paper_entities[paper_id])
 
             paper_records.append(
                 {
@@ -3663,10 +4372,50 @@ class GraphRAGService:
                     "venue": str(paper.get("venue") or "Unknown Venue"),
                     "year": year_value,
                     "url": str(paper.get("url") or ""),
+                    "fields_of_study": list(paper.get("fields_of_study") or []),
                     "concepts": concept_names,
                     "internal_citations": self._safe_int(internal_citations_by_id.get(paper_id)),
                 }
             )
+
+        seed_domain_candidates: list[str] = []
+        for record in paper_records:
+            for field in (record.get("fields_of_study") or []):
+                normalized = str(field or "").strip()
+                if normalized:
+                    seed_domain_candidates.append(normalized)
+        domain_specs: list[GraphDomainSpec] = build_graph_domain_specs(
+            query=query,
+            target_domains=self._TARGET_GRAPH_DOMAINS,
+            seed_domains=seed_domain_candidates,
+        )
+        per_domain_min_papers = max(
+            4,
+            min(
+                12,
+                len(paper_records) // max(1, len(domain_specs)),
+            ),
+        )
+        assigned_domains, paper_primary_domain, domain_counter = assign_papers_to_graph_domains(
+            papers=paper_records,
+            domain_specs=domain_specs,
+            score_relevance=lambda domain_name, title, abstract: self._compute_relevance(
+                query=domain_name,
+                title=title,
+                abstract=abstract,
+            ),
+            score_title_overlap=lambda domain_name, title: self._title_token_overlap(domain_name, title),
+            min_papers_per_domain=per_domain_min_papers,
+            max_domains_per_paper=2,
+        )
+        for paper_id, domains in assigned_domains.items():
+            if not domains:
+                continue
+            paper_domains[paper_id].update(domains)
+        for record in paper_records:
+            paper_id = str(record.get("paper_id") or "").strip()
+            record["primary_domain"] = str(paper_primary_domain.get(paper_id, "") or "")
+        domain_order = [str(spec.name or "").strip() for spec in domain_specs if str(spec.name or "").strip()]
 
         seed_concepts = paper_entities.get(seed_paper_id, set())
         scored_papers_payload: list[dict[str, Any]] = []
@@ -3713,18 +4462,59 @@ class GraphRAGService:
             str(item.get("id") or ""): item
             for item in scored_papers
         }
-        graph_summary = self._build_aha_summary_with_llm(query, scored_papers)
+        selected_records, effective_relevance_by_id, selection_stats = self._select_papers_for_graph(
+            paper_records=paper_records,
+            score_payload_by_id=score_payload_by_id,
+            scored_by_id=scored_by_id,
+            seed_paper_id=seed_paper_id,
+            paper_primary_domain=paper_primary_domain,
+            paper_domains_by_id=assigned_domains,
+            domain_order=domain_order,
+        )
+        selected_paper_ids = {
+            str(record.get("paper_id") or "").strip()
+            for record in selected_records
+            if str(record.get("paper_id") or "").strip()
+        }
+        selected_scored_papers: list[dict[str, Any]] = []
+        for item in scored_papers:
+            paper_id = str(item.get("id") or "").strip()
+            if not paper_id or paper_id not in selected_paper_ids:
+                continue
+            normalized_item = dict(item)
+            normalized_item["query_relevance"] = max(
+                self._MIN_PAPER_RELEVANCE,
+                min(
+                    1.0,
+                    self._safe_float(effective_relevance_by_id.get(paper_id, normalized_item.get("query_relevance", 0.0))),
+                ),
+            )
+            selected_scored_papers.append(normalized_item)
 
-        for record in paper_records:
+        graph_summary = self._build_aha_summary_with_llm(query, selected_scored_papers)
+
+        for record in selected_records:
             paper_id = record["paper_id"]
             score_payload = score_payload_by_id.get(paper_id) or {}
             scored = scored_by_id.get(paper_id) or {}
 
-            importance_score = max(0.0, min(100.0, float(scored.get("importance_score", 0.0))))
-            tier = int(scored.get("tier", 3) or 3)
-            node_size = max(12.0, float(scored.get("node_size", record["base_size"])))
-            node_color_weight = max(0.0, min(1.0, float(scored.get("node_color_weight", importance_score / 100.0))))
-            relevance = max(0.0, min(1.0, float(score_payload.get("relevance", 0.0))))
+            importance_score = max(0.0, min(100.0, self._safe_float(scored.get("importance_score", 0.0))))
+            raw_tier = self._safe_int(scored.get("tier", 3))
+            tier = raw_tier if raw_tier in (1, 2, 3) else 3
+            node_size = max(12.0, self._safe_float(scored.get("node_size", record["base_size"])))
+            node_color_weight = max(
+                0.0,
+                min(1.0, self._safe_float(scored.get("node_color_weight", importance_score / 100.0))),
+            )
+            relevance = max(
+                0.0,
+                min(
+                    1.0,
+                    self._safe_float(effective_relevance_by_id.get(paper_id, score_payload.get("relevance", 0.0))),
+                ),
+            )
+            if paper_id != seed_paper_id:
+                relevance = max(self._MIN_PAPER_RELEVANCE, relevance)
 
             paper_nodes.append(
                 KnowledgeGraphNode(
@@ -3748,9 +4538,9 @@ class GraphRAGService:
                         "citation_count": str(record["citation_count"]),
                         "relevance": f"{relevance:.3f}",
                         "influence": f"{record['influence']:.3f}",
-                        "citation_relation_score": f"{float(score_payload.get('citation_relation_score', 0.0)):.3f}",
-                        "semantic_similarity_score": f"{float(score_payload.get('semantic_similarity_score', 0.0)):.3f}",
-                        "concept_overlap_score": f"{float(score_payload.get('concept_overlap_score', 0.0)):.3f}",
+                        "citation_relation_score": f"{self._safe_float(score_payload.get('citation_relation_score', 0.0)):.3f}",
+                        "semantic_similarity_score": f"{self._safe_float(score_payload.get('semantic_similarity_score', 0.0)):.3f}",
+                        "concept_overlap_score": f"{self._safe_float(score_payload.get('concept_overlap_score', 0.0)):.3f}",
                         "internal_citations": str(record["internal_citations"]),
                         "importance_score": f"{importance_score:.1f}",
                         "tier": str(max(1, min(3, tier))),
@@ -3760,21 +4550,60 @@ class GraphRAGService:
                 )
             )
 
-        entity_nodes = self._build_entity_nodes(entity_counter, entity_type_map)
-        domain_nodes = self._build_domain_nodes(domain_counter)
-        edges = self._build_edges(
-            paper_nodes=paper_nodes,
-            entity_counter=entity_counter,
+        selected_node_paper_ids = {
+            str(node.paper_id or "").strip()
+            for node in paper_nodes
+            if str(node.paper_id or "").strip()
+        }
+        (
+            filtered_entity_counter,
+            filtered_domain_counter,
+            filtered_paper_entities,
+            filtered_paper_domains,
+            filtered_domain_entities,
+        ) = self._rebuild_graph_context_for_selected_papers(
+            selected_paper_ids=selected_node_paper_ids,
             paper_entities=paper_entities,
             paper_domains=paper_domains,
-            domain_entities=domain_entities,
+        )
+
+        entity_nodes, entity_id_by_name = self._build_entity_nodes(filtered_entity_counter, entity_type_map)
+        domain_nodes, domain_id_by_name = self._build_domain_nodes(
+            filtered_domain_counter,
+            domain_order=domain_order,
+        )
+        edges = self._build_edges(
+            paper_nodes=paper_nodes,
+            entity_counter=filtered_entity_counter,
+            paper_entities=filtered_paper_entities,
+            paper_domains=filtered_paper_domains,
+            domain_entities=filtered_domain_entities,
+            entity_id_by_name=entity_id_by_name,
+            domain_id_by_name=domain_id_by_name,
         )
         insight_payload = {
             "summary": graph_summary,
             "tier_counts": {
-                "tier1": sum(1 for item in scored_papers if int(item.get("tier", 3)) == 1),
-                "tier2": sum(1 for item in scored_papers if int(item.get("tier", 3)) == 2),
-                "tier3": sum(1 for item in scored_papers if int(item.get("tier", 3)) == 3),
+                "tier1": sum(1 for item in selected_scored_papers if int(item.get("tier", 3)) == 1),
+                "tier2": sum(1 for item in selected_scored_papers if int(item.get("tier", 3)) == 2),
+                "tier3": sum(1 for item in selected_scored_papers if int(item.get("tier", 3)) == 3),
+            },
+            "paper_selection": {
+                "min_relevance": self._MIN_PAPER_RELEVANCE,
+                "min_target_count": self._MIN_GRAPH_PAPER_NODES,
+                **selection_stats,
+            },
+            "paper_year_range": {
+                "paper_range_years": self._normalize_paper_range_years(paper_range_years),
+                **range_filter_stats,
+            },
+            "language_filter": {
+                "policy": "english_only",
+                "removed_non_english": non_english_removed_count,
+            },
+            "graph_domains": {
+                "target_count": self._TARGET_GRAPH_DOMAINS,
+                "expanded_domains": domain_order,
             },
         }
         return paper_nodes, entity_nodes, domain_nodes, edges, insight_payload
@@ -4320,13 +5149,21 @@ class GraphRAGService:
         self,
         entity_counter: Counter[str],
         entity_type_map: dict[str, str],
-    ) -> list[KnowledgeGraphNode]:
+    ) -> tuple[list[KnowledgeGraphNode], dict[str, str]]:
         nodes: list[KnowledgeGraphNode] = []
+        entity_id_by_name: dict[str, str] = {}
+        occupied_ids: set[str] = set()
         for name, frequency in entity_counter.most_common(120):
             size = 4.0 + min(12.0, frequency * 1.6)
+            node_id = self._allocate_unique_node_id(
+                prefix="entity",
+                slug=self._slug(name),
+                occupied_ids=occupied_ids,
+            )
+            entity_id_by_name[name] = node_id
             nodes.append(
                 KnowledgeGraphNode(
-                    id=f"entity:{self._slug(name)}",
+                    id=node_id,
                     label=name,
                     type="entity",
                     size=round(size, 2),
@@ -4334,22 +5171,51 @@ class GraphRAGService:
                     meta={"entity_type": entity_type_map.get(name, "concept")},
                 )
             )
-        return nodes
+        return nodes, entity_id_by_name
 
-    def _build_domain_nodes(self, domain_counter: Counter[str]) -> list[KnowledgeGraphNode]:
+    def _build_domain_nodes(
+        self,
+        domain_counter: Counter[str],
+        domain_order: list[str] | None = None,
+    ) -> tuple[list[KnowledgeGraphNode], dict[str, str]]:
         nodes: list[KnowledgeGraphNode] = []
-        for domain, frequency in domain_counter.most_common(24):
+        domain_id_by_name: dict[str, str] = {}
+        occupied_ids: set[str] = set()
+        ordered_domains: list[str] = []
+        for domain_name in (domain_order or []):
+            normalized = str(domain_name or "").strip()
+            if not normalized or normalized in ordered_domains:
+                continue
+            ordered_domains.append(normalized)
+        for domain_name, _frequency in domain_counter.most_common(24):
+            normalized = str(domain_name or "").strip()
+            if not normalized or normalized in ordered_domains:
+                continue
+            ordered_domains.append(normalized)
+
+        for index, domain in enumerate(ordered_domains[:24]):
+            raw_frequency = max(0, int(domain_counter.get(domain, 0)))
+            frequency_for_size = max(1, raw_frequency)
+            node_id = self._allocate_unique_node_id(
+                prefix="domain",
+                slug=f"{index}:{self._slug(domain)}",
+                occupied_ids=occupied_ids,
+            )
+            domain_id_by_name[domain] = node_id
             nodes.append(
                 KnowledgeGraphNode(
-                    id=f"domain:{self._slug(domain)}",
+                    id=node_id,
                     label=domain,
                     type="domain",
-                    size=6.0 + frequency * 1.8,
-                    score=round(min(1.0, frequency / 12.0), 3),
-                    meta={},
+                    size=6.0 + frequency_for_size * 1.8,
+                    score=round(min(1.0, raw_frequency / 12.0), 3),
+                    meta={
+                        "order": str(index + 1),
+                        "paper_count": str(raw_frequency),
+                    },
                 )
             )
-        return nodes
+        return nodes, domain_id_by_name
 
     def _build_edges(
         self,
@@ -4358,17 +5224,22 @@ class GraphRAGService:
         paper_entities: dict[str, set[str]],
         paper_domains: dict[str, set[str]],
         domain_entities: dict[str, set[str]],
+        entity_id_by_name: dict[str, str],
+        domain_id_by_name: dict[str, str],
     ) -> list[KnowledgeGraphEdge]:
         edges: list[KnowledgeGraphEdge] = []
 
         for paper in paper_nodes:
             paper_id = paper.paper_id or ""
             for entity_name in sorted(paper_entities.get(paper_id, set())):
+                target_id = entity_id_by_name.get(entity_name)
+                if not target_id:
+                    continue
                 weight = min(1.0, 0.25 + entity_counter.get(entity_name, 0) * 0.12)
                 edges.append(
                     KnowledgeGraphEdge(
                         source=paper.id,
-                        target=f"entity:{self._slug(entity_name)}",
+                        target=target_id,
                         relation="mentions",
                         weight=round(weight, 3),
                         meta={
@@ -4379,10 +5250,13 @@ class GraphRAGService:
                 )
 
             for domain in sorted(paper_domains.get(paper_id, set())):
+                target_domain_id = domain_id_by_name.get(domain)
+                if not target_domain_id:
+                    continue
                 edges.append(
                     KnowledgeGraphEdge(
                         source=paper.id,
-                        target=f"domain:{self._slug(domain)}",
+                        target=target_domain_id,
                         relation="belongs_to",
                         weight=0.8,
                         meta={
@@ -4418,14 +5292,20 @@ class GraphRAGService:
                 )
             )
 
-        edges.extend(sorted(related_edges, key=lambda item: item.weight, reverse=True)[:40])
+        edges.extend(sorted(related_edges, key=lambda item: item.weight, reverse=True)[:80])
 
         for domain, entities in sorted(domain_entities.items()):
+            source_domain_id = domain_id_by_name.get(domain)
+            if not source_domain_id:
+                continue
             for entity_name in sorted(entities):
+                target_entity_id = entity_id_by_name.get(entity_name)
+                if not target_entity_id:
+                    continue
                 edges.append(
                     KnowledgeGraphEdge(
-                        source=f"domain:{self._slug(domain)}",
-                        target=f"entity:{self._slug(entity_name)}",
+                        source=source_domain_id,
+                        target=target_entity_id,
                         relation="covers",
                         weight=round(min(1.0, 0.2 + entity_counter.get(entity_name, 0) * 0.1), 3),
                         meta={"domain": domain, "entity": entity_name},
@@ -4453,6 +5333,27 @@ class GraphRAGService:
         lowered = text.strip().lower()
         slug = re.sub(r"[^a-z0-9]+", "-", lowered).strip("-")
         return slug or "node"
+
+    @staticmethod
+    def _allocate_unique_node_id(
+        *,
+        prefix: str,
+        slug: str,
+        occupied_ids: set[str],
+    ) -> str:
+        safe_prefix = str(prefix or "").strip().lower() or "node"
+        safe_slug = str(slug or "").strip().lower() or "node"
+        base = f"{safe_prefix}:{safe_slug}"
+        if base not in occupied_ids:
+            occupied_ids.add(base)
+            return base
+        suffix = 2
+        while True:
+            candidate = f"{base}-{suffix}"
+            if candidate not in occupied_ids:
+                occupied_ids.add(candidate)
+                return candidate
+            suffix += 1
 
     @staticmethod
     def _build_summary(

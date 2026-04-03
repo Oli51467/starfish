@@ -5,7 +5,7 @@ import { generateMap, getMap, getTask } from '../api';
 const mapInput = ref({
   input_type: '',
   input_value: '',
-  paper_range_years: '10',
+  paper_range_years: '',
   quick_mode: true,
   depth: 2
 });

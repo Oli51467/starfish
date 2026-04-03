@@ -256,7 +256,7 @@ function toNodeId(raw, fallback) {
 function buildRetrievalPreviewGraph(query, papers) {
   const safeQuery = String(query || '').trim();
   const sourcePapers = Array.isArray(papers) ? papers : [];
-  const topPapers = sourcePapers.slice(0, 12);
+  const topPapers = sourcePapers.slice(0, 20);
   const maxCitation = Math.max(1, ...topPapers.map((paper) => Number(paper?.citation_count || 0)));
 
   const nodes = topPapers
@@ -2940,7 +2940,7 @@ export function usePaperWorkflow({
 
     const result = await buildKnowledgeGraph({
       query: retrievalQuery,
-      max_papers: 24,
+      max_papers: 120,
       max_entities_per_paper: 6,
       prefetched_papers: retrieval.papers || [],
       research_type: inputType || 'unknown',
@@ -2991,7 +2991,7 @@ export function usePaperWorkflow({
         input_type: inputType,
         quick_mode: quickMode,
         paper_range_years: paperRangeYears,
-        max_papers: 24
+        max_papers: 120
       });
 
       const retrievalQuery = String(retrieval?.query || seed.input_value).trim() || seed.input_value;

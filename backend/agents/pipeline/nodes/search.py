@@ -12,8 +12,8 @@ from services.pipeline_runtime_service import get_pipeline_runtime_service
 
 _NODE = "search"
 _MIN_SEARCH_PAPERS = 6
-_TIER1_PREVIEW_PAPER_LIMIT = 5
-_MAX_SEARCH_PAPERS = 60
+_TIER1_PREVIEW_PAPER_LIMIT = 8
+_MAX_SEARCH_PAPERS = 180
 
 
 def _runtime_event_enabled(state: PipelineState) -> bool:

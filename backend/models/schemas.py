@@ -276,9 +276,10 @@ class MapResponse(BaseModel):
 
 class KnowledgeGraphBuildRequest(BaseModel):
     query: str = Field(..., min_length=2)
-    max_papers: int = Field(default=24, ge=3, le=60)
+    max_papers: int = Field(default=36, ge=3, le=180)
     max_entities_per_paper: int = Field(default=6, ge=2, le=12)
     prefetched_papers: list["RetrievedPaper"] = Field(default_factory=list)
+    paper_range_years: int | None = Field(default=None, ge=1, le=30)
     research_type: ResearchType = "unknown"
     search_input: str = ""
     search_range: str = ""
@@ -286,7 +287,7 @@ class KnowledgeGraphBuildRequest(BaseModel):
 
 class KnowledgeGraphRetrieveRequest(BaseModel):
     query: str = Field(..., min_length=2)
-    max_papers: int = Field(default=24, ge=3, le=60)
+    max_papers: int = Field(default=36, ge=3, le=180)
     input_type: KnowledgeGraphRetrieveInputType = "domain"
     quick_mode: bool = False
     paper_range_years: int | None = Field(default=None, ge=1, le=30)

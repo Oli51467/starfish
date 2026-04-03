@@ -72,7 +72,7 @@ class MultiSourceRetriever:
                 "source_stats": [],
             }
 
-        safe_limit = max(1, min(int(limit), 120))
+        safe_limit = max(1, min(int(limit), 180))
         provider_order = self._ordered_provider_names(preferred_provider=preferred_provider, for_seed=False)
         if not provider_order:
             return {

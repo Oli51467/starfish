@@ -4,11 +4,14 @@ import asyncio
 from typing import Any
 
 from agents.pipeline.state import PipelineState, append_message
-from models.schemas import KnowledgeGraphBuildRequest, RetrievedPaper
+from models.schemas import KnowledgeGraphBuildRequest, KnowledgeGraphRetrieveRequest, RetrievedPaper
 from services.graphrag_service import get_graphrag_service
 from services.pipeline_runtime_service import get_pipeline_runtime_service
 
 _NODE = "graph_build"
+_MIN_PREFETCHED_PAPERS = 48
+_TARGET_PREFETCHED_PAPERS = 72
+_MAX_BUILD_PAPERS = 180
 
 
 def _runtime_event_enabled(state: PipelineState) -> bool:
@@ -38,6 +41,46 @@ def _resolve_node_kind(node: dict[str, Any]) -> str:
 def _resolve_node_tier(node: dict[str, Any]) -> int:
     meta = node.get("meta") if isinstance(node.get("meta"), dict) else {}
     return max(1, min(3, _safe_int(meta.get("tier", node.get("tier", 3)), 3)))
+
+
+def _normalize_retrieve_input_type(raw_value: Any) -> str:
+    normalized = str(raw_value or "").strip().lower()
+    if normalized in {"arxiv_id", "doi"}:
+        return normalized
+    return "domain"
+
+
+def _paper_identity(paper: RetrievedPaper) -> str:
+    paper_id = str(getattr(paper, "paper_id", "") or "").strip().lower()
+    if paper_id:
+        return f"id:{paper_id}"
+    title = str(getattr(paper, "title", "") or "").strip().lower()
+    if title:
+        return f"title:{title}"
+    return ""
+
+
+def _merge_prefetched_papers(
+    primary: list[RetrievedPaper],
+    secondary: list[RetrievedPaper],
+    *,
+    limit: int = _MAX_BUILD_PAPERS,
+) -> list[RetrievedPaper]:
+    merged: list[RetrievedPaper] = []
+    seen: set[str] = set()
+    for source in (primary, secondary):
+        for item in source:
+            if not isinstance(item, RetrievedPaper):
+                continue
+            key = _paper_identity(item)
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            merged.append(item)
+            if len(merged) >= max(1, int(limit)):
+                return merged
+    return merged
 
 
 def _build_graph_stream_stage_payload(
@@ -109,11 +152,67 @@ async def graph_build_node(state: PipelineState) -> PipelineState:
         RetrievedPaper.model_validate(item)
         for item in (state.get("papers") or [])
     ]
+    if len(prefetched_papers) < _MIN_PREFETCHED_PAPERS:
+        base_query = str(state.get("input_value") or "").strip()
+        if base_query:
+            try:
+                retrieve_request = KnowledgeGraphRetrieveRequest(
+                    query=base_query,
+                    max_papers=min(_MAX_BUILD_PAPERS, _TARGET_PREFETCHED_PAPERS + 36),
+                    input_type=_normalize_retrieve_input_type(state.get("input_type")),
+                    quick_mode=bool(state.get("quick_mode")),
+                    paper_range_years=state.get("paper_range_years"),
+                )
+                supplemental = await asyncio.to_thread(graphrag_service.retrieve_papers, retrieve_request)
+                prefetched_papers = _merge_prefetched_papers(
+                    prefetched_papers,
+                    list(supplemental.papers or []),
+                    limit=_MAX_BUILD_PAPERS,
+                )
+                if retrieve_request.input_type == "domain":
+                    expanded_domains = graphrag_service.expand_graph_domains(
+                        query=base_query,
+                        target_domains=5,
+                    )
+                    domain_requests = []
+                    for domain_query in expanded_domains:
+                        normalized_domain_query = str(domain_query or "").strip()
+                        if not normalized_domain_query:
+                            continue
+                        domain_requests.append(
+                            retrieve_request.model_copy(
+                                update={
+                                    "query": normalized_domain_query,
+                                    "max_papers": min(_MAX_BUILD_PAPERS, 30),
+                                }
+                            )
+                        )
+                    if domain_requests:
+                        domain_results = await asyncio.gather(
+                            *[
+                                asyncio.to_thread(graphrag_service.retrieve_papers, domain_request)
+                                for domain_request in domain_requests
+                            ],
+                            return_exceptions=True,
+                        )
+                        for domain_result in domain_results:
+                            if isinstance(domain_result, Exception):
+                                continue
+                            prefetched_papers = _merge_prefetched_papers(
+                                prefetched_papers,
+                                list(domain_result.papers or []),
+                                limit=_MAX_BUILD_PAPERS,
+                            )
+            except Exception:  # noqa: BLE001
+                # Retrieval补充失败时继续使用已有候选，避免阻断建图主流程。
+                pass
+
     request = KnowledgeGraphBuildRequest(
         query=str(state.get("input_value") or "").strip(),
-        max_papers=min(60, max(3, len(prefetched_papers) or 24)),
+        max_papers=min(_MAX_BUILD_PAPERS, max(_TARGET_PREFETCHED_PAPERS, len(prefetched_papers) or 36)),
         max_entities_per_paper=6,
         prefetched_papers=prefetched_papers,
+        paper_range_years=state.get("paper_range_years"),
         research_type=str(state.get("input_type") or "unknown"),
         search_input=str(state.get("input_value") or "").strip(),
         search_range=_format_search_range(

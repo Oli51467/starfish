@@ -1,9 +1,13 @@
 <template>
   <aside class="paper-workflow-panel panel">
-    <div class="paper-workflow-progress-row">
+    <div class="paper-workflow-progress-row" :class="{ 'is-animating': isWorkflowAnimating }">
       <p class="paper-workflow-progress-title">研究进度</p>
       <div class="paper-workflow-progress-track">
-        <div class="paper-workflow-progress-fill" :style="{ width: `${safeProgress}%` }"></div>
+        <div
+          class="paper-workflow-progress-fill"
+          :class="{ 'is-animating': isWorkflowAnimating }"
+          :style="{ width: `${safeProgress}%` }"
+        ></div>
       </div>
       <p class="paper-workflow-progress-text mono">{{ safeProgress }}%</p>
       <button
@@ -24,9 +28,20 @@
 
     <WorkflowStageStrip class="paper-workflow-stage-strip" :steps="steps" />
 
+    <div v-if="showStepWindowToggle" class="paper-workflow-step-window-row">
+      <p class="paper-workflow-step-window-hint mono">仅显示关键步骤（上一步 / 当前 / 下一步）</p>
+      <button
+        class="paper-workflow-step-window-btn mono"
+        type="button"
+        @click="toggleStepWindowExpanded"
+      >
+        {{ isStepWindowExpanded ? '收起关键步骤' : '展开全部步骤' }}
+      </button>
+    </div>
+
     <div class="paper-workflow-step-list">
       <article
-        v-for="(step, index) in steps"
+        v-for="(step, index) in renderedSteps"
         :key="step.key || index"
         class="paper-workflow-step-item"
         :class="`is-${stepStatus(step.status)}`"
@@ -307,6 +322,125 @@ const safeProgress = computed(() => {
   const value = Number(props.progress);
   if (!Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(100, Math.round(value)));
+});
+
+const normalizedSteps = computed(() => (Array.isArray(props.steps) ? props.steps : []));
+const isStepWindowExpanded = ref(false);
+const hasFailedStep = computed(() => normalizedSteps.value.some((step) => normalizeStatus(step?.status) === 'failed'));
+const hasActiveStep = computed(() => normalizedSteps.value.some((step) => normalizeStatus(step?.status) === 'active'));
+const isWorkflowAnimating = computed(() => {
+  if (hasActiveStep.value) return true;
+  if (safeProgress.value <= 0 || safeProgress.value >= 100) return false;
+  return !hasFailedStep.value;
+});
+
+function resolveActiveStepIndex(stepList) {
+  const activeIndex = stepList.findIndex((step) => normalizeStatus(step?.status) === 'active');
+  if (activeIndex >= 0) return activeIndex;
+  const pausedIndex = stepList.findIndex((step) => normalizeStatus(step?.status) === 'paused');
+  if (pausedIndex >= 0) return pausedIndex;
+  const failedIndex = stepList.findIndex((step) => normalizeStatus(step?.status) === 'failed');
+  if (failedIndex >= 0) return failedIndex;
+  const pendingIndex = stepList.findIndex((step) => normalizeStatus(step?.status) === 'pending');
+  if (pendingIndex >= 0) return pendingIndex;
+  for (let index = stepList.length - 1; index >= 0; index -= 1) {
+    if (normalizeStatus(stepList[index]?.status) === 'done') return index;
+  }
+  return 0;
+}
+
+function resolvePreviousCompletedStepIndex(stepList, currentIndex) {
+  for (let index = currentIndex - 1; index >= 0; index -= 1) {
+    if (normalizeStatus(stepList[index]?.status) === 'done') return index;
+  }
+  return currentIndex > 0 ? currentIndex - 1 : -1;
+}
+
+function resolveNextPlannedStepIndex(stepList, currentIndex) {
+  for (let index = currentIndex + 1; index < stepList.length; index += 1) {
+    if (normalizeStatus(stepList[index]?.status) === 'pending') return index;
+  }
+  return currentIndex + 1 < stepList.length ? currentIndex + 1 : -1;
+}
+
+function buildCompactStepIndexes(stepList, anchorIndex) {
+  if (!Array.isArray(stepList) || !stepList.length) return [];
+  const currentIndex = Number.isFinite(anchorIndex) && anchorIndex >= 0
+    ? Math.min(stepList.length - 1, Math.round(anchorIndex))
+    : resolveActiveStepIndex(stepList);
+
+  const indexes = [];
+  const pushIndex = (index) => {
+    if (!Number.isFinite(index)) return;
+    const safeIndex = Math.round(index);
+    if (safeIndex < 0 || safeIndex >= stepList.length) return;
+    if (indexes.includes(safeIndex)) return;
+    if (indexes.length >= 3) return;
+    indexes.push(safeIndex);
+  };
+
+  pushIndex(resolvePreviousCompletedStepIndex(stepList, currentIndex));
+  pushIndex(currentIndex);
+  pushIndex(resolveNextPlannedStepIndex(stepList, currentIndex));
+
+  if (indexes.length < 3) {
+    let leftCursor = currentIndex - 1;
+    let rightCursor = currentIndex + 1;
+    while (indexes.length < 3 && (leftCursor >= 0 || rightCursor < stepList.length)) {
+      pushIndex(leftCursor);
+      pushIndex(rightCursor);
+      leftCursor -= 1;
+      rightCursor += 1;
+    }
+  }
+
+  if (indexes.length < 3) {
+    for (let index = 0; index < stepList.length && indexes.length < 3; index += 1) {
+      pushIndex(index);
+    }
+  }
+
+  return [...indexes].sort((left, right) => left - right);
+}
+
+const insightStepIndex = computed(() => normalizedSteps.value.findIndex(
+  (step) => String(step?.key || '').trim().toLowerCase() === 'insight'
+));
+
+const isInsightGenerating = computed(() => {
+  const index = insightStepIndex.value;
+  if (index < 0) return false;
+  return normalizeStatus(normalizedSteps.value[index]?.status) === 'active';
+});
+
+const compactStepIndexes = computed(() => {
+  const stepList = normalizedSteps.value;
+  if (!stepList.length) return [];
+  const anchorIndex = insightStepIndex.value >= 0 ? insightStepIndex.value : resolveActiveStepIndex(stepList);
+  return buildCompactStepIndexes(stepList, anchorIndex);
+});
+
+const showStepWindowToggle = computed(() => {
+  if (!isInsightGenerating.value) return false;
+  return normalizedSteps.value.length > compactStepIndexes.value.length;
+});
+
+const renderedSteps = computed(() => {
+  const stepList = normalizedSteps.value;
+  if (!showStepWindowToggle.value || isStepWindowExpanded.value) {
+    return stepList;
+  }
+  return compactStepIndexes.value.map((index) => stepList[index]).filter(Boolean);
+});
+
+function toggleStepWindowExpanded() {
+  isStepWindowExpanded.value = !isStepWindowExpanded.value;
+}
+
+watch(isInsightGenerating, (nextValue, previousValue) => {
+  if (nextValue !== previousValue) {
+    isStepWindowExpanded.value = false;
+  }
 });
 
 const collapsedStepState = ref(Object.create(null));
@@ -783,9 +917,25 @@ function isStepActionDisabled(step) {
 }
 
 .paper-workflow-progress-fill {
+  position: relative;
   height: 100%;
   background: var(--accent);
   transition: width 0.2s ease;
+  overflow: hidden;
+}
+
+.paper-workflow-progress-fill.is-animating {
+  background: repeating-linear-gradient(
+    -45deg,
+    color-mix(in srgb, var(--accent) 94%, var(--bg)) 0 8px,
+    color-mix(in srgb, var(--accent) 78%, var(--bg)) 8px 16px
+  );
+  background-size: 28px 100%;
+  animation: paper-workflow-progress-flow 1.1s linear infinite;
+}
+
+.paper-workflow-progress-row.is-animating .paper-workflow-progress-text {
+  color: var(--text);
 }
 
 .paper-workflow-progress-stop-btn {
@@ -818,6 +968,46 @@ function isStepActionDisabled(step) {
   border-color: var(--line);
   background: var(--panel);
   cursor: not-allowed;
+}
+
+.paper-workflow-step-window-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.paper-workflow-step-window-hint {
+  margin: 0;
+  font-size: 10px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.paper-workflow-step-window-btn {
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+  white-space: nowrap;
+}
+
+.paper-workflow-step-window-btn:hover {
+  background: var(--panel);
+  border-color: var(--line-2);
+}
+
+.paper-workflow-step-window-btn:focus-visible {
+  outline: 1px solid var(--line-2);
+  outline-offset: 1px;
 }
 
 .paper-workflow-step-list {
@@ -869,6 +1059,8 @@ function isStepActionDisabled(step) {
 
 .paper-workflow-step-item.is-active .paper-workflow-step-indicator {
   color: var(--accent);
+  transform-origin: center;
+  animation: paper-workflow-step-indicator-pulse 1.25s ease-in-out infinite;
 }
 
 .paper-workflow-step-main {
@@ -1333,10 +1525,48 @@ function isStepActionDisabled(step) {
   box-shadow: inset 0 0 0 1px var(--line-2);
 }
 
+@keyframes paper-workflow-progress-flow {
+  from {
+    background-position: 0 0;
+  }
+
+  to {
+    background-position: 28px 0;
+  }
+}
+
+@keyframes paper-workflow-step-indicator-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  50% {
+    opacity: 0.55;
+    transform: scale(1.15);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .paper-workflow-progress-fill.is-animating,
+  .paper-workflow-step-item.is-active .paper-workflow-step-indicator {
+    animation: none;
+  }
+}
+
 @media (max-width: 980px) {
   .paper-workflow-panel {
     min-height: auto;
     height: auto;
+  }
+
+  .paper-workflow-step-window-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .paper-workflow-step-window-btn {
+    justify-self: start;
   }
 
   .paper-workflow-step-list {

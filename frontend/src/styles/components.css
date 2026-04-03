@@ -494,13 +494,14 @@
 }
 
 .paper-node-keyword-chip {
-  border: 1px solid #D7DFEA;
+  border: 1px solid var(--line-2);
   border-radius: 999px;
   padding: 2px 8px;
   font-size: 10px;
   line-height: 1.6;
-  color: #657993;
-  background: #FAFCFF;
+  color: var(--muted);
+  background: var(--panel);
+  transition: border-color 0.2s ease, color 0.2s ease, background-color 0.2s ease;
 }
 
 .paper-node-metrics-grid {
@@ -916,6 +917,185 @@
   box-shadow: var(--shadow-soft);
 }
 
+.knowledge-edge-card-overlay {
+  position: absolute;
+  width: 460px;
+  max-width: min(62vw, 540px);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-lg);
+  background: var(--bg);
+  box-shadow: var(--shadow-soft);
+  padding: 12px;
+  z-index: 12;
+  display: grid;
+  gap: 10px;
+  overflow: auto;
+  pointer-events: auto;
+}
+
+.knowledge-edge-card-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+}
+
+.knowledge-edge-card-head-main {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.knowledge-edge-card-title {
+  margin: 0;
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+
+.knowledge-edge-card-subtitle {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.knowledge-edge-card-bridge {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  padding: 8px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.knowledge-edge-node-link,
+.knowledge-edge-node-name {
+  margin: 0;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  text-decoration: none;
+}
+
+.knowledge-edge-node-link:hover {
+  text-decoration: underline;
+}
+
+.knowledge-edge-node-arrow {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.knowledge-edge-card-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.knowledge-edge-metric-chip {
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 10px;
+  line-height: 1.5;
+  padding: 1px 7px;
+}
+
+.knowledge-edge-strength-track {
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.knowledge-edge-strength-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--accent) 88%, var(--bg)),
+    color-mix(in srgb, var(--success) 68%, var(--bg))
+  );
+}
+
+.knowledge-edge-card-entities {
+  display: grid;
+  gap: 6px;
+}
+
+.knowledge-edge-section-title {
+  margin: 0;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.knowledge-edge-entity-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.knowledge-edge-entity-chip {
+  border: 1px solid color-mix(in srgb, var(--accent) 36%, var(--line));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg));
+  color: var(--accent);
+  font-size: 10px;
+  line-height: 1.5;
+  padding: 1px 7px;
+}
+
+.knowledge-edge-card-papers {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.knowledge-edge-paper-item {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  padding: 7px;
+  display: grid;
+  gap: 4px;
+}
+
+.knowledge-edge-paper-label {
+  margin: 0;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.knowledge-edge-paper-name {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text);
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.knowledge-edge-paper-meta {
+  margin: 0;
+  font-size: 10px;
+  color: var(--muted);
+}
+
 .paper-node-title {
   color: var(--text);
 }
@@ -985,8 +1165,8 @@
 
 .paper-node-keyword-chip {
   border-color: var(--line-2);
-  color: #505050;
-  background: #fafafa;
+  color: var(--muted);
+  background: var(--panel);
 }
 
 .paper-node-metric {
@@ -1329,11 +1509,12 @@
 .direction-paper-list-item-tag {
   border: 1px solid var(--line-2);
   border-radius: 999px;
-  background: #fafafa;
-  color: #4b5563;
+  background: var(--panel);
+  color: var(--muted);
   font-size: 10px;
   line-height: 1.5;
   padding: 1px 7px;
+  transition: border-color 0.2s ease, color 0.2s ease, background-color 0.2s ease;
 }
 
 .direction-paper-list-item-abstract {
@@ -1369,10 +1550,43 @@
 .paper-node-domain-tag {
   border: 1px solid var(--line-2);
   border-radius: 999px;
-  background: #fff;
-  color: #525252;
+  background: var(--panel);
+  color: var(--muted);
   font-size: 10px;
   padding: 2px 8px;
+  transition: border-color 0.2s ease, color 0.2s ease, background-color 0.2s ease;
+}
+
+.paper-node-keyword-chip.is-tone-accent,
+.direction-paper-list-item-tag.is-tone-accent,
+.paper-node-domain-tag.is-tone-accent {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--line));
+  color: color-mix(in srgb, var(--accent) 88%, var(--text));
+  background: color-mix(in srgb, var(--accent) 11%, var(--bg));
+}
+
+.paper-node-keyword-chip.is-tone-success,
+.direction-paper-list-item-tag.is-tone-success,
+.paper-node-domain-tag.is-tone-success {
+  border-color: color-mix(in srgb, var(--success) 42%, var(--line));
+  color: color-mix(in srgb, var(--success) 84%, var(--text));
+  background: color-mix(in srgb, var(--success) 10%, var(--bg));
+}
+
+.paper-node-keyword-chip.is-tone-info,
+.direction-paper-list-item-tag.is-tone-info,
+.paper-node-domain-tag.is-tone-info {
+  border-color: color-mix(in srgb, var(--info) 40%, var(--line));
+  color: color-mix(in srgb, var(--info) 84%, var(--text));
+  background: color-mix(in srgb, var(--info) 10%, var(--bg));
+}
+
+.paper-node-keyword-chip.is-tone-neutral,
+.direction-paper-list-item-tag.is-tone-neutral,
+.paper-node-domain-tag.is-tone-neutral {
+  border-color: var(--line-2);
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel) 78%, var(--bg) 22%);
 }
 
 .paper-node-domain-empty {
@@ -1916,8 +2130,17 @@ html[data-ui-locale='zh'] .workflow-tagline-typing {
     max-width: min(96vw, 520px);
   }
 
+  .knowledge-edge-card-overlay {
+    max-width: min(96vw, 520px);
+    padding: 10px;
+  }
+
   .paper-node-metrics-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .knowledge-edge-card-papers {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .paper-node-domain-row {
